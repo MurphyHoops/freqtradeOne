@@ -1,3 +1,10 @@
+﻿# -*- coding: utf-8 -*-
+"""风险不变式校验模块。
+
+RiskAgent 在每个 finalize 周期后检查组合/单票风险、预约 TTL 以及预约释放
+的一致性，生成结构化的校验报告供日志和监控使用。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,23 +17,27 @@ from .tier import TierManager
 
 @dataclass
 class InvariantViolation:
-    """InvariantViolation 的职责说明。"""
+    """描述一条风险不变式违规记录。"""
+
     code: str
     details: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        """处理 to_dict 的主要逻辑。"""
+        """以字典形式导出，方便序列化。"""
+
         return {"code": self.code, "details": self.details}
 
 
 @dataclass
 class InvariantReport:
-    """InvariantReport 的职责说明。"""
+    """风险校验整体结果。"""
+
     ok: bool
     violations: List[InvariantViolation] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """处理 to_dict 的主要逻辑。"""
+        """将报告转换为可 JSON 序列化的结构。"""
+
         return {
             "ok": self.ok,
             "violations": [v.to_dict() for v in self.violations],
@@ -34,9 +45,17 @@ class InvariantReport:
 
 
 class RiskAgent:
-    """RiskAgent 的职责说明。"""
+    """组合风险约束与预约一致性的检查器。"""
+
     def __init__(self, cfg: V29Config, reservation: ReservationAgent, tier_mgr: TierManager) -> None:
-        """处理 __init__ 的主要逻辑。"""
+        """初始化风险代理。
+
+        Args:
+            cfg: V29Config，用于读取组合 CAP 参数。
+            reservation: ReservationAgent，以获取预约占用情况。
+            tier_mgr: TierManager，提供单票 CAP 阈值。
+        """
+
         self.cfg = cfg
         self.reservation = reservation
         self.tier_mgr = tier_mgr
@@ -44,11 +63,13 @@ class RiskAgent:
         self._ttl_snapshot: Dict[str, int] = {}
 
     def check_invariants(self, state, equity: float, cap_pct: float) -> Dict[str, Any]:
-        """处理 check_invariants 的主要逻辑。"""
+        """执行风险不变式校验并返回结构化结果。"""
+
         violations: List[InvariantViolation] = []
 
         def add(code: str, **details: Any) -> None:
-            """处理 add 的主要逻辑。"""
+            """追加一条违规记录。"""
+
             violations.append(InvariantViolation(code=code, details=details))
 
         cap_abs = cap_pct * equity

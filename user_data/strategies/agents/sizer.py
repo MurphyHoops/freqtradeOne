@@ -1,3 +1,10 @@
+﻿# -*- coding: utf-8 -*-
+"""仓位大小与风险分配计算模块。
+
+SizerAgent 综合基础 VaR、财政拨款、恢复目标与组合/单票 CAP 等限制，
+在 custom_stake_amount 阶段计算实际下单金额与风险敞口。
+"""
+
 from __future__ import annotations
 
 from typing import Optional, Tuple
@@ -8,7 +15,8 @@ from .tier import TierManager
 
 
 class SizerAgent:
-    """SizerAgent 的职责说明。"""
+    """将策略参数与财政分配合成最终仓位的代理。"""
+
     def __init__(
         self,
         state,
@@ -17,7 +25,8 @@ class SizerAgent:
         cfg: V29Config,
         tier_mgr: TierManager,
     ) -> None:
-        """处理 __init__ 的主要逻辑。"""
+        """初始化仓位计算器所需的依赖。"""
+
         self.state = state
         self.reservation = reservation
         self.eq = eq_provider
@@ -33,7 +42,26 @@ class SizerAgent:
         min_stake: Optional[float],
         max_stake: float,
     ) -> Tuple[float, float, str]:
-        """处理 compute 的主要逻辑。"""
+        """计算名义下单量、实际风险以及拨款桶归属。
+
+        核心步骤：
+            1. 根据 TierPolicy 获取基础 VaR (k_mult_base_pct * equity)，压力期可抑制；
+            2. TARGET_RECOVERY 档位会考虑局部亏损以提高风险需求；
+            3. 与财政 fast/slow 拨款合并取最大需求，再尊重组合/单票 CAP；
+            4. 施加名义仓位上限与交易所 min/max 限制。
+
+        Args:
+            pair: 交易对名称。
+            sl_pct: 止损百分比（正值）。
+            tp_pct: 止盈百分比。
+            direction: 信号方向（当前逻辑未区分 long/short）。
+            min_stake: 交易所最小下单额，None 表示无限制。
+            max_stake: 交易所允许的最大下单额。
+
+        Returns:
+            Tuple[float, float, str]: (名义下单额, 实际风险, 使用拨款桶)。
+        """
+
         equity = self.eq.get_equity()
         pst = self.state.get_pair_state(pair)
         tier_pol = self.tier_mgr.get(pst.closs)

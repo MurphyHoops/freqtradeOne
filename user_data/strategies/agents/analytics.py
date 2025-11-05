@@ -1,3 +1,16 @@
+﻿"""策略运行过程的事件采集与持久化工具。
+
+`AnalyticsAgent` 用于在 TaxBrainV29 流程中记录 finalize、预约、退出、风控校验
+等关键节点的上下文信息，并同时输出 JSONL 与 CSV 文件，方便后续的回放分析与
+实时监控。
+
+示例：
+    >>> from pathlib import Path
+    >>> from user_data.strategies.agents.analytics import AnalyticsAgent
+    >>> agent = AnalyticsAgent(Path('user_data/logs'))
+    >>> agent.log_exit('BTC/USDT', 'trade-1', 'manual_close')
+"""
+
 from __future__ import annotations
 
 import csv
@@ -9,10 +22,15 @@ from typing import Any, Optional
 
 
 class AnalyticsAgent:
-    """负责记录策略运行期间的关键事件并输出 JSONL/CSV 监控数据。"""
+    """统一的策略事件落盘工具，负责写入 JSONL 及聚合 CSV。"""
 
     def __init__(self, log_dir: Path) -> None:
-        """初始化日志目录并准备基础文件句柄。"""
+        """初始化日志目录、CSV 表头状态与线程锁。
+
+        Args:
+            log_dir: 希望输出日志的根目录。
+        """
+
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.date_tag = datetime.utcnow().strftime("%Y%m%d")
@@ -33,15 +51,17 @@ class AnalyticsAgent:
         self._lock = threading.Lock()
 
     def _write_jsonl(self, payload: dict[str, Any]) -> None:
-        """将单条事件以 JSONL 形式追加写入。"""
+        """向 JSONL 文件追加一条事件记录。"""
+
         record = dict(payload)
         record.setdefault("ts", datetime.utcnow().isoformat())
         with self._lock:
             with self.jsonl_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _write_finalize_csv(self, row: dict[str, Any]) -> None:
-        """将 finalize 指标写入 CSV，便于外部统计。"""
+        """以统一表头将 finalize 数据写入 CSV。"""
+
         with self._lock:
             write_header = not self._csv_header_written
             with self.csv_path.open("a", newline="", encoding="utf-8") as handle:
@@ -62,7 +82,8 @@ class AnalyticsAgent:
         reservations: int,
         cycle_cleared: bool,
     ) -> None:
-        """记录 finalize 阶段的资金、风险与预约状态。"""
+        """记录 finalize 阶段的组合风险与拨款状态。"""
+
         payload = {
             "event": "finalize",
             "bar_tick": bar_tick,
@@ -96,7 +117,8 @@ class AnalyticsAgent:
         bucket: str,
         risk: float,
     ) -> None:
-        """记录预约的创建、释放或过期动作。"""
+        """记录预约生命周期事件（创建 / 释放 / 遗弃）。"""
+
         payload = {
             "event": "reservation",
             "action": event,
@@ -108,7 +130,8 @@ class AnalyticsAgent:
         self._write_jsonl(payload)
 
     def log_exit(self, pair: str, trade_id: str, reason: str) -> None:
-        """记录单笔交易的退出原因。"""
+        """记录单笔交易退出的原因。"""
+
         payload = {
             "event": "exit",
             "pair": pair,
@@ -118,7 +141,8 @@ class AnalyticsAgent:
         self._write_jsonl(payload)
 
     def log_invariant(self, report: dict[str, Any]) -> None:
-        """记录不变式校验结果，便于追踪风险异常。"""
+        """记录风险不变式检查的结果。"""
+
         payload = {
             "event": "invariant",
             "report": report,
@@ -131,7 +155,8 @@ class AnalyticsAgent:
         message: str,
         payload: Optional[dict[str, Any]] = None,
     ) -> None:
-        """输出调试信息，帮助定位临时问题。"""
+        """输出调试事件，便于排查临时问题。"""
+
         record = {
             "event": "debug",
             "tag": tag,

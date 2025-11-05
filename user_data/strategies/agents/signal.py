@@ -1,3 +1,12 @@
+﻿# -*- coding: utf-8 -*-
+"""信号指标计算与候选构建模块。
+
+该模块负责：
+1. 按照 V29 配置计算 EMA/RSI/ATR/ADX 等指标（包含 V29.1 修订 #1：
+   当 ADX_{cfg.adx_len} 列不存在时回退使用 ADX_20 结果）；
+2. 基于单根 K 线数据生成多种交易候选（MRL/PBL/TRS 等 squad）。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,7 +19,20 @@ import pandas_ta as ta
 
 @dataclass
 class Candidate:
-    """Candidate 的职责说明。"""
+    """描述 signal 阶段产出的单个建仓候选。
+
+    Attributes:
+        direction: 信号方向，"long" 或 "short"。
+        kind: 具体策略类型（如 mean_rev_long / pullback_long / trend_short）。
+        sl_pct: 建议的止损百分比。
+        tp_pct: 建议的止盈百分比。
+        raw_score: 原始强度评分（0~1）。
+        rr_ratio: Reward/Risk 比。
+        win_prob: 预估胜率。
+        expected_edge: 期望收益（胜率 * TP - (1-胜率) * SL）。
+        squad: 所属 squad 名称，供财政分配时过滤。
+    """
+
     direction: str
     kind: str
     sl_pct: float
@@ -23,7 +45,21 @@ class Candidate:
 
 
 def compute_indicators(df: pd.DataFrame, cfg) -> pd.DataFrame:
-    """Populate indicator columns required by downstream agents."""
+    """根据配置计算并附加信号所需的技术指标。
+
+    - EMA/RSI/ATR 均使用 pandas_ta 计算；
+    - ADX 部分遵循 V29.1 修订 #1：优先读取列名为 "ADX_{cfg.adx_len}" 的结果，
+      若第三方库返回的列名缺失则回退到 "ADX_20" 输出；
+    - 额外计算 tr_pct，供后续止损/止盈估算使用。
+
+    Args:
+        df: 原始 K 线数据。
+        cfg: V29Config，提供指标长度配置。
+
+    Returns:
+        pd.DataFrame: 附加指标列后的数据帧，原地修改并返回。
+    """
+
     df["ema_fast"] = ta.ema(df["close"], length=cfg.ema_fast)
     df["ema_slow"] = ta.ema(df["close"], length=cfg.ema_slow)
     df["rsi"] = ta.rsi(df["close"], length=cfg.rsi_len)
@@ -36,6 +72,8 @@ def compute_indicators(df: pd.DataFrame, cfg) -> pd.DataFrame:
     adx_col = f"ADX_{cfg.adx_len}"
     if isinstance(adx_df, pd.DataFrame) and adx_col in adx_df.columns:
         df["adx"] = adx_df[adx_col]
+    elif isinstance(adx_df, pd.DataFrame) and "ADX_20" in adx_df.columns:
+        df["adx"] = adx_df["ADX_20"]
     else:
         df["adx"] = 20.0
 
@@ -43,7 +81,21 @@ def compute_indicators(df: pd.DataFrame, cfg) -> pd.DataFrame:
 
 
 def gen_candidates(row: pd.Series) -> List[Candidate]:
-    """Transform the latest indicator row into trading candidates."""
+    """将最近一根 K 线的指标值转化为可交易候选列表。
+
+    当前实现含三类候选：
+        - mean_rev_long (MRL)：极端 RSI 反转；
+        - pullback_long (PBL)：多头回踩；
+        - trend_short (TRS)：顺势做空。
+    每个候选都根据 ATR% 估算止损/止盈、计算 Reward/Risk，并给出期望收益。
+
+    Args:
+        row: 包含 close/ema_fast/ema_slow/rsi/atr_pct/adx 等字段的 Series。
+
+    Returns:
+        List[Candidate]: 可能为空的候选列表。
+    """
+
     out: list[Candidate] = []
     close = float(row["close"])
     ema_fast = float(row["ema_fast"])

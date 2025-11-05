@@ -1,3 +1,5 @@
+﻿"""SizerAgent 风险与仓位计算逻辑的测试。"""
+
 import types
 
 import pytest
@@ -7,12 +9,16 @@ from user_data.strategies.config.v29_config import V29Config
 
 
 class DummyPairState:
+    """提供 closs 与 local_loss 的最小占位对象。"""
+
     def __init__(self, closs: int = 0, local_loss: float = 0.0):
         self.closs = closs
         self.local_loss = local_loss
 
 
 class DummyState:
+    """模拟 GlobalState 检索接口供 SizerAgent 使用。"""
+
     def __init__(self, debt_pool: float, cap_pct: float, total_open: float, pair_state: DummyPairState):
         self.debt_pool = debt_pool
         self._cap_pct = cap_pct
@@ -37,6 +43,8 @@ class DummyState:
 
 
 class DummyReservation:
+    """返回固定值的预约桩，用于 CAP 计算。"""
+
     def __init__(self):
         self._total_reserved = 0.0
         self._pair_reserved = {"TEST/USDT": 0.0}
@@ -49,6 +57,8 @@ class DummyReservation:
 
 
 class DummyEquity:
+    """固定返回 equity 的桩。"""
+
     def __init__(self, equity: float):
         self._equity = equity
 
@@ -57,6 +67,8 @@ class DummyEquity:
 
 
 class DummyTierMgr:
+    """返回预设 TierPolicy 的桩管理器。"""
+
     def __init__(self, policy):
         self.policy = policy
 
@@ -65,6 +77,8 @@ class DummyTierMgr:
 
 
 def build_policy(**overrides):
+    """构造简单的 TierPolicy 替身以便调整参数。"""
+
     defaults = dict(
         name="tier",
         allowed_kinds={"mean_rev_long"},
@@ -86,6 +100,8 @@ def build_policy(**overrides):
 
 
 def test_sizer_suppresses_baseline_when_stressed():
+    """压力期时 BASELINE VaR 应被压制导致拒单。"""
+
     cfg = V29Config()
     pair_state = DummyPairState()
     state = DummyState(debt_pool=500.0, cap_pct=cfg.portfolio_cap_pct_base, total_open=0.0, pair_state=pair_state)
@@ -103,6 +119,8 @@ def test_sizer_suppresses_baseline_when_stressed():
 
 
 def test_sizer_target_recovery_uses_local_loss():
+    """TARGET_RECOVERY 档位应根据 local_loss 放大风险需求。"""
+
     cfg = V29Config()
     cfg.suppress_baseline_when_stressed = False
     pair_state = DummyPairState(local_loss=100.0)
@@ -121,6 +139,8 @@ def test_sizer_target_recovery_uses_local_loss():
 
 
 def test_sizer_respects_caps_and_minmax():
+    """组合/单票 CAP 与交易所 min/max 约束应正确生效。"""
+
     cfg = V29Config()
     pair_state = DummyPairState(local_loss=0.0)
     state = DummyState(debt_pool=0.0, cap_pct=0.01, total_open=0.0, pair_state=pair_state)
@@ -139,7 +159,6 @@ def test_sizer_respects_caps_and_minmax():
         max_stake=200.0,
     )
 
-    # Portfolio cap: 0.01 * 5000 = 50 risk -> stake 1000, but max stake trims to 200, min pushes to 200.
     assert bucket == "fast"
     assert stake == pytest.approx(200.0)
     assert risk == pytest.approx(10.0)

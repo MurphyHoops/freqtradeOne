@@ -1,3 +1,11 @@
+﻿# -*- coding: utf-8 -*-
+"""交易执行事件的状态协调代理。
+
+ExecutionAgent 在开仓、平仓以及撤单/拒单等生命周期钩子中负责更新
+GlobalState、释放预约名额并同步止损/止盈元数据，确保风险账本与权益
+记录保持一致。
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -7,7 +15,8 @@ from .tier import TierManager, TierPolicy
 
 
 class ExecutionAgent:
-    """ExecutionAgent 的职责说明。"""
+    """封装开仓、平仓与撤单事件处理的执行代理。"""
+
     def __init__(
         self,
         state,
@@ -15,7 +24,15 @@ class ExecutionAgent:
         eq_provider,
         cfg,
     ) -> None:
-        """处理 __init__ 的主要逻辑。"""
+        """初始化执行代理。
+
+        Args:
+            state: GlobalState 实例，记录在市风险与交易元数据。
+            reservation: ReservationAgent，用于管理风险预约与释放。
+            eq_provider: EquityProvider，负责实时维护权益数值。
+            cfg: V29Config 配置对象，便于读取策略参数。
+        """
+
         self.state = state
         self.reservation = reservation
         self.eq = eq_provider
@@ -29,7 +46,24 @@ class ExecutionAgent:
         pending_meta: Dict[str, Any],
         tier_mgr: TierManager,
     ) -> bool:
-        """处理 on_open_filled 的主要逻辑。"""
+        """处理开仓成交事件。
+
+        流程：
+            1. 调用 GlobalState.record_trade_open 登记风险与 ActiveTradeMeta；
+            2. 如存在预约 ID，则释放对应风险名额；
+            3. 将止损/止盈写入 trade.custom_data 与 trade.user_data，供后续钩子读取。
+
+        Args:
+            pair: 成交的交易对名称。
+            trade: Freqtrade Trade 对象。
+            order: 成交订单对象（当前逻辑未直接使用）。
+            pending_meta: confirm_trade_entry/custom_stake_amount 阶段缓存的数据。
+            tier_mgr: TierManager，用于根据 closs 获取 TierPolicy。
+
+        Returns:
+            bool: 若首次登记成功返回 True，重复回调则返回 False。
+        """
+
         trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
         if trade_id in self.state.get_pair_state(pair).active_trades:
             return False
@@ -78,7 +112,8 @@ class ExecutionAgent:
         order,
         tier_mgr: TierManager,
     ) -> bool:
-        """处理 on_close_filled 的主要逻辑。"""
+        """处理平仓成交事件，回收风险并更新权益。"""
+
         trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
         if trade_id not in self.state.get_pair_state(pair).active_trades:
             return False
@@ -94,7 +129,8 @@ class ExecutionAgent:
         return True
 
     def on_cancel_or_reject(self, pair: str, rid: Optional[str]) -> bool:
-        """处理 on_cancel_or_reject 的主要逻辑。"""
+        """在撤单或拒单时仅释放预约风险，不做财政回滚。"""
+
         if not rid:
             return False
         self.reservation.release(rid)

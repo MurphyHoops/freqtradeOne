@@ -1,3 +1,10 @@
+﻿# -*- coding: utf-8 -*-
+"""分层策略与候选过滤模块。
+
+根据交易对的连续亏损次数（CLOSS）选择对应 TierPolicy，并在信号阶段
+过滤满足当前档位约束的候选，确保风险与恢复策略匹配。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +15,8 @@ from .signal import Candidate
 
 @dataclass
 class TierPolicy:
-    """TierPolicy 的职责说明。"""
+    """定义单个 Tier 档位下的策略与风险参数集合。"""
+
     name: str
     allowed_kinds: set[str]
     min_raw_score: float
@@ -25,9 +33,11 @@ class TierPolicy:
 
 
 class TierManager:
-    """TierManager 的职责说明。"""
+    """负责根据 CLOSS 获取合适的 TierPolicy。"""
+
     def __init__(self) -> None:
-        """处理 __init__ 的主要逻辑。"""
+        """初始化三档策略参数（Healthy / Recovery / ICU）。"""
+
         self._t0 = TierPolicy(
             name="T0_healthy",
             allowed_kinds={"mean_rev_long", "pullback_long", "trend_short"},
@@ -75,7 +85,8 @@ class TierManager:
         )
 
     def get(self, closs: int) -> TierPolicy:
-        """处理 get 的主要逻辑。"""
+        """根据连续亏损次数返回对应档位策略。"""
+
         if closs <= 0:
             return self._t0
         if closs <= 2:
@@ -84,11 +95,12 @@ class TierManager:
 
 
 class TierAgent:
-    """Tier-aware candidate filtering."""
+    """依据 TierPolicy 对候选集合进行过滤与择优。"""
 
     @staticmethod
     def filter_best(policy: TierPolicy, candidates: Sequence[Candidate]) -> Optional[Candidate]:
-        """处理 filter_best 的主要逻辑。"""
+        """选出满足档位约束且期望收益最大的候选。"""
+
         ok: list[Candidate] = []
         for cand in candidates:
             if cand.kind not in policy.allowed_kinds:

@@ -1,0 +1,49 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+.env/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Test & tooling caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Freqtrade generated artifacts
+freqtrade.log
+freqtrade.db*
+
+# User data outputs (generated during backtest/download)
+user_data/backtest_results/
+user_data/logs/
+user_data/runs/
+user_data/data/
+user_data/taxbrain_v29_state.json
+
+# Python cache inside user_data modules
+user_data/__pycache__/
+user_data/strategies/__pycache__/
+user_data/strategies/agents/__pycache__/
+user_data/strategies/config/__pycache__/
+
+# Docker / compose leftovers
+*.tmp

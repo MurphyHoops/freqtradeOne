@@ -1,3 +1,5 @@
+﻿"""ExitPolicyV29 及 TaxBrainV29 自定义止损逻辑的单元测试。"""
+
 import pandas as pd
 import pytest
 
@@ -7,6 +9,8 @@ from user_data.strategies.config.v29_config import V29Config
 
 
 class DummyState:
+    """提供最少属性以支撑退出策略测试。"""
+
     def __init__(self, cfg: V29Config):
         self.cfg = cfg
         self.per_pair = {}
@@ -19,6 +23,8 @@ class DummyState:
 
 
 class DummyEquity:
+    """返回固定数值的权益桩对象。"""
+
     def __init__(self, value: float):
         self.value = value
 
@@ -30,6 +36,8 @@ class DummyEquity:
 
 
 class DummyTrade:
+    """模拟 Freqtrade Trade，用于 custom_stoploss 测试。"""
+
     def __init__(self, trade_id: int = 1, is_long: bool = True):
         self.trade_id = trade_id
         self.open_rate = 100.0
@@ -45,6 +53,8 @@ class DummyTrade:
 
 
 def test_exit_policy_paths():
+    """覆盖 tp_hit、icu_timeout、flip 和 risk_off 等路径。"""
+
     cfg = V29Config()
     state = DummyState(cfg)
     equity = DummyEquity(1000.0)
@@ -62,20 +72,16 @@ def test_exit_policy_paths():
         icu_bars_left=3,
     )
 
-    # tp hit
     assert exit_policy.decide(pair, "1", current_profit_pct=0.05) == "tp_hit"
 
-    # icu timeout
     pst.active_trades["1"].icu_bars_left = 0
     assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == "icu_timeout"
 
-    # flip direction
     pst.active_trades["1"].icu_bars_left = 5
     pst.last_dir = "short"
     pst.last_score = 0.05
     assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == "flip_short"
 
-    # risk off when stressed and losing
     pst.last_dir = None
     pst.last_score = 0.0
     state.debt_pool = 500.0
@@ -83,6 +89,8 @@ def test_exit_policy_paths():
 
 
 def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
+    """验证三重 tp/sl 兜底及早锁盈触发逻辑。"""
+
     config = {
         "strategy_params": {
             "timeframe": "5m",
@@ -107,17 +115,14 @@ def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
     )
     pst.last_atr_pct = 0.01
 
-    # No custom data or user data -> fallback to meta
     sl = strategy.custom_stoploss(pair, trade, None, 100.0, 0.0, False)
     assert sl == pytest.approx(-0.03)
 
-    # User data fallback
     trade.user_data["sl_pct"] = 0.05
     trade.user_data["tp_pct"] = 0.08
     sl = strategy.custom_stoploss(pair, trade, None, 100.0, 0.0, False)
     assert sl == pytest.approx(-0.05)
 
-    # Custom data takes precedence and triggers breakeven lock
     trade.set_custom_data("sl_pct", 0.02)
     trade.set_custom_data("tp_pct", 0.04)
 
@@ -125,4 +130,4 @@ def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
     strategy.dp.get_analyzed_dataframe = lambda *args, **kwargs: (df, None)
 
     lock = strategy.custom_stoploss(pair, trade, None, 110.0, 0.04, False)
-    assert lock > -0.02  # raised towards breakeven
+    assert lock > -0.02

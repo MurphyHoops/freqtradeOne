@@ -1,3 +1,12 @@
+﻿"""TaxBrainV29 周期调度与财政流水线协调模块。
+
+CycleAgent 在每根 K 线完成时负责驱动以下流程：
+1. 推进全局 `bar_tick`、衰减债务/冷却计数；
+2. 构造当前状态快照并调用 TreasuryAgent 生成拨款计划；
+3. 根据盈利周期配置执行“盈利清债”（V29.1 修订 #2）；
+4. 触发风险不变式检查、日志打点与状态持久化。
+"""
+
 from __future__ import annotations
 
 import time
@@ -11,7 +20,8 @@ from .treasury import AllocationPlan, TreasuryAgent
 
 
 class CycleAgent:
-    """CycleAgent 的职责说明。"""
+    """负责 bar 级别的节奏推进与财政拨款协调。"""
+
     def __init__(
         self,
         cfg: V29Config,
@@ -23,7 +33,19 @@ class CycleAgent:
         persist,
         tier_mgr,
     ) -> None:
-        """处理 __init__ 的主要逻辑。"""
+        """构造周期代理并注入全局依赖。
+
+        Args:
+            cfg: 运行时配置，提供周期长度、衰减参数等信息。
+            state: GlobalState 实例，承载组合风险与财政状态。
+            reservation: 预约代理，负责风险预约的维护与 TTL 推进。
+            treasury: 财政代理，基于快照生成 fast/slow 拨款计划。
+            risk: 风险代理，用于执行不变式校验。
+            analytics: 日志代理，记录 finalize、invariant 等事件。
+            persist: StateStore 包装，用于持久化全局状态。
+            tier_mgr: TierManager，供财政计划与冷却逻辑读取 tier 规则。
+        """
+
         self.cfg = cfg
         self.state = state
         self.reservation = reservation
@@ -34,7 +56,21 @@ class CycleAgent:
         self.tier_mgr = tier_mgr
 
     def finalize(self, eq_provider) -> AllocationPlan:
-        """处理 finalize 的主要逻辑。"""
+        """在所有交易对完成当前 bar 处理后执行一次完整 finalize。
+
+        主要步骤：
+        1. 推进 `bar_tick` 并衰减债务、冷却、ICU 计数；
+        2. 构建财政计划快照并调用 TreasuryAgent 获取拨款；
+        3. 根据配置判断是否触发盈利清债；
+        4. 记录日志、执行风险不变式校验并持久化状态。
+
+        Args:
+            eq_provider: EquityProvider，用于读取当前组合权益。
+
+        Returns:
+            AllocationPlan: 最新的 fast / slow 拨款计划。
+        """
+
         self.state.bar_tick += 1
         self._decay_and_cooldowns()
 
@@ -101,7 +137,16 @@ class CycleAgent:
         timeframe_sec: int,
         eq_provider,
     ) -> None:
-        """处理 maybe_finalize 的主要逻辑。"""
+        """根据报送进度与超时策略判断是否运行 finalize。
+
+        Args:
+            pair: 当前完成 populate_indicators 的交易对。
+            bar_ts: 该 K 线的时间戳（秒）。
+            whitelist: 当前交易白名单，用于判断是否全部上报完成。
+            timeframe_sec: timeframe 对应的秒数，配合 `force_finalize_mult` 计算超时阈值。
+            eq_provider: EquityProvider，用于在触发 finalize 时读取权益。
+        """
+
         now = time.time()
         if self.state.current_cycle_ts is None or bar_ts > float(self.state.current_cycle_ts):
             self.state.current_cycle_ts = float(bar_ts)
@@ -126,7 +171,8 @@ class CycleAgent:
             self.state.reported_pairs_for_current_cycle = set()
 
     def _decay_and_cooldowns(self) -> None:
-        """处理 _decay_and_cooldowns 的主要逻辑。"""
+        """衰减冷却/ICU 计数并推进预约 TTL。"""
+
         for pst in self.state.per_pair.values():
             if pst.cooldown_bars_left > 0:
                 pst.cooldown_bars_left -= 1
@@ -137,7 +183,8 @@ class CycleAgent:
         self.reservation.tick_ttl()
 
     def _build_snapshot(self) -> dict:
-        """处理 _build_snapshot 的主要逻辑。"""
+        """组装财政拨款所需的状态快照。"""
+
         pairs_payload = {}
         for pair, pst in self.state.per_pair.items():
             pairs_payload[pair] = {

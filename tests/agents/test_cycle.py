@@ -1,3 +1,8 @@
+﻿"""CycleAgent 行为的单元测试。
+
+包含盈利周期清债、预约 TTL 推进以及风险日志写入等路径的验证。
+"""
+
 import time
 from types import SimpleNamespace
 
@@ -9,6 +14,8 @@ from user_data.strategies.agents.treasury import AllocationPlan
 
 
 class DummyPairState:
+    """最小化的交易对状态对象，用于模拟 CycleAgent 所需字段。"""
+
     def __init__(self, local_loss: float = 0.0):
         self.cooldown_bars_left = 0
         self.active_trades = {}
@@ -22,6 +29,8 @@ class DummyPairState:
 
 
 class DummyTreasuryState:
+    """跟踪 fast/slow 拨款及财政周期起点。"""
+
     def __init__(self):
         self.fast_alloc_risk = {}
         self.slow_alloc_risk = {}
@@ -30,6 +39,8 @@ class DummyTreasuryState:
 
 
 class DummyState:
+    """半仿真的 GlobalState，保留 CycleAgent 访问的核心接口。"""
+
     def __init__(self, debt_pool: float, cap_pct: float, total_open: float, pair_state: DummyPairState):
         self.debt_pool = debt_pool
         self._cap_pct = cap_pct
@@ -44,18 +55,26 @@ class DummyState:
         self.last_finalize_walltime = time.time()
 
     def get_pair_state(self, pair: str) -> DummyPairState:
+        """返回（或懒初始化）指定交易对状态。"""
+
         if pair not in self.per_pair:
             self.per_pair[pair] = DummyPairState()
         return self.per_pair[pair]
 
     def get_total_open_risk(self) -> float:
+        """提供组合在市风险，用于 CAP 计算。"""
+
         return self._total_open
 
     def get_dynamic_portfolio_cap_pct(self, _equity: float) -> float:
+        """模拟组合 CAP 百分比。"""
+
         return self._cap_pct
 
 
 class ReservationStub:
+    """仅实现 CycleAgent 所需接口的预约桩对象。"""
+
     def __init__(self):
         self.total_reserved = 0.0
         self.pair_reserved = {"PAIR/USDT": 0.0}
@@ -79,6 +98,8 @@ class ReservationStub:
 
 
 class TreasuryStub:
+    """返回固定拨款结果的财政桩。"""
+
     def __init__(self, fast: dict[str, float], slow: dict[str, float]):
         self.fast = fast
         self.slow = slow
@@ -88,6 +109,8 @@ class TreasuryStub:
 
 
 class RiskStub:
+    """记录被调用参数的风险桩。"""
+
     def __init__(self):
         self.calls = []
 
@@ -97,6 +120,8 @@ class RiskStub:
 
 
 class AnalyticsStub:
+    """收集 finalize 与 invariant 日志的桩实现。"""
+
     def __init__(self):
         self.finalize_calls = []
         self.invariant_calls = []
@@ -118,6 +143,8 @@ class AnalyticsStub:
 
 
 class PersistStub:
+    """统计保存次数的持久化桩。"""
+
     def __init__(self):
         self.saves = 0
 
@@ -126,6 +153,8 @@ class PersistStub:
 
 
 class EquityStub:
+    """简单的权益提供器，返回固定 equity。"""
+
     def __init__(self, equity: float):
         self.equity = equity
 
@@ -134,12 +163,16 @@ class EquityStub:
 
 
 def latest_finalize_entry(analytics: AnalyticsStub):
+    """方便断言时获取最近一次 finalize 日志。"""
+
     if not analytics.finalize_calls:
         return None
     return analytics.finalize_calls[-1]
 
 
 def test_cycle_finalize_clears_debt_on_profitable_cycle():
+    """验证盈利周期触发清债，同时负盈利不应清空债务。"""
+
     cfg = V29Config()
     cfg.cycle_len_bars = 3
     cfg.clear_debt_on_profitable_cycle = True
@@ -154,7 +187,7 @@ def test_cycle_finalize_clears_debt_on_profitable_cycle():
 
     agent = CycleAgent(cfg, state, reservation, treasury, risk, analytics, persist, tier_mgr=None)
 
-    # Run several finalize cycles; last one with positive PnL.
+    # 先积累多个周期，最后一次带正收益，触发清债。
     agent.finalize(eq)
     agent.finalize(eq)
     agent.finalize(eq)
@@ -168,11 +201,11 @@ def test_cycle_finalize_clears_debt_on_profitable_cycle():
     assert state.get_pair_state("PAIR/USDT").local_loss == pytest.approx(0.0)
     assert any(call.get("cycle_cleared", False) for call in analytics.finalize_calls)
 
-    # Introduce new debt and ensure negative cycle does not clear.
+    # 引入新债务并制造亏损周期，确认不会再次清债。
     state.debt_pool = 50.0
     state.get_pair_state("PAIR/USDT").local_loss = 25.0
-    eq.equity = 1100.0  # reset start equity
-    agent.finalize(eq)  # reinitialise new cycle start
+    eq.equity = 1100.0  # 重设周期起点
+    agent.finalize(eq)
     eq.equity = 900.0
     agent.finalize(eq)
     agent.finalize(eq)

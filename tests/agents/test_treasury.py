@@ -1,4 +1,4 @@
-import types
+﻿"""TreasuryAgent 拨款策略的单元测试。"""
 
 import pytest
 
@@ -8,6 +8,8 @@ from user_data.strategies.config.v29_config import V29Config
 
 
 class FixedTierManager:
+    """始终返回同一 TierPolicy 的桩。"""
+
     def __init__(self, policy: TierPolicy):
         self._policy = policy
 
@@ -16,6 +18,8 @@ class FixedTierManager:
 
 
 def make_policy(**overrides) -> TierPolicy:
+    """快速构建带默认值的 TierPolicy，方便在测试中覆写参数。"""
+
     data = dict(
         name="test",
         allowed_kinds={"MRL", "PBL", "TRS"},
@@ -36,6 +40,8 @@ def make_policy(**overrides) -> TierPolicy:
 
 
 def base_snapshot() -> dict:
+    """提供最初的 Treasury 状态快照。"""
+
     return {
         "debt_pool": 200.0,
         "total_open_risk": 0.0,
@@ -45,6 +51,8 @@ def base_snapshot() -> dict:
 
 
 def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
+    """验证 squad 代表选择、fast/slow 均分以及疼痛加权效果。"""
+
     cfg = V29Config()
     cfg.treasury_fast_split_pct = 0.5
     cfg.fast_topK_squads = 3
@@ -97,17 +105,16 @@ def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
 
     plan = agent.plan(snapshot, equity=1000.0)
 
-    # Needed risk = min(debt_pool, free) = 200, fast budget = slow budget = 100.
     assert set(plan.fast_alloc_risk.keys()) == {"A", "C"}
     assert pytest.approx(sum(plan.fast_alloc_risk.values())) == pytest.approx(100.0)
-    # Slow allocations should cover top 3 entries.
     assert set(plan.slow_alloc_risk.keys()) == {"A", "B", "C"}
     assert pytest.approx(sum(plan.slow_alloc_risk.values())) == pytest.approx(100.0)
-    # Pair B excluded from fast despite score due to squad competition.
     assert "B" not in plan.fast_alloc_risk
 
 
 def test_treasury_honours_min_injection_and_cap_trim():
+    """确保最小注入与单票 CAP 修剪逻辑生效。"""
+
     cfg = V29Config()
     cfg.treasury_fast_split_pct = 1.0
     cfg.fast_topK_squads = 1
@@ -129,13 +136,12 @@ def test_treasury_honours_min_injection_and_cap_trim():
             "last_sl_pct": 0.01,
             "local_loss": 0.0,
             "closs": 0,
-                "pair_open_risk": 0.0,
+            "pair_open_risk": 0.0,
             "pair_reserved_risk": 0.0,
         }
     }
 
     plan = agent.plan(snapshot, equity=1000.0)
 
-    # Per-pair cap room = 0.01 * 1000 - 90 = 10. Min injection (10 * 0.01) = 0.1 but cap trims to room.
     assert pytest.approx(plan.fast_alloc_risk["X"]) == pytest.approx(10.0)
     assert plan.slow_alloc_risk == {}

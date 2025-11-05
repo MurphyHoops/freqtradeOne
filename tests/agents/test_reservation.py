@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+﻿"""ReservationAgent 生命周期相关的单元测试。"""
 
 import pytest
 
@@ -7,6 +7,8 @@ from user_data.strategies.config.v29_config import V29Config
 
 
 class AnalyticsStub:
+    """记录预约日志事件的分析桩。"""
+
     def __init__(self):
         self.events = []
 
@@ -27,6 +29,8 @@ class AnalyticsStub:
 
 
 def test_reservation_lifecycle_and_metrics_reset():
+    """验证预约创建、释放、TTL 过期以及统计归零逻辑。"""
+
     cfg = V29Config()
     cfg.reservation_ttl_bars = 2
     analytics = AnalyticsStub()
@@ -43,10 +47,9 @@ def test_reservation_lifecycle_and_metrics_reset():
     assert agent.get_pair_reserved("PAIR") == pytest.approx(0.0)
     assert analytics.events[-1][0] == "release"
 
-    # Re-reserve and let TTL expire.
     agent.reserve("PAIR", rid, risk=5.0, bucket="slow")
-    agent.tick_ttl()  # ttl -> 1
-    agent.tick_ttl()  # ttl -> 0 -> expire
+    agent.tick_ttl()
+    agent.tick_ttl()
     assert rid not in agent.reservations
     assert analytics.events[-1][0] == "expire"
     assert agent.get_total_reserved() == pytest.approx(0.0)

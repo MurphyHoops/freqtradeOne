@@ -1,2 +1,0 @@
-{"event": "finalize", "bar_tick": 1, "pnl": 0.0, "debt_pool": 0.0, "fast_alloc_size": 0, "slow_alloc_size": 0, "cap_used_pct": 0.0, "reservations": 0, "cycle_cleared": false, "ts": "2025-11-04T15:19:41.873352"}
-{"event": "invariant", "report": {"ok": true, "violations": []}, "ts": "2025-11-04T15:19:41.880213"}

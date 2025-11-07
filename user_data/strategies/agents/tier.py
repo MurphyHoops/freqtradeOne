@@ -40,7 +40,13 @@ class TierManager:
 
         self._t0 = TierPolicy(
             name="T0_healthy",
-            allowed_kinds={"mean_rev_long", "pullback_long", "trend_short"},
+            allowed_kinds={
+                "mean_rev_long",
+                "pullback_long",
+                "trend_short",
+                "newbars_breakout_long_5m",
+                "newbars_breakdown_short_5m",
+            },
             min_raw_score=0.20,
             min_rr_ratio=1.2,
             min_edge=0.002,
@@ -55,7 +61,12 @@ class TierManager:
         )
         self._t12 = TierPolicy(
             name="T12_recovery",
-            allowed_kinds={"pullback_long", "trend_short"},
+            allowed_kinds={
+                "pullback_long",
+                "trend_short",
+                "newbars_breakout_long_30m",
+                "newbars_breakdown_short_30m",
+            },
             min_raw_score=0.15,
             min_rr_ratio=1.4,
             min_edge=0.003,

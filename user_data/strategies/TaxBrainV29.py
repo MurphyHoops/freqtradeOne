@@ -1,4 +1,4 @@
-"""TaxBrainV29 策略路由与多代理协调层。
+﻿"""TaxBrainV29 策略路由与多代理协调层。
 
 本模块实现 AGENTS.md 规定的 V29 架构：Signal/Tier/Treasury/Reservation/Risk/Execution 等代理在此由 TaxBrainV29 统筹调度，并保留 V29.1 的五项修订以确保兼容回测、监控与恢复流程。
 """
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 import types
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import pandas as pd
 
@@ -30,7 +30,18 @@ if module_obj is None:
     sys.modules[__name__] = module_obj
 module_obj.__dict__.update(globals())
 
+import pandas_ta as ta
+
 from freqtrade.strategy import IStrategy
+
+try:
+    from freqtrade.strategy import informative  # type: ignore
+except Exception:  # pragma: no cover
+    def informative(timeframe: str):
+        def decorator(func):
+            return func
+
+        return decorator
 
 from user_data.strategies.agents.analytics import AnalyticsAgent
 from user_data.strategies.agents.cycle import CycleAgent
@@ -39,7 +50,11 @@ from user_data.strategies.agents.exit import ExitPolicyV29
 from user_data.strategies.agents.persist import StateStore
 from user_data.strategies.agents.reservation import ReservationAgent
 from user_data.strategies.agents.risk import RiskAgent
-from user_data.strategies.agents.signal import Candidate, compute_indicators, gen_candidates
+from user_data.strategies.agents.signal import builder, indicators, schemas
+from user_data.strategies.agents.signal.requirements import (
+    collect_factor_requirements,
+    collect_indicator_requirements,
+)
 from user_data.strategies.agents.sizer import SizerAgent
 from user_data.strategies.agents.tier import TierAgent, TierManager
 from user_data.strategies.agents.treasury import TreasuryAgent
@@ -441,21 +456,13 @@ class TaxBrainV29(IStrategy):
     ignore_buy_signals = False
     ignore_sell_signals = True
 
+    _indicator_requirements_map: Dict[Optional[str], Set[str]] = {}
+
     def __init__(self, config: Dict[str, Any]) -> None:
-        """构造策略实例并初始化所有代理、状态容器及持久化组件。
-        
-        Args:
-            config: Freqtrade 传入的策略配置字典。
-        
-        Notes:
-            - 通过 apply_overrides 应用 strategy_params；
-            - 同步 timeframe/startup_candle_count 至实例与类属性（V29.1 修订 #3）；
-            - 搭建 Treasury/Risk/Reservation 等代理并初始化 StateStore。
-        """
-        super().__init__(config)
+        """Initialise strategy state, analytics, and persistence layer."""
         base_cfg = V29Config()
         self.cfg = apply_overrides(base_cfg, config.get("strategy_params", {}))
-
+        
         self.timeframe = self.cfg.timeframe
         self.startup_candle_count = self.cfg.startup_candle_count
         try:
@@ -463,6 +470,21 @@ class TaxBrainV29(IStrategy):
             self.__class__.startup_candle_count = self.cfg.startup_candle_count
         except Exception:
             pass
+
+        extra_signal_factors = getattr(self.cfg, "extra_signal_factors", None)
+        self._factor_requirements = collect_factor_requirements(extra_signal_factors)
+        self._indicator_requirements = collect_indicator_requirements(extra_signal_factors)
+        self.__class__._indicator_requirements_map = self._indicator_requirements
+
+        config_timeframes = tuple(getattr(self.cfg, "informative_timeframes", ()))
+        inferred_timeframes = tuple(tf for tf in self._factor_requirements.keys() if tf)
+        self._informative_timeframes = self._derive_informative_timeframes(
+            config_timeframes, inferred_timeframes
+        )
+        self._informative_last: Dict[str, Dict[str, pd.Series]] = {}
+        self._register_informative_methods()
+
+        super().__init__(config)
 
         print(f"[TaxBrainV29] timeframe sync cfg={self.cfg.timeframe} instance={self.timeframe} class={getattr(self.__class__, 'timeframe', 'NA')}")
         print(f"[TaxBrainV29] ADX_{self.cfg.adx_len} active")
@@ -500,7 +522,7 @@ class TaxBrainV29(IStrategy):
         self.exit_policy = ExitPolicyV29(self.state, self.eq_provider, self.cfg)
         self.execution = ExecutionAgent(self.state, self.reservation, self.eq_provider, self.cfg)
 
-        self._last_signal: Dict[str, Optional[Candidate]] = {}
+        self._last_signal: Dict[str, Optional[schemas.Candidate]] = {}
         self._pending_entry_meta: Dict[str, Dict[str, Any]] = {}
         self._tf_sec = self._tf_to_sec(self.cfg.timeframe)
 
@@ -522,6 +544,79 @@ class TaxBrainV29(IStrategy):
             return int(tf[:-1]) * 86400
         return 300
 
+    def _derive_informative_timeframes(
+        self, manual: tuple[str, ...], inferred: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """��������Ҫע��� informative timeframe �б���"""
+
+        ordered: list[str] = []
+        for tf in (*manual, *inferred):
+            if not tf or tf == self.timeframe:
+                continue
+            normalized = str(tf)
+            if normalized not in ordered:
+                ordered.append(normalized)
+        return tuple(ordered)
+
+    def _register_informative_methods(self) -> None:
+        if not self._informative_timeframes:
+            return
+        for tf in self._informative_timeframes:
+            self.__class__._ensure_informative_method(tf)
+
+    @classmethod
+    def _ensure_informative_method(cls, timeframe: str) -> None:
+        func_name = f"populate_indicators_{timeframe.replace('/', '_')}"
+        if hasattr(cls, func_name):
+            return
+
+        @informative(timeframe)
+        def _informative_populator(self, dataframe: pd.DataFrame, metadata: dict, tf=timeframe):
+            suffix = tf.replace("/", "_")
+            requirements = getattr(self.__class__, "_indicator_requirements_map", {})
+            needs = requirements.get(tf)
+            return indicators.compute_indicators(
+                dataframe,
+                self.cfg,
+                suffix=suffix,
+                required=needs if needs is not None else set(),
+                duplicate_ohlc=True,
+            )
+
+        _informative_populator.__name__ = func_name
+        setattr(cls, func_name, _informative_populator)
+
+    def _get_informative_dataframe(self, pair: str, timeframe: str) -> Optional[pd.DataFrame]:
+        getter = getattr(self.dp, 'get_informative_dataframe', None)
+        if callable(getter):
+            result = getter(pair, timeframe)
+            if isinstance(result, tuple):
+                return result[0]
+            return result
+        result = self.dp.get_analyzed_dataframe(pair, timeframe)
+        if isinstance(result, tuple):
+            return result[0]
+        return result
+
+    def informative_pairs(self):
+        if not self._informative_timeframes:
+            return []
+        try:
+            whitelist = self.dp.current_whitelist()
+        except Exception:
+            whitelist = self.config.get("exchange", {}).get("pair_whitelist", [])
+        pairs: list[tuple[str, str]] = []
+        if not whitelist:
+            return pairs
+        seen: set[tuple[str, str]] = set()
+        for pair in whitelist:
+            for tf in self._informative_timeframes:
+                key = (pair, tf)
+                if key not in seen:
+                    seen.add(key)
+                    pairs.append(key)
+        return pairs
+
     def bot_start(self, **kwargs) -> None:
         """Freqtrade bot 启动阶段加载持久化状态，并在需要时初始化财政周期起点。"""
         self.persist.load_if_exists()
@@ -531,20 +626,45 @@ class TaxBrainV29(IStrategy):
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """计算指标、生成候选信号并触发周期 finalize。
-        
         Args:
             df: 原始 K 线数据。
             metadata: Freqtrade 提供的上下文字典，至少包含 pair。
-        
         Returns:
             pd.DataFrame: 附加指标列后的数据帧。
-        
         Notes:
             当 cfg.adx_len != 14 时会记录动态列名日志，对应 V29.1 修订 #1。
         """
         pair = metadata["pair"]
+        print(f"[TaxBrainV29] metadata_pair_{metadata}")
         pst = self.state.get_pair_state(pair)
-        df = compute_indicators(df, self.cfg)
+        base_needs = self._indicator_requirements.get(None)
+        df = indicators.compute_indicators(df, self.cfg, required=base_needs)
+
+        # print(f"[TaxBrainV29] df_data_{df["newbars_high"]}")
+        # for index, row in df.iterrows():
+            
+        #     # 从 'row' 中按列名获取您需要的数据
+        #     low_value = row['high']
+        #     newbars_value = row['newbars_high']
+            
+        #     # 格式化打印
+        #     # {low_value:<4} 是为了让打印更整齐 (左对齐，占4个字符)
+        #     print(f"索引: {index} | high 值: {low_value:<4} | newbars_high 值: {newbars_value}")
+        informative_rows: Dict[str, pd.Series] = {}
+        print(f"[TaxBrainV29] _informative_timeframes_{self._informative_timeframes}")
+        if self._informative_timeframes:
+            for tf in self._informative_timeframes:
+                try:
+                    info_df = self._get_informative_dataframe(pair, tf)
+                except Exception:
+                    continue
+                if info_df is None or info_df.empty:
+                    continue
+                informative_rows[tf] = info_df.iloc[-1].copy()
+        if informative_rows:
+            self._informative_last[pair] = informative_rows
+        elif pair in self._informative_last:
+            self._informative_last.pop(pair, None)
 
         if self.cfg.adx_len != 14 and "adx" in df.columns:
             self.analytics.log_debug(
@@ -555,12 +675,17 @@ class TaxBrainV29(IStrategy):
 
         if len(df) == 0:
             return df
-        last = df.iloc[-1]
+        last = df.iloc[-1].copy()
+        last["loss_tier_state"] = pst.closs
         last_ts = float(pd.to_datetime(last.get("date", pd.Timestamp.utcnow())).timestamp())
 
-        candidates = gen_candidates(last)
+        candidates = builder.build_candidates(last, self.cfg, informative=self._informative_last.get(pair))
         policy = self.tier_mgr.get(pst.closs)
+        print(f"[TaxBrainV29] df_pst.closs_{pst.closs}")
+        print(f"[TaxBrainV29] df_pair_{pair}")
         best = self.tier_agent.filter_best(policy, candidates)
+        print(f"[TaxBrainV29] df_policy_{policy}")
+        print(f"[TaxBrainV29] df_candidates_{candidates}")
         if best:
             pst.last_dir = best.direction
             pst.last_score = best.expected_edge
@@ -590,11 +715,29 @@ class TaxBrainV29(IStrategy):
         )
         return df
 
+    def get_informative_row(self, pair: str, timeframe: str) -> Optional[pd.Series]:
+        """����ѷŵ��Ķ�ʱ��ָ��ı��� Series��"""
+        return self._informative_last.get(pair, {}).get(timeframe)
+
+    def get_informative_value(
+        self, pair: str, timeframe: str, column: str, default: Optional[float] = None
+    ) -> Optional[float]:
+        """�ӷǸ���������ȡĀ�����ֵ��������ʧʱ���� default��"""
+        row = self.get_informative_row(pair, timeframe)
+        if row is None:
+            return default
+        try:
+            value = row.get(column, default)  # pandas Series get
+        except Exception:
+            value = default
+        return value
+
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """将最近一次筛选出的信号方向写入 Freqtrade 期望的 enter_long/enter_short 列，仅对最后一根 K 线生效。"""
         df["enter_long"] = 0
         df["enter_short"] = 0
         pair = metadata["pair"]
+        print(f"[TaxBrainV29] metadata_{metadata} active")
         sig = self._last_signal.get(pair)
         if sig and len(df) > 0:
             if sig.direction == "long":
@@ -643,7 +786,8 @@ class TaxBrainV29(IStrategy):
         if len(pst.active_trades) > 0:
             return False
         sig = self._last_signal.get(pair)
-        if not sig or sig.direction != side.lower():
+        requested_dir = "long" if side.lower() == "buy" else "short"
+        if not sig or sig.direction != requested_dir:
             return False
         self._pending_entry_meta[pair] = {
             "sl_pct": sig.sl_pct,
@@ -865,7 +1009,6 @@ class TaxBrainV29(IStrategy):
         if reason:
             self.analytics.log_exit(pair, tid, reason)
         return reason
-
 
 
 

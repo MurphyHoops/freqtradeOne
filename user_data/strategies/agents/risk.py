@@ -62,8 +62,8 @@ class RiskAgent:
         self._released_seen: set[str] = set()
         self._ttl_snapshot: Dict[str, int] = {}
 
-    def check_invariants(self, state, equity: float, cap_pct: float) -> Dict[str, Any]:
-        """执行风险不变式校验并返回结构化结果。"""
+    def check_invariants(self, state, equity: float, cap_pct: float) -> InvariantReport:
+        """执行风险不变式校验并返回结构化的风险报告。"""
 
         violations: List[InvariantViolation] = []
 
@@ -124,4 +124,4 @@ class RiskAgent:
             self._released_seen.add(rid)
 
         report = InvariantReport(ok=not violations, violations=violations)
-        return report.to_dict()
+        return report

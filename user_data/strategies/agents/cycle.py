@@ -118,10 +118,7 @@ class CycleAgent:
         )
 
         report = self.risk.check_invariants(self.state, equity, cap_pct)
-        if isinstance(report, dict):
-            report_payload = report
-        else:
-            report_payload = getattr(report, "__dict__", {"ok": True})
+        report_payload = report.to_dict() if hasattr(report, "to_dict") else {"ok": True}
         self.analytics.log_invariant(report_payload)
         if not report_payload.get("ok", True):
             print("[WARN] Risk invariant breach:", report_payload)

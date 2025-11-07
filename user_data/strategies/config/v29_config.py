@@ -45,10 +45,11 @@ class V29Config:
 
     timeframe: str = "5m"  # 策略主时间周期（例如 5m、1h）
     startup_candle_count: int = 210  # 启动时需要的历史K线数量
+    informative_timeframes: tuple[str, ...] = ()  # ָ����Ҫ��������з���ļ�ʱ���롣
 
     # Portfolio caps & stress adjustments
     portfolio_cap_pct_base: float = 0.20  # 组合 VaR 基准占比上限
-    drawdown_threshold_pct: float = 0.15  # 进入压力模式的回撤阈值
+    drawdown_threshold_pct: float = 0.15  # 进入压力模式的回撤阈值，配置这个之后，债务到这里了，仓位减半
 
     # Treasury controls
     treasury_fast_split_pct: float = 0.30  # 财政 fast 桶占比

@@ -15,7 +15,13 @@
         "name": "binanceusdm",
         "key": "",
         "secret": "",
-        "ccxt_config": {},
+        "ccxt_config": {      
+            "proxies": {
+                "http":  "http://127.0.0.1:7890",
+                "https": "http://127.0.0.1:7890"
+                },
+            "aiohttp_proxy": "http://127.0.0.1:7890"
+            },
         "ccxt_async_config": {},
         "pair_whitelist": [
             "BTC/USDT:USDT",

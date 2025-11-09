@@ -43,45 +43,44 @@ class ExecutionAgent:
         pair: str,
         trade,
         order,
-        pending_meta: Dict[str, Any],
-        tier_mgr: TierManager,
+        pending_meta: Dict[str, Any] | None,
+        tier_mgr: "TierManager",
     ) -> bool:
         """处理开仓成交事件。
 
-        流程：
-            1. 调用 GlobalState.record_trade_open 登记风险与 ActiveTradeMeta；
-            2. 如存在预约 ID，则释放对应风险名额；
-            3. 将止损/止盈写入 trade.custom_data 与 trade.user_data，供后续钩子读取。
-
-        Args:
-            pair: 成交的交易对名称。
-            trade: Freqtrade Trade 对象。
-            order: 成交订单对象（当前逻辑未直接使用）。
-            pending_meta: confirm_trade_entry/custom_stake_amount 阶段缓存的数据。
-            tier_mgr: TierManager，用于根据 closs 获取 TierPolicy。
-
-        Returns:
-            bool: 若首次登记成功返回 True，重复回调则返回 False。
+        1) 将新仓登记进 GlobalState（含 ActiveTradeMeta）；
+        2) 释放预约名额；
+        3) 把 sl/tp 同步到 trade.custom_data / trade.user_data，供退出与止损逻辑使用。
         """
-
+        # 取 trade_id（兼容不同属性名）
         trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-        if trade_id in self.state.get_pair_state(pair).active_trades:
+        pst = self.state.get_pair_state(pair)
+
+        # 若已登记则忽略重复回调
+        if trade_id in getattr(pst, "active_trades", {}):
             return False
 
-        sl = float(pending_meta.get("sl_pct", 0.0))
-        tp = float(pending_meta.get("tp_pct", 0.0))
-        direction = str(pending_meta.get("dir", ""))
-        rid = pending_meta.get("reservation_id")
-        bucket = pending_meta.get("bucket", "slow")
-        risk = float(pending_meta.get("risk_final", 0.0))
-        entry_price = float(pending_meta.get("entry_price", 0.0))
+        # None 安全 & 兼容老键 sl/tp
+        meta = pending_meta or {}
+        sl = float(meta.get("sl_pct", meta.get("sl", 0.0)))
+        tp = float(meta.get("tp_pct", meta.get("tp", 0.0)))
+        direction = str(meta.get("dir", "")) or ("short" if getattr(trade, "is_short", False) else "long")
+        rid = meta.get("reservation_id")
+        bucket = str(meta.get("bucket", "slow"))
+        real_risk = float(meta.get("risk_final", meta.get("risk", 0.0)))
+        entry_price = float(meta.get("entry_price", getattr(trade, "open_rate", 0.0)))
 
-        pst = self.state.get_pair_state(pair)
-        tier_pol: TierPolicy = tier_mgr.get(pst.closs)
+        # 正确的方法名：TierManager.get(closs)
+        try:
+            tier_pol = tier_mgr.get(getattr(pst, "closs", 0))
+        except Exception:
+            tier_pol = None
+
+        # 按 GlobalState.record_trade_open 的签名顺序与命名传参
         self.state.record_trade_open(
             pair=pair,
             trade_id=trade_id,
-            real_risk=risk,
+            real_risk=real_risk,
             sl_pct=sl,
             tp_pct=tp,
             direction=direction,
@@ -89,12 +88,16 @@ class ExecutionAgent:
             entry_price=entry_price,
             tier_pol=tier_pol,
         )
-        if rid:
-            self.reservation.release(rid)
 
+        # 释放预约风险名额
+        if rid:
+            self.reservation.release(str(rid))
+
+        # 将 sl/tp 同步写入 trade.custom_data / user_data
         try:
-            trade.set_custom_data("sl_pct", sl)
-            trade.set_custom_data("tp_pct", tp)
+            if hasattr(trade, "set_custom_data"):
+                trade.set_custom_data("sl_pct", sl)
+                trade.set_custom_data("tp_pct", tp)
         except Exception:
             pass
         try:
@@ -103,7 +106,9 @@ class ExecutionAgent:
                 trade.user_data["tp_pct"] = tp
         except Exception:
             pass
+
         return True
+
 
     def on_close_filled(
         self,

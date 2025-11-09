@@ -72,11 +72,11 @@ NEWBARS_THRESHOLD = 80
 
 
 def _newbars_sl(bag, _cfg):
-    return bag["ATR_PCT"] * 1.1
+    return bag["ATR_PCT"] * 2
 
 
 def _newbars_tp(bag, _cfg):
-    return bag["ATR_PCT"] * 2.4
+    return bag["ATR_PCT"] * 8
 
 
 def _newbars_raw(key: str):
@@ -92,7 +92,6 @@ def _newbars_win_prob(_key: str):
     direction="long",
     squad="NBX",
     conditions=[
-        Condition("LOSS_TIER_STATE", "==", 0),
         Condition("NEWBARS_HIGH", ">", NEWBARS_THRESHOLD),
     ],
     sl_fn=_newbars_sl,
@@ -101,7 +100,7 @@ def _newbars_win_prob(_key: str):
     win_prob_fn=_newbars_win_prob("NEWBARS_HIGH"),
     min_rr=1.3,
     min_edge=0.0,
-    required_factors=("LOSS_TIER_STATE", "NEWBARS_HIGH"),
+    required_factors=("NEWBARS_HIGH"),
 )
 def _newbars_breakout_long_5m() -> None:
     """九转 5m 多头，供 T0 healthy 使用。"""
@@ -112,7 +111,6 @@ def _newbars_breakout_long_5m() -> None:
     direction="long",
     squad="NBX",
     conditions=[
-        Condition("LOSS_TIER_STATE", "between", 1, 2),
         Condition("NEWBARS_HIGH", ">", NEWBARS_THRESHOLD),
     ],
     sl_fn=_newbars_sl,
@@ -121,7 +119,7 @@ def _newbars_breakout_long_5m() -> None:
     win_prob_fn=_newbars_win_prob("NEWBARS_HIGH"),
     min_rr=1.3,
     min_edge=0.0,
-    required_factors=("LOSS_TIER_STATE", "NEWBARS_HIGH"),
+    required_factors=("NEWBARS_HIGH"),
     timeframes=("30m",),
 )
 def _newbars_breakout_long_30m() -> None:
@@ -133,7 +131,6 @@ def _newbars_breakout_long_30m() -> None:
     direction="short",
     squad="NBX",
     conditions=[
-        Condition("LOSS_TIER_STATE", "==", 0),
         Condition("NEWBARS_LOW", ">", NEWBARS_THRESHOLD),
     ],
     sl_fn=_newbars_sl,
@@ -142,7 +139,7 @@ def _newbars_breakout_long_30m() -> None:
     win_prob_fn=_newbars_win_prob("NEWBARS_LOW"),
     min_rr=1.3,
     min_edge=0.0,
-    required_factors=("LOSS_TIER_STATE", "NEWBARS_LOW"),
+    required_factors=("NEWBARS_LOW"),
 )
 def _newbars_breakdown_short_5m() -> None:
     """九转 5m 空头，供 T0 healthy 使用。"""
@@ -153,7 +150,6 @@ def _newbars_breakdown_short_5m() -> None:
     direction="short",
     squad="NBX",
     conditions=[
-        Condition("LOSS_TIER_STATE", "between", 1, 2),
         Condition("NEWBARS_LOW", ">", NEWBARS_THRESHOLD),
     ],
     sl_fn=_newbars_sl,
@@ -162,7 +158,7 @@ def _newbars_breakdown_short_5m() -> None:
     win_prob_fn=_newbars_win_prob("NEWBARS_LOW"),
     min_rr=1.3,
     min_edge=0.0,
-    required_factors=("LOSS_TIER_STATE", "NEWBARS_LOW"),
+    required_factors=("NEWBARS_LOW"),
     timeframes=("30m",),
 )
 def _newbars_breakdown_short_30m() -> None:

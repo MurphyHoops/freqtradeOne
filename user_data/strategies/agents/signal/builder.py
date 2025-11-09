@@ -81,8 +81,6 @@ class _FactorBag(dict):
 
 def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None) -> List[Candidate]:
     """根据最新的行情行与（可选）informative 行生成候选。"""
-    print(f"[TaxBrainV29] df_build_candidates_informative_{informative}")
-    print(f"[TaxBrainV29] df_build_candidates_row_{row}")
     fb = FactorBank(row, informative=informative)
     base_cache: Dict[Optional[str], Dict[str, float]] = {}
     base_cache[None] = _prefetch_base(fb, None)

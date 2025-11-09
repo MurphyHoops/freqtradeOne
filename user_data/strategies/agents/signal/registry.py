@@ -51,8 +51,6 @@ def register_signal(*, name: str, direction: str, squad: str,
 
     装饰器本身不需要访问被装饰函数的逻辑，函数主体仅用于占位，
     因此在实际调用中可以写成 @register_signal(...)
-def my_signal():
-    pass。
     """
 
     tf_list = list(timeframes) if timeframes else [None]

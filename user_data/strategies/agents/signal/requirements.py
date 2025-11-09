@@ -20,11 +20,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, Iterable, Optional, Set
 
-from .factor_spec import (
-    DEFAULT_BAG_FACTORS,
-    factor_components_with_default,
-    factor_dependencies,
-)
+from .factor_spec import DEFAULT_BAG_FACTORS, factor_dependencies, parse_factor_name
 from .registry import REGISTRY
 
 FactorMap = Dict[Optional[str], Set[str]]
@@ -40,8 +36,8 @@ def _normalized_extra(extra: Optional[Iterable[str]]) -> Iterable[str]:
     for item in extra:
         if not item:
             continue
-        key = str(item).strip()
-        if not key or key in seen:
+        key = item.upper()
+        if key in seen:
             continue
         seen.add(key)
         yield key
@@ -61,20 +57,20 @@ def collect_factor_requirements(extra: Optional[Iterable[str]] = None) -> Factor
     mapping[None].update(DEFAULT_BAG_FACTORS)
     defaults_injected: Set[Optional[str]] = {None}
     for item in _normalized_extra(extra):
-        base, tf = factor_components_with_default(item, None)
+        base, tf = parse_factor_name(item)
         mapping[tf].add(base)
-
+    
     for spec in REGISTRY.all():
         tf = spec.timeframe
         if tf not in defaults_injected:
             mapping[tf].update(DEFAULT_BAG_FACTORS)
             defaults_injected.add(tf)
         for cond in spec.conditions:
-            base, resolved = factor_components_with_default(cond.factor, tf)
-            mapping[resolved].add(base)
+            base, tf = parse_factor_name(cond.factor)
+            mapping[tf].add(base)
         for factor in getattr(spec, "required_factors", ()):
-            base, resolved = factor_components_with_default(factor, tf)
-            mapping[resolved].add(base)
+            base, tf = parse_factor_name(factor)
+            mapping[tf].add(base)
 
     return {tf: set(values) for tf, values in mapping.items() if values}
 

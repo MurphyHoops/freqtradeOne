@@ -41,6 +41,7 @@ class SizerAgent:
         direction: str,
         min_stake: Optional[float],
         max_stake: float,
+        proposed_stake: Optional[float] = None,
     ) -> Tuple[float, float, str]:
         """计算名义下单量、实际风险以及拨款桶归属。
 
@@ -80,7 +81,7 @@ class SizerAgent:
 
         fast = self.state.treasury.fast_alloc_risk.get(pair, 0.0)
         slow = self.state.treasury.slow_alloc_risk.get(pair, 0.0)
-        alloc_total = fast + slow
+        alloc_total = max(fast, slow)
         bucket = "fast" if fast >= slow else "slow"
         risk_wanted = max(risk_local_need, alloc_total)
 
@@ -99,6 +100,10 @@ class SizerAgent:
         stake_nominal = risk_final / sl_pct
         stake_cap_notional = tier_pol.max_stake_notional_pct * equity
         stake_nominal = min(stake_nominal, stake_cap_notional, float(max_stake))
+        if proposed_stake is not None:
+            if proposed_stake <= 0:
+                return (0.0, 0.0, bucket)
+            stake_nominal = min(stake_nominal, float(proposed_stake))
         if min_stake is not None:
             stake_nominal = max(stake_nominal, float(min_stake))
         if stake_nominal <= 0:

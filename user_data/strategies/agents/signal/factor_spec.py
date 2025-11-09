@@ -35,7 +35,6 @@ BASE_FACTOR_SPECS: Dict[str, BaseFactorSpec] = {
     "ADX": BaseFactorSpec(indicators=("ADX",), column="adx"),
     "NEWBARS_HIGH": BaseFactorSpec(indicators=("NEWHBARS",), column="newbars_high"),
     "NEWBARS_LOW": BaseFactorSpec(indicators=("NEWHBARS",), column="newbars_low"),
-    "LOSS_TIER_STATE": BaseFactorSpec(indicators=(), column="loss_tier_state"),
 }
 
 NON_TIMEFRAME_AWARE_FACTORS = {"LOSS_TIER_STATE"}
@@ -76,7 +75,7 @@ DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {
     ),
 }
 
-DEFAULT_BAG_FACTORS = ("CLOSE", "EMA_FAST", "EMA_SLOW", "RSI", "ATR", "ATR_PCT", "ADX")
+DEFAULT_BAG_FACTORS = ("CLOSE", "RSI", "ATR", "ATR_PCT")
 
 
 def factor_dependencies(factor: str) -> Set[str]:

@@ -1,10 +1,12 @@
-﻿"""TaxBrainV29 策略路由与多代理协调层。
+﻿"""TaxBrainV29 ����·��������Э���㡣
 
-本模块实现 AGENTS.md 规定的 V29 架构：Signal/Tier/Treasury/Reservation/Risk/Execution 等代理在此由 TaxBrainV29 统筹调度，并保留 V29.1 的五项修订以确保兼容回测、监控与恢复流程。
+��ģ��ʵ�� AGENTS.md �涨�� V29 �ܹ���Signal/Tier/Treasury/Reservation/Risk/Execution �ȴ����ڴ��� TaxBrainV29 ͳ����ȣ������� V29.1 �������޶���ȷ�����ݻز⡢�����ָ����̡�
 """
 
 from __future__ import annotations
 
+import copy
+import json
 import sys
 import time
 import uuid
@@ -15,6 +17,8 @@ import types
 from typing import Any, Dict, Optional, Set
 
 import pandas as pd
+from pandas import Timestamp
+
 
 ROOT_PATH = Path(__file__).resolve().parents[2]
 if str(ROOT_PATH) not in sys.path:
@@ -30,9 +34,35 @@ if module_obj is None:
     sys.modules[__name__] = module_obj
 module_obj.__dict__.update(globals())
 
-import pandas_ta as ta
+import talib.abstract as ta
 
-from freqtrade.strategy import IStrategy
+try:
+    from freqtrade.enums import RunMode
+except Exception:
+    RunMode = None
+
+from freqtrade.strategy import (
+    IStrategy,
+    Trade, 
+    Order,
+    PairLocks,
+    informative,  # @informative decorator
+    # Hyperopt Parameters
+    BooleanParameter,
+    CategoricalParameter,
+    DecimalParameter,
+    IntParameter,
+    RealParameter,
+    # timeframe helpers
+    timeframe_to_minutes,
+    timeframe_to_next_date,
+    timeframe_to_prev_date,
+    # Strategy helper functions
+    merge_informative_pair,
+    stoploss_from_absolute,
+    stoploss_from_open,
+)
+
 
 try:
     from freqtrade.strategy import informative  # type: ignore
@@ -59,6 +89,16 @@ from user_data.strategies.agents.sizer import SizerAgent
 from user_data.strategies.agents.tier import TierAgent, TierManager
 from user_data.strategies.agents.treasury import TreasuryAgent
 from user_data.strategies.config.v29_config import V29Config, apply_overrides
+
+
+class _NoopStateStore:
+    """No-op persistence adapter used during backtests/hyperopt to keep state ephemeral."""
+
+    def save(self) -> None:  # pragma: no cover - trivial
+        return
+
+    def load_if_exists(self) -> None:  # pragma: no cover - trivial
+        return
 
 
 @dataclass
@@ -447,8 +487,8 @@ class TaxBrainV29(IStrategy):
     can_short = True
     startup_candle_count = V29Config().startup_candle_count
 
-    minimal_roi = {"0": 10_000.0}
-    stoploss = -0.99
+    minimal_roi = {"0": 0.03}
+    stoploss = -0.2
     use_custom_stoploss = True
     trailing_stop = False
     use_exit_signal = False
@@ -487,7 +527,7 @@ class TaxBrainV29(IStrategy):
         super().__init__(config)
 
         print(f"[TaxBrainV29] timeframe sync cfg={self.cfg.timeframe} instance={self.timeframe} class={getattr(self.__class__, 'timeframe', 'NA')}")
-        print(f"[TaxBrainV29] ADX_{self.cfg.adx_len} active")
+        print(f"[TaxBrainV29] __factor_requirements_extra_signal_factors_{self._factor_requirements} active{extra_signal_factors}")
 
         self.tier_mgr = TierManager()
         self.tier_agent = TierAgent()
@@ -501,6 +541,8 @@ class TaxBrainV29(IStrategy):
         self.treasury_agent = TreasuryAgent(self.cfg, self.tier_mgr)
         self.risk_agent = RiskAgent(self.cfg, self.reservation, self.tier_mgr)
         state_file = (user_data_dir / "taxbrain_v29_state.json").resolve()
+        self._runmode_token: str = ""
+        self._persist_enabled: bool = True
         self.persist = StateStore(
             filepath=str(state_file),
             state=self.state,
@@ -544,10 +586,26 @@ class TaxBrainV29(IStrategy):
             return int(tf[:-1]) * 86400
         return 300
 
+    def _compute_runmode_token(self) -> str:
+        cfg_mode = self.config.get("runmode") if hasattr(self, "config") else None
+        if cfg_mode is not None:
+            return str(getattr(cfg_mode, "value", cfg_mode)).lower()
+        strategy_mode = getattr(self, "runmode", None)
+        if strategy_mode is not None:
+            return str(getattr(strategy_mode, "value", strategy_mode)).lower()
+        dp_mode = getattr(getattr(self, "dp", None), "runmode", None)
+        if dp_mode is not None:
+            return str(getattr(dp_mode, "value", dp_mode)).lower()
+        return ""
+
+    def _is_backtest_like_runmode(self) -> bool:
+        token = self._runmode_token or ""
+        return any(key in token for key in ("backtest", "hyperopt"))
+
     def _derive_informative_timeframes(
         self, manual: tuple[str, ...], inferred: tuple[str, ...]
     ) -> tuple[str, ...]:
-        """��������Ҫע��� informative timeframe �б���"""
+        """  """
 
         ordered: list[str] = []
         for tf in (*manual, *inferred):
@@ -618,8 +676,14 @@ class TaxBrainV29(IStrategy):
         return pairs
 
     def bot_start(self, **kwargs) -> None:
-        """Freqtrade bot 启动阶段加载持久化状态，并在需要时初始化财政周期起点。"""
-        self.persist.load_if_exists()
+        """Freqtrade bot �����׶μ��س־û�״̬��������Ҫʱ��ʼ������������㡣"""
+        self._runmode_token = self._compute_runmode_token()
+        self._persist_enabled = not self._is_backtest_like_runmode()
+        if self._persist_enabled:
+            self.persist.load_if_exists()
+        else:
+            self.persist = _NoopStateStore()
+            self.cycle_agent.persist = self.persist
         if self.state.treasury.cycle_start_tick == 0:
             self.state.treasury.cycle_start_tick = self.state.bar_tick
             self.state.treasury.cycle_start_equity = self.eq_provider.get_equity()
@@ -635,7 +699,7 @@ class TaxBrainV29(IStrategy):
             当 cfg.adx_len != 14 时会记录动态列名日志，对应 V29.1 修订 #1。
         """
         pair = metadata["pair"]
-        print(f"[TaxBrainV29] metadata_pair_{metadata}")
+       
         pst = self.state.get_pair_state(pair)
         base_needs = self._indicator_requirements.get(None)
         df = indicators.compute_indicators(df, self.cfg, required=base_needs)
@@ -676,16 +740,11 @@ class TaxBrainV29(IStrategy):
         if len(df) == 0:
             return df
         last = df.iloc[-1].copy()
-        last["loss_tier_state"] = pst.closs
         last_ts = float(pd.to_datetime(last.get("date", pd.Timestamp.utcnow())).timestamp())
 
         candidates = builder.build_candidates(last, self.cfg, informative=self._informative_last.get(pair))
         policy = self.tier_mgr.get(pst.closs)
-        print(f"[TaxBrainV29] df_pst.closs_{pst.closs}")
-        print(f"[TaxBrainV29] df_pair_{pair}")
         best = self.tier_agent.filter_best(policy, candidates)
-        print(f"[TaxBrainV29] df_policy_{policy}")
-        print(f"[TaxBrainV29] df_candidates_{candidates}")
         if best:
             pst.last_dir = best.direction
             pst.last_score = best.expected_edge
@@ -716,13 +775,13 @@ class TaxBrainV29(IStrategy):
         return df
 
     def get_informative_row(self, pair: str, timeframe: str) -> Optional[pd.Series]:
-        """����ѷŵ��Ķ�ʱ��ָ��ı��� Series��"""
+        """"""
         return self._informative_last.get(pair, {}).get(timeframe)
 
     def get_informative_value(
         self, pair: str, timeframe: str, column: str, default: Optional[float] = None
     ) -> Optional[float]:
-        """�ӷǸ���������ȡĀ�����ֵ��������ʧʱ���� default��"""
+        """"""
         row = self.get_informative_row(pair, timeframe)
         if row is None:
             return default
@@ -732,19 +791,191 @@ class TaxBrainV29(IStrategy):
             value = default
         return value
 
+    def _eval_entry_on_row(self,
+                        row: pd.Series,
+                        inf_rows: Optional[Dict[str, pd.Series]],
+                        pst_state) -> Optional[dict]:
+        """
+        核心：给“当前这一根K线”产出信号。
+        返回: None 或 {direction, sl_pct, tp_pct, kind, expected_edge}
+        """
+        candidates = builder.build_candidates(row, self.cfg, informative=inf_rows)
+        policy = self.tier_mgr.get(pst_state.closs)
+        best = self.tier_agent.filter_best(policy, candidates)
+        if not best:
+            return None
+        return dict(direction=best.direction,
+                    sl_pct=best.sl_pct,
+                    tp_pct=best.tp_pct,
+                    kind=best.kind,
+                    expected_edge=best.expected_edge)
+
+    def _aligned_informative_for_df(self, pair: str, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        """一次性把所有 informative timeframe merge_asof 到主周期索引，避免每行重复合并。"""
+        out = {}
+        for tf in getattr(self, "_informative_timeframes", []):
+            info_df = self._get_informative_dataframe(pair, tf)
+            if info_df is None or info_df.empty:
+                continue
+            left = pd.DataFrame({"_t": pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)})
+            right = info_df.copy()
+            right["_tinfo"] = pd.to_datetime(right["date"]) if "date" in right.columns else pd.to_datetime(right.index)
+            merged = pd.merge_asof(left.sort_values("_t"),
+                                right.sort_values("_tinfo"),
+                                left_on="_t", right_on="_tinfo",
+                                direction="backward")
+            merged.index = df.index
+            out[tf] = merged
+        return out
+
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        """将最近一次筛选出的信号方向写入 Freqtrade 期望的 enter_long/enter_short 列，仅对最后一根 K 线生效。"""
+        pair = metadata["pair"]
+        # 初始化整列
         df["enter_long"] = 0
         df["enter_short"] = 0
-        pair = metadata["pair"]
-        print(f"[TaxBrainV29] metadata_{metadata} active")
-        sig = self._last_signal.get(pair)
-        if sig and len(df) > 0:
-            if sig.direction == "long":
-                df.loc[df.index[-1], "enter_long"] = 1
-            else:
-                df.loc[df.index[-1], "enter_short"] = 1
+        df["enter_tag"] = None
+
+        # 统一准备 informative 对齐视图
+        aligned_info = self._aligned_informative_for_df(pair, df)
+
+        # 回测/超参：整列逐行回放；实盘/干跑：只评估最后一根
+        runmode = getattr(self.dp, "runmode", None)
+        is_vector_pass = (RunMode and runmode in {RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.PLOT})
+        # 为回测准备“状态快照”，避免污染实时状态
+        pst_snapshot = copy.deepcopy(self.state.get_pair_state(pair))
+
+        if is_vector_pass:
+            for idx in df.index:
+                row = df.loc[idx].copy()
+                # 给行注入必要的状态字段（示例）
+                row["LOSS_TIER_STATE"] = pst_snapshot.closs
+
+                # 为当行拿到每个 tf 的“行级 informative 视图”
+                inf_rows = {tf: aligned.loc[idx] for tf, aligned in aligned_info.items()}
+
+                sig = self._eval_entry_on_row(row, inf_rows, pst_snapshot)
+                if not sig:
+                    continue
+
+                # 关键改动：统一用 sl_pct / tp_pct 写入 tag
+                tag = json.dumps({
+                    "sl_pct": sig["sl_pct"],
+                    "tp_pct": sig["tp_pct"],
+                    "kind": sig["kind"],
+                    "score": sig["expected_edge"]
+                })
+
+                if sig["direction"] == "long":
+                    df.at[idx, "enter_long"] = 1
+                else:
+                    df.at[idx, "enter_short"] = 1
+                df.at[idx, "enter_tag"] = tag
+
+                # 可选：在“顺序回放”里推进你的快照状态（如冷却/分层变化等）
+                # pst_snapshot = advance_state(pst_snapshot, sig, row)
+
+        # 实盘/干跑：同步你自己的“最新一拍”缓存，供 confirm/stake 等用
+        if not is_vector_pass:
+            last_idx = df.index[-1]
+            if df.at[last_idx, "enter_long"] == 1 or df.at[last_idx, "enter_short"] == 1:
+                # 关键改动：从 enter_tag 中读取 sl_pct / tp_pct
+                tag_obj = {}
+                try:
+                    if df.at[last_idx, "enter_tag"]:
+                        tag_obj = json.loads(df.at[last_idx, "enter_tag"])
+                except Exception:
+                    tag_obj = {}
+                self._last_signal[pair] = {
+                    "direction": "long" if df.at[last_idx, "enter_long"] == 1 else "short",
+                    "sl_pct": float(tag_obj.get("sl_pct", tag_obj.get("sl", 0.0))),
+                    "tp_pct": float(tag_obj.get("tp_pct", tag_obj.get("tp", 0.0))),
+                }
+
         return df
+
+
+    # # --- 替换 populate_entry_trend ---
+    # def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+    #     """
+    #     回测专用：把整列 enter_long/enter_short 回填到每一根历史K线上。
+    #     仍保留实时运行时“只写最后一根”的语义（见 confirm_trade_entry 中的分支）。
+    #     """
+    #     pair = metadata["pair"]
+    #     df["enter_long"] = 0
+    #     df["enter_short"] = 0
+    #     # 可选：为回测写入标签列，承载 sl/tp 等元数据
+    #     df["enter_tag"] = None
+
+    #     # 1) 取各 informative timeframe 的完整 df，并与基础 df 对齐到同一索引（后向合并）
+    #     aligned_info: Dict[str, pd.DataFrame] = {}
+    #     if self._informative_timeframes:
+    #         base_idx = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
+    #         base_key = pd.DataFrame({"_base_time": base_idx}).sort_values("_base_time")
+    #         for tf in self._informative_timeframes:
+    #             try:
+    #                 info_df = self._get_informative_dataframe(pair, tf)
+    #             except Exception:
+    #                 info_df = None
+    #             if info_df is None or info_df.empty:
+    #                 continue
+    #             info = info_df.copy()
+    #             info_time = pd.to_datetime(info["date"]) if "date" in info.columns else pd.to_datetime(info.index)
+    #             info = info.assign(_info_time=info_time).sort_values("_info_time")
+    #             merged = pd.merge_asof(
+    #                 left=base_key,
+    #                 right=info,
+    #                 left_on="_base_time",
+    #                 right_on="_info_time",
+    #                 direction="backward"
+    #             )
+    #             merged.index = df.index
+    #             aligned_info[tf] = merged
+
+    #     # 2) 用“只读快照”推进逐行信号计算（不改动全局 self.state）
+    #     pst_snapshot = copy.deepcopy(self.state.get_pair_state(pair))
+    #     for idx in df.index:
+    #         row = df.loc[idx].copy()
+
+    #         # 为当前行拼装 per-tf 的“行级 informative 视图”
+    #         inf_rows: Dict[str, pd.Series] = {}
+    #         for tf, aligned in aligned_info.items():
+    #             # merge_asof 后，每个基础行对应一行齐全的 informative 列，可直接取该行 Series
+    #             inf_rows[tf] = aligned.loc[idx]
+
+    #         # 走你现有的候选 → 分层过滤流水线
+    #         candidates = builder.build_candidates(row, self.cfg, informative=inf_rows if inf_rows else None)
+    #         policy = self.tier_mgr.get(pst_snapshot.closs)
+    #         best = self.tier_agent.filter_best(policy, candidates)
+
+    #         if best:
+    #             tag = json.dumps({
+    #                 "sl": best.sl_pct,
+    #                 "tp": best.tp_pct,
+    #                 "kind": best.kind,
+    #                 "score": best.expected_edge
+    #             })
+    #             df.at[idx, "enter_tag"] = tag  
+    #             if best.direction == "long":
+    #                 df.at[idx, "enter_long"] = 1
+    #             else:
+    #                 df.at[idx, "enter_short"] = 1
+    #     return df
+
+
+
+    # def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+    #     """将最近一次筛选出的信号方向写入 Freqtrade 期望的 enter_long/enter_short 列，仅对最后一根 K 线生效。"""
+    #     df["enter_long"] = 0
+    #     df["enter_short"] = 0
+    #     pair = metadata["pair"]
+    #     print(f"[TaxBrainV29] metadata_{metadata} active")
+    #     sig = self._last_signal.get(pair)
+    #     if sig and len(df) > 0:
+    #         if sig.direction == "long":
+    #             df.loc[df.index[-1], "enter_long"] = 1
+    #         else:
+    #             df.loc[df.index[-1], "enter_short"] = 1
+    #     return df
 
     def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """策略使用 custom_exit 进行完整的离场判断，此处按接口要求返回全零列。"""
@@ -752,110 +983,198 @@ class TaxBrainV29(IStrategy):
         df["exit_short"] = 0
         return df
 
+    def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
+                            time_in_force: str, current_time: datetime,
+                            entry_tag: str | None, side: str, **kwargs) -> bool:
+        runmode_cfg = self.config.get("runmode", None)
+        runmode_token = str(getattr(runmode_cfg, "value", runmode_cfg) or "").lower()
+        dp_runmode = getattr(self.dp, "runmode", None)
+        dp_mode_token = str(getattr(dp_runmode, "value", dp_runmode) or "").lower()
+        backtest_modes = {"runmode.backtest", "backtest", "hyperopt", "runmode.hyperopt"}
+        if any(token in backtest_modes for token in (runmode_token, dp_mode_token) if token):
+            return True
 
-    def confirm_trade_entry(
-        self,
-        pair: str,
-        order_type: str,
-        amount: float,
-        rate: float,
-        time_in_force: str,
-        current_time: datetime,
-        entry_tag: Optional[str],
-        side: str,
-        **kwargs,
-    ) -> bool:
-        """在发单前执行冷却、持仓与方向一致性校验，并缓存后续下单所需的止损/止盈元数据。
-        
-        Args:
-            pair: 交易对名称。
-            order_type: Freqtrade 传入的订单类型。
-            amount: 计划下单数量。
-            rate: 当前价格。
-            time_in_force: 有效期设定。
-            current_time: 当前钩子调用时间。
-            entry_tag: 自定义标签。
-            side: 'buy' 或 'sell'，与信号方向对应。
-        
-        Returns:
-            bool: 是否允许继续下单。
-        """
         pst = self.state.get_pair_state(pair)
-        if pst.cooldown_bars_left > 0:
+        # ����բ��
+        if pst.cooldown_bars_left > 0 or len(pst.active_trades) > 0:
             return False
-        if len(pst.active_trades) > 0:
-            return False
+
+        # 实盘 / 干跑：仍用“最新一拍”的 _last_signal 语义
+        requested_dir = "long" if side.lower() in ("buy", "long") else "short"
         sig = self._last_signal.get(pair)
-        requested_dir = "long" if side.lower() == "buy" else "short"
         if not sig or sig.direction != requested_dir:
             return False
-        self._pending_entry_meta[pair] = {
-            "sl_pct": sig.sl_pct,
-            "tp_pct": sig.tp_pct,
-            "dir": sig.direction,
-        }
+        self._pending_entry_meta[pair] = {"sl": sig.sl_pct, "tp": sig.tp_pct, "dir": sig.direction}
         return True
 
-    def custom_stake_amount(
-        self,
-        pair: str,
-        current_time: datetime,
-        current_rate: float,
-        proposed_stake: float,
-        min_stake: Optional[float],
-        max_stake: float,
-        leverage: float,
-        entry_tag: Optional[str],
-        side: str,
-        **kwargs,
-    ) -> float:
-        """委托 SizerAgent 计算名义仓位并通过 ReservationAgent 锁定风险额度，供随后的 order_filled 使用。
+
+
+
+    # def confirm_trade_entry(
+    #     self,
+    #     pair: str,
+    #     order_type: str,
+    #     amount: float,
+    #     rate: float,
+    #     time_in_force: str,
+    #     current_time: datetime,
+    #     entry_tag: Optional[str],
+    #     side: str,
+    #     **kwargs,
+    # ) -> bool:
+    #     """在发单前执行冷却、持仓与方向一致性校验，并缓存后续下单所需的止损/止盈元数据。
         
-        Args:
-            pair: 交易对名称。
-            current_time: 当前时间。
-            current_rate: 当前价格。
-            proposed_stake: Freqtrade 根据余额计算的原始仓位建议。
+    #     Args:
+    #         pair: 交易对名称。
+    #         order_type: Freqtrade 传入的订单类型。
+    #         amount: 计划下单数量。
+    #         rate: 当前价格。
+    #         time_in_force: 有效期设定。
+    #         current_time: 当前钩子调用时间。
+    #         entry_tag: 自定义标签。
+    #         side: 'buy' 或 'sell'，与信号方向对应。
         
-        Returns:
-            float: 实际用于下单的仓位金额。
-        
-        Notes:
-            会缓存 reservation_id、风险敞口与拨款桶等信息以便后续钩子引用。
-        """
-        if abs(leverage - self.cfg.enforce_leverage) > 1e-6:
-            return 0.0
-        meta = self._pending_entry_meta.get(pair)
+    #     Returns:
+    #         bool: 是否允许继续下单。
+    #     """
+    #     pst = self.state.get_pair_state(pair)
+    #     if pst.cooldown_bars_left > 0:
+    #         return False
+    #     if len(pst.active_trades) > 0:
+    #         return False
+    #     sig = self._last_signal.get(pair)
+    #     requested_dir = "long" if side.lower() == "buy" else "short"
+    #     if not sig or sig.direction != requested_dir:
+    #         return False
+    #     self._pending_entry_meta[pair] = {
+    #         "sl_pct": sig.sl_pct,
+    #         "tp_pct": sig.tp_pct,
+    #         "dir": sig.direction,
+    #     }
+    #     return True
+
+    def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
+                            proposed_stake: float, min_stake: float | None, max_stake: float,
+                            leverage: float, entry_tag: str | None, side: str, **kwargs) -> float:
+        # 优先：从 entry_tag 解析 sl_pct/tp_pct/dir（向后兼容老字段 sl/tp）
+        meta = None
+        if entry_tag:
+            try:
+                meta = json.loads(entry_tag)
+                # 统一字段名（保留向后兼容）
+                meta["sl_pct"] = float(meta.get("sl_pct", meta.get("sl", 0.0)))
+                meta["tp_pct"] = float(meta.get("tp_pct", meta.get("tp", 0.0)))
+                meta["dir"] = meta.get("dir") or ("short" if side.lower() == "short" else "long")
+            except Exception:
+                meta = None
+
+        # live/dry-run 回退：依赖 _pending_entry_meta / _last_signal
+        if meta is None:
+            meta = self._pending_entry_meta.get(pair)
+            if meta is None:
+                sig = self._last_signal.get(pair)
+                if sig:
+                    meta = {
+                        "sl_pct": float(sig["sl_pct"]),
+                        "tp_pct": float(sig["tp_pct"]),
+                        "dir": sig["direction"]
+                    }
+
         if not meta:
             return 0.0
-        if "stake_final" in meta:
-            return float(meta["stake_final"])
 
-        sl = float(meta["sl_pct"])
-        tp = float(meta["tp_pct"])
+        sl = float(meta.get("sl_pct", meta.get("sl", 0.0)))
+        tp = float(meta.get("tp_pct", meta.get("tp", 0.0)))
+
         stake, risk, bucket = self.sizer.compute(
-            pair=pair,
-            sl_pct=sl,
-            tp_pct=tp,
-            direction=meta["dir"],
-            min_stake=min_stake,
-            max_stake=max_stake,
+            pair=pair, sl_pct=sl, tp_pct=tp, direction=meta["dir"],
+            proposed_stake=proposed_stake, min_stake=min_stake, max_stake=max_stake,
         )
         if stake <= 0 or risk <= 0:
             return 0.0
 
         rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
         self.reservation.reserve(pair, rid, risk, bucket)
-        meta.update(
-            {
-                "stake_final": stake,
-                "risk_final": risk,
-                "reservation_id": rid,
-                "bucket": bucket,
-                "entry_price": current_rate,
-            }
-        )
+
+        # 把统一字段写入 pending_meta，供 on_open_filled 使用
+        meta.update({
+            "sl_pct": sl,
+            "tp_pct": tp,
+            "stake_final": stake,
+            "risk_final": risk,
+            "reservation_id": rid,
+            "bucket": bucket,
+            "entry_price": current_rate,
+        })
+        # 让后续 order_filled 能拿到
+        self._pending_entry_meta[pair] = meta
         return float(stake)
+
+
+    # def custom_stake_amount(
+    #     self,
+    #     pair: str,
+    #     current_time: datetime,
+    #     current_rate: float,
+    #     proposed_stake: float,
+    #     min_stake: Optional[float],
+    #     max_stake: float,
+    #     leverage: float,
+    #     entry_tag: Optional[str],
+    #     side: str,
+    #     **kwargs,
+    # ) -> float:
+    #     """委托 SizerAgent 计算名义仓位并通过 ReservationAgent 锁定风险额度，供随后的 order_filled 使用。
+        
+    #     Args:
+    #         pair: 交易对名称。
+    #         current_time: 当前时间。
+    #         current_rate: 当前价格。
+    #         proposed_stake: Freqtrade 根据余额计算的原始仓位建议。
+        
+    #     Returns:
+    #         float: 实际用于下单的仓位金额。
+        
+    #     Notes:
+    #         会缓存 reservation_id、风险敞口与拨款桶等信息以便后续钩子引用。
+    #     """
+    #     print("获取仓位1")
+    #     if abs(leverage - self.cfg.enforce_leverage) > 1e-6:
+    #         return 0.0
+    #     print("获取仓位2")
+    #     meta = self._pending_entry_meta.get(pair)
+    #     if not meta:
+    #         return 0.0
+    #     print("获取仓位3")
+    #     if "stake_final" in meta:
+    #         return float(meta["stake_final"])
+    #     print("获取仓位3")
+    #     sl = float(meta["sl_pct"])
+    #     tp = float(meta["tp_pct"])
+    #     stake, risk, bucket = self.sizer.compute(
+    #         pair=pair,
+    #         sl_pct=sl,
+    #         tp_pct=tp,
+    #         direction=meta["dir"],
+    #         min_stake=min_stake,
+    #         max_stake=max_stake,
+    #     )
+    #     if stake <= 0 or risk <= 0:
+    #         return 0.0
+    #     print("获取仓位4")
+    #     rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
+    #     self.reservation.reserve(pair, rid, risk, bucket)
+    #     meta.update(
+    #         {
+    #             "stake_final": stake,
+    #             "risk_final": risk,
+    #             "reservation_id": rid,
+    #             "bucket": bucket,
+    #             "entry_price": current_rate,
+    #         }
+    #     )
+    #     print("获取仓位5")
+    #     return float(stake)
 
     def leverage(self, *args, **kwargs) -> float:
         """返回配置中的强制杠杆倍数，供 Freqtrade 下单使用。"""
@@ -872,12 +1191,14 @@ class TaxBrainV29(IStrategy):
             opened = self.execution.on_open_filled(pair, trade, order, meta, self.tier_mgr)
             if opened:
                 self._pending_entry_meta.pop(pair, None)
-                self.persist.save()
+                if self._persist_enabled:
+                    self.persist.save()
         else:
             closed = self.execution.on_close_filled(pair, trade, order, self.tier_mgr)
             if closed:
                 self.analytics.log_exit(pair, trade_id, "close_filled")
-                self.persist.save()
+                if self._persist_enabled:
+                    self.persist.save()
 
     def order_cancelled(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
         """当订单被撤销时，释放对应预约并记录分析日志，符合 V29.1 修订 #5（仅释放预约，不回灌财政字段）。"""
@@ -901,7 +1222,8 @@ class TaxBrainV29(IStrategy):
         released = self.execution.on_cancel_or_reject(pair, rid)
         if released:
             self._pending_entry_meta.pop(pair, None)
-            self.persist.save()
+            if self._persist_enabled:
+                self.persist.save()
         return released, meta_snapshot
 
     def custom_stoploss(
@@ -931,36 +1253,47 @@ class TaxBrainV29(IStrategy):
         Notes:
             遵循 V29.1 修订 #4，tp_pct 会依次从 trade.custom_data、trade.user_data 和 ActiveTradeMeta 中获取，实现三重兜底。
         """
-        pst = self.state.get_pair_state(pair)
         tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-        meta = pst.active_trades.get(tid)
+        pst = self.state.get_pair_state(pair)
+        meta = pst.active_trades.get(tid) if pst else None
 
+        # 1) 先尝试从 trade.custom_data / trade.user_data 获取
         sl_pct = None
         tp_pct = None
-        atr_pct_hint = 0.0
-
         try:
-            sl_pct = getattr(trade, "get_custom_data", lambda *_: None)("sl_pct")
-            tp_pct = getattr(trade, "get_custom_data", lambda *_: None)("tp_pct")
+            sl_pct = trade.get_custom_data("sl_pct")
+            tp_pct = trade.get_custom_data("tp_pct")
         except Exception:
             pass
         try:
             if (sl_pct is None or sl_pct <= 0) and hasattr(trade, "user_data"):
-                sl_pct = float(trade.user_data.get("sl_pct", 0.0))
+                sl_pct = trade.user_data.get("sl_pct")
             if (tp_pct is None or tp_pct <= 0) and hasattr(trade, "user_data"):
-                tp_pct = float(trade.user_data.get("tp_pct", 0.0))
+                tp_pct = trade.user_data.get("tp_pct")
         except Exception:
             pass
+
+        # 2) 再从 ActiveTradeMeta 兜底
         if (sl_pct is None or sl_pct <= 0) and meta:
             sl_pct = meta.sl_pct
         if (tp_pct is None or tp_pct <= 0) and meta:
             tp_pct = meta.tp_pct
-        if meta:
-            atr_pct_hint = pst.last_atr_pct
+        atr_pct_hint = pst.last_atr_pct if meta else 0.0
 
+        # 3) 回测兜底：从 entry_tag 解析（兼容老字段 sl/tp）
+        if (sl_pct is None or sl_pct <= 0) and getattr(trade, "entry_tag", None):
+            try:
+                tag = json.loads(trade.entry_tag)
+                sl_pct = float(tag.get("sl_pct", tag.get("sl", 0.0)))
+                tp_pct = float(tag.get("tp_pct", tag.get("tp", 0.0)))
+            except Exception:
+                pass
+
+        # 仍拿不到 -> 用默认兜底
         if sl_pct is None or sl_pct <= 0:
-            return -0.03
+            return -0.2
 
+        # 早锁盈：当浮盈达到 tp_pct * breakeven_lock_frac_of_tp 时，上移止损
         if tp_pct and current_profit and current_profit > 0:
             try:
                 if current_profit >= float(tp_pct) * float(self.cfg.breakeven_lock_frac_of_tp):
@@ -979,6 +1312,7 @@ class TaxBrainV29(IStrategy):
                 pass
 
         return -abs(float(sl_pct))
+
 
     def custom_exit(
         self,
@@ -1009,8 +1343,6 @@ class TaxBrainV29(IStrategy):
         if reason:
             self.analytics.log_exit(pair, tid, reason)
         return reason
-
-
 
 
 

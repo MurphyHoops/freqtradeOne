@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 import types
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set,List
 
 import pandas as pd
 from pandas import Timestamp
@@ -36,6 +36,13 @@ module_obj.__dict__.update(globals())
 
 import talib.abstract as ta
 
+try:
+    from .exits.router import EXIT_ROUTER, SLContext, TPContext
+except Exception:  # pragma: no cover
+    EXIT_ROUTER = None  # type: ignore
+    SLContext = None    # type: ignore
+    TPContext = None    # type: ignore
+    
 try:
     from freqtrade.enums import RunMode
 except Exception:
@@ -64,6 +71,20 @@ from freqtrade.strategy import (
 )
 
 
+from datetime import datetime
+from typing import Optional, Any, Dict
+# TaxBrainV29.py 顶部（和其它 import 放一起）
+
+
+
+# safe, optional import – file lives next to your strategy agents
+try:
+    from . import evaluate_sl_override
+except Exception:  # pragma: no cover
+    def evaluate_sl_override(ctx: Dict[str, Any], base_sl_pct: float | None) -> Optional[float]:  # type: ignore
+        return None
+
+
 try:
     from freqtrade.strategy import informative  # type: ignore
 except Exception:  # pragma: no cover
@@ -90,6 +111,8 @@ from user_data.strategies.agents.tier import TierAgent, TierManager
 from user_data.strategies.agents.treasury import TreasuryAgent
 from user_data.strategies.config.v29_config import V29Config, apply_overrides
 
+from user_data.strategies.exits import rules_threshold  # 注册 SL/TP 规则
+from user_data.strategies.exits import rules_immediate  # 注册即时退出规则
 
 class _NoopStateStore:
     """No-op persistence adapter used during backtests/hyperopt to keep state ephemeral."""
@@ -526,9 +549,6 @@ class TaxBrainV29(IStrategy):
 
         super().__init__(config)
 
-        print(f"[TaxBrainV29] timeframe sync cfg={self.cfg.timeframe} instance={self.timeframe} class={getattr(self.__class__, 'timeframe', 'NA')}")
-        print(f"[TaxBrainV29] __factor_requirements_extra_signal_factors_{self._factor_requirements} active{extra_signal_factors}")
-
         self.tier_mgr = TierManager()
         self.tier_agent = TierAgent()
         user_data_dir = Path(config.get("user_data_dir", "."))
@@ -567,6 +587,22 @@ class TaxBrainV29(IStrategy):
         self._last_signal: Dict[str, Optional[schemas.Candidate]] = {}
         self._pending_entry_meta: Dict[str, Dict[str, Any]] = {}
         self._tf_sec = self._tf_to_sec(self.cfg.timeframe)
+
+    def set_dataprovider(self, dp):
+        """
+        Freqtrade 在策略实例创建后，会回调此方法注入 DataProvider。
+        这里顺便把 dp 传给 exit_policy，供 Router 的 Immediate/Vector/Threshold 规则使用。
+        """
+        # 调用父类实现（如果父类没有该方法也不会出错）
+        try:
+            super().set_dataprovider(dp)
+        except AttributeError:
+            pass
+
+        # 桥接给策略本身与退出策略
+        self.dp = dp
+        if hasattr(self, "exit_policy") and self.exit_policy is not None:
+            self.exit_policy.dp = dp
 
     @staticmethod
     def _tf_to_sec(tf: str) -> int:
@@ -676,7 +712,7 @@ class TaxBrainV29(IStrategy):
         return pairs
 
     def bot_start(self, **kwargs) -> None:
-        """Freqtrade bot �����׶μ��س־û�״̬��������Ҫʱ��ʼ������������㡣"""
+        """ """
         self._runmode_token = self._compute_runmode_token()
         self._persist_enabled = not self._is_backtest_like_runmode()
         if self._persist_enabled:
@@ -704,16 +740,6 @@ class TaxBrainV29(IStrategy):
         base_needs = self._indicator_requirements.get(None)
         df = indicators.compute_indicators(df, self.cfg, required=base_needs)
 
-        # print(f"[TaxBrainV29] df_data_{df["newbars_high"]}")
-        # for index, row in df.iterrows():
-            
-        #     # 从 'row' 中按列名获取您需要的数据
-        #     low_value = row['high']
-        #     newbars_value = row['newbars_high']
-            
-        #     # 格式化打印
-        #     # {low_value:<4} 是为了让打印更整齐 (左对齐，占4个字符)
-        #     print(f"索引: {index} | high 值: {low_value:<4} | newbars_high 值: {newbars_value}")
         informative_rows: Dict[str, pd.Series] = {}
         print(f"[TaxBrainV29] _informative_timeframes_{self._informative_timeframes}")
         if self._informative_timeframes:
@@ -893,94 +919,38 @@ class TaxBrainV29(IStrategy):
 
         return df
 
-
-    # # --- 替换 populate_entry_trend ---
-    # def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-    #     """
-    #     回测专用：把整列 enter_long/enter_short 回填到每一根历史K线上。
-    #     仍保留实时运行时“只写最后一根”的语义（见 confirm_trade_entry 中的分支）。
-    #     """
-    #     pair = metadata["pair"]
-    #     df["enter_long"] = 0
-    #     df["enter_short"] = 0
-    #     # 可选：为回测写入标签列，承载 sl/tp 等元数据
-    #     df["enter_tag"] = None
-
-    #     # 1) 取各 informative timeframe 的完整 df，并与基础 df 对齐到同一索引（后向合并）
-    #     aligned_info: Dict[str, pd.DataFrame] = {}
-    #     if self._informative_timeframes:
-    #         base_idx = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
-    #         base_key = pd.DataFrame({"_base_time": base_idx}).sort_values("_base_time")
-    #         for tf in self._informative_timeframes:
-    #             try:
-    #                 info_df = self._get_informative_dataframe(pair, tf)
-    #             except Exception:
-    #                 info_df = None
-    #             if info_df is None or info_df.empty:
-    #                 continue
-    #             info = info_df.copy()
-    #             info_time = pd.to_datetime(info["date"]) if "date" in info.columns else pd.to_datetime(info.index)
-    #             info = info.assign(_info_time=info_time).sort_values("_info_time")
-    #             merged = pd.merge_asof(
-    #                 left=base_key,
-    #                 right=info,
-    #                 left_on="_base_time",
-    #                 right_on="_info_time",
-    #                 direction="backward"
-    #             )
-    #             merged.index = df.index
-    #             aligned_info[tf] = merged
-
-    #     # 2) 用“只读快照”推进逐行信号计算（不改动全局 self.state）
-    #     pst_snapshot = copy.deepcopy(self.state.get_pair_state(pair))
-    #     for idx in df.index:
-    #         row = df.loc[idx].copy()
-
-    #         # 为当前行拼装 per-tf 的“行级 informative 视图”
-    #         inf_rows: Dict[str, pd.Series] = {}
-    #         for tf, aligned in aligned_info.items():
-    #             # merge_asof 后，每个基础行对应一行齐全的 informative 列，可直接取该行 Series
-    #             inf_rows[tf] = aligned.loc[idx]
-
-    #         # 走你现有的候选 → 分层过滤流水线
-    #         candidates = builder.build_candidates(row, self.cfg, informative=inf_rows if inf_rows else None)
-    #         policy = self.tier_mgr.get(pst_snapshot.closs)
-    #         best = self.tier_agent.filter_best(policy, candidates)
-
-    #         if best:
-    #             tag = json.dumps({
-    #                 "sl": best.sl_pct,
-    #                 "tp": best.tp_pct,
-    #                 "kind": best.kind,
-    #                 "score": best.expected_edge
-    #             })
-    #             df.at[idx, "enter_tag"] = tag  
-    #             if best.direction == "long":
-    #                 df.at[idx, "enter_long"] = 1
-    #             else:
-    #                 df.at[idx, "enter_short"] = 1
-    #     return df
-
-
-
-    # def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-    #     """将最近一次筛选出的信号方向写入 Freqtrade 期望的 enter_long/enter_short 列，仅对最后一根 K 线生效。"""
-    #     df["enter_long"] = 0
-    #     df["enter_short"] = 0
-    #     pair = metadata["pair"]
-    #     print(f"[TaxBrainV29] metadata_{metadata} active")
-    #     sig = self._last_signal.get(pair)
-    #     if sig and len(df) > 0:
-    #         if sig.direction == "long":
-    #             df.loc[df.index[-1], "enter_long"] = 1
-    #         else:
-    #             df.loc[df.index[-1], "enter_short"] = 1
-    #     return df
-
     def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        """策略使用 custom_exit 进行完整的离场判断，此处按接口要求返回全零列。"""
-        df["exit_long"] = 0
-        df["exit_short"] = 0
+        """
+        通过 Exit Router 的 VectorExit 渠道应用“可插拔退出规则”。
+        - 规则可以直接改 df 并返回 df，或返回一个包含列的 dict（exit_long/exit_short/exit_tag）
+        - Router 负责 OR 聚合、exit_tag 覆盖策略（按优先级）
+        """
+        # 兜底：Freqtrade 要求存在列
+        if "exit_long" not in df.columns:
+            df["exit_long"] = 0
+        if "exit_short" not in df.columns:
+            df["exit_short"] = 0
+        if "exit_tag" not in df.columns:
+            df["exit_tag"] = None
+
+        meta = {
+            "pair": metadata.get("pair"),
+            "timeframe": getattr(self, "timeframe", None) or self.timeframe,
+        }
+
+        # 交给 Router 聚合所有 vector exit 规则
+        try:
+            df = EXIT_ROUTER.apply_vector_exits(
+                df=df,
+                metadata=meta,
+                dp=self.dp,
+                cfg=self.cfg,
+                state=self.state,
+            )
+        except Exception:
+            # 安全兜底：如果外部规则出错，不阻断主流程
+            pass
+
         return df
 
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
@@ -995,7 +965,7 @@ class TaxBrainV29(IStrategy):
             return True
 
         pst = self.state.get_pair_state(pair)
-        # ����բ��
+        # 
         if pst.cooldown_bars_left > 0 or len(pst.active_trades) > 0:
             return False
 
@@ -1007,77 +977,48 @@ class TaxBrainV29(IStrategy):
         self._pending_entry_meta[pair] = {"sl": sig.sl_pct, "tp": sig.tp_pct, "dir": sig.direction}
         return True
 
-
-
-
-    # def confirm_trade_entry(
-    #     self,
-    #     pair: str,
-    #     order_type: str,
-    #     amount: float,
-    #     rate: float,
-    #     time_in_force: str,
-    #     current_time: datetime,
-    #     entry_tag: Optional[str],
-    #     side: str,
-    #     **kwargs,
-    # ) -> bool:
-    #     """在发单前执行冷却、持仓与方向一致性校验，并缓存后续下单所需的止损/止盈元数据。
-        
-    #     Args:
-    #         pair: 交易对名称。
-    #         order_type: Freqtrade 传入的订单类型。
-    #         amount: 计划下单数量。
-    #         rate: 当前价格。
-    #         time_in_force: 有效期设定。
-    #         current_time: 当前钩子调用时间。
-    #         entry_tag: 自定义标签。
-    #         side: 'buy' 或 'sell'，与信号方向对应。
-        
-    #     Returns:
-    #         bool: 是否允许继续下单。
-    #     """
-    #     pst = self.state.get_pair_state(pair)
-    #     if pst.cooldown_bars_left > 0:
-    #         return False
-    #     if len(pst.active_trades) > 0:
-    #         return False
-    #     sig = self._last_signal.get(pair)
-    #     requested_dir = "long" if side.lower() == "buy" else "short"
-    #     if not sig or sig.direction != requested_dir:
-    #         return False
-    #     self._pending_entry_meta[pair] = {
-    #         "sl_pct": sig.sl_pct,
-    #         "tp_pct": sig.tp_pct,
-    #         "dir": sig.direction,
-    #     }
-    #     return True
-
-    def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
-                            proposed_stake: float, min_stake: float | None, max_stake: float,
-                            leverage: float, entry_tag: str | None, side: str, **kwargs) -> float:
-        # 优先：从 entry_tag 解析 sl_pct/tp_pct/dir（向后兼容老字段 sl/tp）
+    def custom_stake_amount(
+        self,
+        pair: str,
+        current_time,
+        current_rate: float,
+        proposed_stake: float,
+        min_stake: float | None,
+        max_stake: float,
+        leverage: float,
+        entry_tag: str | None,
+        side: str,
+        **kwargs,
+    ) -> float:
+        """
+        - 解析 entry_tag 中的 sl_pct / tp_pct / dir（兼容老键 sl/tp）；
+        - 若无，回退 _pending_entry_meta / _last_signal；
+        - 调 sizer.compute(...) 计算实际下单额与风险；
+        - 记录 reservation_id 等到 _pending_entry_meta 供 on_open_filled 使用。
+        """
+        # 1) 从 entry_tag 解析
         meta = None
         if entry_tag:
+            import json
             try:
                 meta = json.loads(entry_tag)
-                # 统一字段名（保留向后兼容）
+                # 统一/兼容字段
                 meta["sl_pct"] = float(meta.get("sl_pct", meta.get("sl", 0.0)))
                 meta["tp_pct"] = float(meta.get("tp_pct", meta.get("tp", 0.0)))
-                meta["dir"] = meta.get("dir") or ("short" if side.lower() == "short" else "long")
+                meta["dir"] = meta.get("dir") or ("short" if str(side).lower() == "short" else "long")
             except Exception:
                 meta = None
 
-        # live/dry-run 回退：依赖 _pending_entry_meta / _last_signal
+        # 2) 回退：_pending_entry_meta / _last_signal
         if meta is None:
             meta = self._pending_entry_meta.get(pair)
             if meta is None:
                 sig = self._last_signal.get(pair)
                 if sig:
                     meta = {
-                        "sl_pct": float(sig["sl_pct"]),
-                        "tp_pct": float(sig["tp_pct"]),
-                        "dir": sig["direction"]
+                        "sl_pct": float(sig.get("sl_pct", 0.0)),
+                        "tp_pct": float(sig.get("tp_pct", 0.0)),
+                        "dir": sig.get("direction", "long"),
                     }
 
         if not meta:
@@ -1085,18 +1026,27 @@ class TaxBrainV29(IStrategy):
 
         sl = float(meta.get("sl_pct", meta.get("sl", 0.0)))
         tp = float(meta.get("tp_pct", meta.get("tp", 0.0)))
+        direction = str(meta.get("dir") or ("short" if str(side).lower() == "short" else "long"))
 
+        # 3) 计算下单额与风险
         stake, risk, bucket = self.sizer.compute(
-            pair=pair, sl_pct=sl, tp_pct=tp, direction=meta["dir"],
-            proposed_stake=proposed_stake, min_stake=min_stake, max_stake=max_stake,
+            pair=pair,
+            sl_pct=sl,
+            tp_pct=tp,
+            direction=direction,
+            proposed_stake=proposed_stake,
+            min_stake=min_stake,
+            max_stake=max_stake,
         )
         if stake <= 0 or risk <= 0:
             return 0.0
 
+        # 4) 预约风险名额
+        import uuid
         rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
         self.reservation.reserve(pair, rid, risk, bucket)
 
-        # 把统一字段写入 pending_meta，供 on_open_filled 使用
+        # 5) 写回 pending meta（on_open_filled 会用）
         meta.update({
             "sl_pct": sl,
             "tp_pct": tp,
@@ -1105,76 +1055,10 @@ class TaxBrainV29(IStrategy):
             "reservation_id": rid,
             "bucket": bucket,
             "entry_price": current_rate,
+            "dir": direction,
         })
-        # 让后续 order_filled 能拿到
         self._pending_entry_meta[pair] = meta
         return float(stake)
-
-
-    # def custom_stake_amount(
-    #     self,
-    #     pair: str,
-    #     current_time: datetime,
-    #     current_rate: float,
-    #     proposed_stake: float,
-    #     min_stake: Optional[float],
-    #     max_stake: float,
-    #     leverage: float,
-    #     entry_tag: Optional[str],
-    #     side: str,
-    #     **kwargs,
-    # ) -> float:
-    #     """委托 SizerAgent 计算名义仓位并通过 ReservationAgent 锁定风险额度，供随后的 order_filled 使用。
-        
-    #     Args:
-    #         pair: 交易对名称。
-    #         current_time: 当前时间。
-    #         current_rate: 当前价格。
-    #         proposed_stake: Freqtrade 根据余额计算的原始仓位建议。
-        
-    #     Returns:
-    #         float: 实际用于下单的仓位金额。
-        
-    #     Notes:
-    #         会缓存 reservation_id、风险敞口与拨款桶等信息以便后续钩子引用。
-    #     """
-    #     print("获取仓位1")
-    #     if abs(leverage - self.cfg.enforce_leverage) > 1e-6:
-    #         return 0.0
-    #     print("获取仓位2")
-    #     meta = self._pending_entry_meta.get(pair)
-    #     if not meta:
-    #         return 0.0
-    #     print("获取仓位3")
-    #     if "stake_final" in meta:
-    #         return float(meta["stake_final"])
-    #     print("获取仓位3")
-    #     sl = float(meta["sl_pct"])
-    #     tp = float(meta["tp_pct"])
-    #     stake, risk, bucket = self.sizer.compute(
-    #         pair=pair,
-    #         sl_pct=sl,
-    #         tp_pct=tp,
-    #         direction=meta["dir"],
-    #         min_stake=min_stake,
-    #         max_stake=max_stake,
-    #     )
-    #     if stake <= 0 or risk <= 0:
-    #         return 0.0
-    #     print("获取仓位4")
-    #     rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
-    #     self.reservation.reserve(pair, rid, risk, bucket)
-    #     meta.update(
-    #         {
-    #             "stake_final": stake,
-    #             "risk_final": risk,
-    #             "reservation_id": rid,
-    #             "bucket": bucket,
-    #             "entry_price": current_rate,
-    #         }
-    #     )
-    #     print("获取仓位5")
-    #     return float(stake)
 
     def leverage(self, *args, **kwargs) -> float:
         """返回配置中的强制杠杆倍数，供 Freqtrade 下单使用。"""
@@ -1236,83 +1120,131 @@ class TaxBrainV29(IStrategy):
         after_fill: bool,
         **kwargs,
     ) -> Optional[float]:
-        """结合 trade 元信息、ActiveTradeMeta 以及早锁盈策略计算自定义止损距离。
-        
-        Args:
-            pair: 交易对名称。
-            trade: 当前交易对象。
-            current_time: 当前时间。
-            current_rate: 即时价格。
-            current_profit: 当前收益率。
-            after_fill: Freqtrade 是否在开仓后立即调用。
-            **kwargs: 预留兼容参数。
-        
-        Returns:
-            Optional[float]: 若返回 None 则沿用默认止损，否则为新的止损百分比（负值）。
-        
-        Notes:
-            遵循 V29.1 修订 #4，tp_pct 会依次从 trade.custom_data、trade.user_data 和 ActiveTradeMeta 中获取，实现三重兜底。
         """
-        tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-        pst = self.state.get_pair_state(pair)
-        meta = pst.active_trades.get(tid) if pst else None
+        统一从 trade/custom/meta/tag 拿到 sl/tp（正百分比），
+        然后通过 Router 的 SL 聚合“只收紧不放松”，
+        再按早锁盈规则尝试上移（对齐 current_time 的 ATR）。
+        返回：
+        None -> 沿用默认止损
+        负数 -> 新止损距离（相对入场价的负百分比）
+        """
+        import json
 
-        # 1) 先尝试从 trade.custom_data / trade.user_data 获取
+        # 1) 读取 sl/tp（多级兜底）
+        tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
+        pst = self.state.get_pair_state(pair) if hasattr(self.state, "get_pair_state") else None
+        meta = (pst.active_trades.get(tid) if pst and getattr(pst, "active_trades", None) else None)
+
         sl_pct = None
         tp_pct = None
+        # 1.1 trade.custom_data
         try:
-            sl_pct = trade.get_custom_data("sl_pct")
-            tp_pct = trade.get_custom_data("tp_pct")
+            if hasattr(trade, "get_custom_data"):
+                sl_pct = trade.get_custom_data("sl_pct")
+                tp_pct = trade.get_custom_data("tp_pct")
         except Exception:
             pass
+        # 1.2 trade.user_data
         try:
-            if (sl_pct is None or sl_pct <= 0) and hasattr(trade, "user_data"):
+            if (sl_pct is None or sl_pct <= 0) and getattr(trade, "user_data", None):
                 sl_pct = trade.user_data.get("sl_pct")
-            if (tp_pct is None or tp_pct <= 0) and hasattr(trade, "user_data"):
+            if (tp_pct is None or tp_pct <= 0) and getattr(trade, "user_data", None):
                 tp_pct = trade.user_data.get("tp_pct")
         except Exception:
             pass
-
-        # 2) 再从 ActiveTradeMeta 兜底
+        # 1.3 active meta
         if (sl_pct is None or sl_pct <= 0) and meta:
-            sl_pct = meta.sl_pct
+            try:
+                sl_pct = getattr(meta, "sl_pct", None)
+            except Exception:
+                pass
         if (tp_pct is None or tp_pct <= 0) and meta:
-            tp_pct = meta.tp_pct
-        atr_pct_hint = pst.last_atr_pct if meta else 0.0
-
-        # 3) 回测兜底：从 entry_tag 解析（兼容老字段 sl/tp）
+            try:
+                tp_pct = getattr(meta, "tp_pct", None)
+            except Exception:
+                pass
+        # 1.4 entry_tag（回测兜底）
         if (sl_pct is None or sl_pct <= 0) and getattr(trade, "entry_tag", None):
             try:
                 tag = json.loads(trade.entry_tag)
-                sl_pct = float(tag.get("sl_pct", tag.get("sl", 0.0)))
-                tp_pct = float(tag.get("tp_pct", tag.get("tp", 0.0)))
+                sl_pct = float(tag.get("sl_pct") or 0.0)
+                tp_pct = float(tag.get("tp_pct")) if tag.get("tp_pct") is not None else None
             except Exception:
                 pass
 
-        # 仍拿不到 -> 用默认兜底
+        # 拿不到 -> 用默认止损
         if sl_pct is None or sl_pct <= 0:
-            return -0.2
+            return self.stoploss
 
-        # 早锁盈：当浮盈达到 tp_pct * breakeven_lock_frac_of_tp 时，上移止损
+        # 2) 通过 Router 聚合 SL（只收紧不放松）
+        if EXIT_ROUTER is not None and SLContext is not None:
+            try:
+                ctx = SLContext(
+                    pair=pair,
+                    trade=trade,
+                    now=current_time,
+                    profit=(current_profit or 0.0),
+                    dp=self.dp,
+                    cfg=self.cfg,
+                    state=self.state,
+                )
+                tightened = EXIT_ROUTER.sl_best(ctx, float(sl_pct))
+                if tightened and tightened > 0:
+                    sl_pct = max(float(sl_pct), float(tightened))  # 只收紧
+            except Exception:
+                pass
+
+        # 3) 早锁盈：达到 tp_pct * frac 触发上移（ATR as-of 对齐）
+        def _asof_row(df_, now_):
+            if df_ is None or len(df_) == 0:
+                return None
+            try:
+                upto = df_.loc[:now_]
+            except Exception:
+                try:
+                    ct = now_.replace(tzinfo=None) if getattr(now_, "tzinfo", None) else now_
+                    upto = df_.loc[:ct]
+                except Exception:
+                    return None
+            if len(upto) == 0:
+                return None
+            return upto.iloc[-1]
+
+        try:
+            breakeven_frac = float(getattr(self.cfg, "breakeven_lock_frac_of_tp", 0.5))
+        except Exception:
+            breakeven_frac = 0.5
+
         if tp_pct and current_profit and current_profit > 0:
             try:
-                if current_profit >= float(tp_pct) * float(self.cfg.breakeven_lock_frac_of_tp):
+                if float(current_profit) >= float(tp_pct) * breakeven_frac:
+                    atr_pct_hint = 0.0
                     try:
                         analyzed = self.dp.get_analyzed_dataframe(pair, self.timeframe)
                         pairdf = analyzed[0] if isinstance(analyzed, (list, tuple)) else analyzed
-                        if len(pairdf) > 0 and "atr" in pairdf.columns:
-                            atr_pct_hint = float(pairdf["atr"].iloc[-1] / max(pairdf["close"].iloc[-1], 1e-12))
+                        row = _asof_row(pairdf, current_time)
+                        if row is not None and "atr" in pairdf.columns and "close" in pairdf.columns:
+                            close_v = float(row["close"])
+                            atr_v = float(row["atr"])
+                            if close_v > 0:
+                                atr_pct_hint = float(atr_v / close_v)
                     except Exception:
                         pass
-                    dist = self.exit_policy.early_lock_distance(trade, current_rate, current_profit, atr_pct_hint)
+
+                    # 让你的已有 early_lock_distance 参与（若不可用则忽略）
+                    try:
+                        dist = self.exit_policy.early_lock_distance(trade, current_rate, current_profit, atr_pct_hint)
+                    except Exception:
+                        dist = None
+
                     if dist is not None:
-                        self.analytics.log_exit(pair, tid, "breakeven_lock")
-                        return max(-abs(float(sl_pct)), dist)
+                        # 只收紧
+                        return max(-abs(float(sl_pct)), float(dist))
             except Exception:
                 pass
 
+        # 常规返回：负数距离
         return -abs(float(sl_pct))
-
 
     def custom_exit(
         self,
@@ -1344,5 +1276,70 @@ class TaxBrainV29(IStrategy):
             self.analytics.log_exit(pair, tid, reason)
         return reason
 
+    def custom_roi(
+        self,
+        pair: str,
+        trade,
+        current_time: datetime,
+        current_rate: float,
+        current_profit: float,
+        **kwargs,
+    ) -> Optional[float]:
+        """
+        返回“当前时刻的 ROI 阈值（正百分比，基于入场价）”：
+        - 先取基线 TP（trade/custom/meta/tag）；
+        - 再通过 Router 的 TP 聚合得到最保守阈值；
+        - 返回 None 让引擎走 minimal_roi；或返回一个 >0 的百分比作为动态 ROI。
+        """
+        import json
 
+        # 1) 拿基线 tp_pct（与 custom_stoploss 同源兜底）
+        tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
+        pst = self.state.get_pair_state(pair) if hasattr(self.state, "get_pair_state") else None
+        meta = (pst.active_trades.get(tid) if pst and getattr(pst, "active_trades", None) else None)
 
+        tp_pct = None
+        try:
+            if hasattr(trade, "get_custom_data"):
+                tp_pct = trade.get_custom_data("tp_pct")
+        except Exception:
+            pass
+        try:
+            if (tp_pct is None or tp_pct <= 0) and getattr(trade, "user_data", None):
+                tp_pct = trade.user_data.get("tp_pct")
+        except Exception:
+            pass
+        if (tp_pct is None or tp_pct <= 0) and meta:
+            try:
+                tp_pct = getattr(meta, "tp_pct", None)
+            except Exception:
+                pass
+        if (tp_pct is None or tp_pct <= 0) and getattr(trade, "entry_tag", None):
+            try:
+                tag = json.loads(trade.entry_tag)
+                tp_pct = float(tag.get("tp_pct")) if tag.get("tp_pct") is not None else None
+            except Exception:
+                pass
+
+        base_tp = tp_pct if (tp_pct and tp_pct > 0) else None
+
+        # 2) 通过 Router 聚合 TP（取最保守）
+        if EXIT_ROUTER is not None and TPContext is not None:
+            try:
+                ctx = TPContext(
+                    pair=pair,
+                    trade=trade,
+                    now=current_time,
+                    profit=(current_profit or 0.0),
+                    dp=self.dp,
+                    cfg=self.cfg,
+                    state=self.state,
+                )
+                best_tp = EXIT_ROUTER.tp_best(ctx, base_tp)
+                if best_tp and best_tp > 0:
+                    return float(best_tp)
+            except Exception:
+                pass
+
+        # 3) 没有动态阈值 -> 交给 minimal_roi
+        return base_tp  # 可能为 None；freqtrade 将按 minimal_roi 处理

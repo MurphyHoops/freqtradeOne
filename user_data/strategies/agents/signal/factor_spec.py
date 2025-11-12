@@ -37,9 +37,6 @@ BASE_FACTOR_SPECS: Dict[str, BaseFactorSpec] = {
     "NEWBARS_LOW": BaseFactorSpec(indicators=("NEWHBARS",), column="newbars_low"),
 }
 
-NON_TIMEFRAME_AWARE_FACTORS = {"LOSS_TIER_STATE"}
-
-
 def _compose_factor(base: str, timeframe: Optional[str]) -> str:
     return base if not timeframe else f"{base}@{timeframe}"
 
@@ -75,7 +72,7 @@ DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {
     ),
 }
 
-DEFAULT_BAG_FACTORS = ("CLOSE", "RSI", "ATR", "ATR_PCT")
+DEFAULT_BAG_FACTORS = ("ATR", "ATR_PCT")
 
 
 def factor_dependencies(factor: str) -> Set[str]:
@@ -110,8 +107,6 @@ def apply_timeframe_to_factor(factor: str, default_tf: Optional[str]) -> str:
     base, tf = parse_factor_name(factor)
     tf = _normalize_factor_timeframe(tf)
     default_tf = _normalize_factor_timeframe(default_tf)
-    if base in NON_TIMEFRAME_AWARE_FACTORS:
-        return base
     if tf:
         return f"{base}@{tf}"
     if default_tf:
@@ -125,8 +120,6 @@ def factor_components_with_default(factor: str, default_tf: Optional[str]) -> tu
     base, tf = parse_factor_name(factor)
     tf = _normalize_factor_timeframe(tf)
     default_tf = _normalize_factor_timeframe(default_tf)
-    if base in NON_TIMEFRAME_AWARE_FACTORS:
-        return base, None
     return base, tf or default_tf
 
 

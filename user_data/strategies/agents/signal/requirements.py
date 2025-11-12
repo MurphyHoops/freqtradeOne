@@ -20,8 +20,14 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, Iterable, Optional, Set
 
-from .factor_spec import DEFAULT_BAG_FACTORS, factor_dependencies, parse_factor_name
 from .registry import REGISTRY
+
+from .factor_spec import (
+    DEFAULT_BAG_FACTORS,
+    factor_dependencies,
+    parse_factor_name,
+    factor_components_with_default,
+)
 
 FactorMap = Dict[Optional[str], Set[str]]
 IndicatorMap = Dict[Optional[str], Set[str]]
@@ -61,16 +67,16 @@ def collect_factor_requirements(extra: Optional[Iterable[str]] = None) -> Factor
         mapping[tf].add(base)
     
     for spec in REGISTRY.all():
-        tf = spec.timeframe
-        if tf not in defaults_injected:
-            mapping[tf].update(DEFAULT_BAG_FACTORS)
-            defaults_injected.add(tf)
+        spec_tf = spec.timeframe
+        if spec_tf not in defaults_injected:
+            mapping[spec_tf].update(DEFAULT_BAG_FACTORS)
+            defaults_injected.add(spec_tf)
         for cond in spec.conditions:
-            base, tf = parse_factor_name(cond.factor)
-            mapping[tf].add(base)
+            base, ctf = factor_components_with_default(cond.factor, spec.timeframe)
+            mapping[ctf].add(base)
         for factor in getattr(spec, "required_factors", ()):
-            base, tf = parse_factor_name(factor)
-            mapping[tf].add(base)
+            base, rtf = factor_components_with_default(factor, spec.timeframe)
+            mapping[rtf].add(base)
 
     return {tf: set(values) for tf, values in mapping.items() if values}
 

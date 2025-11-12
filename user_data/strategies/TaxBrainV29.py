@@ -37,7 +37,7 @@ module_obj.__dict__.update(globals())
 import talib.abstract as ta
 
 try:
-    from .exits.router import EXIT_ROUTER, SLContext, TPContext
+    from exits.router import EXIT_ROUTER, SLContext, TPContext
 except Exception:  # pragma: no cover
     EXIT_ROUTER = None  # type: ignore
     SLContext = None    # type: ignore
@@ -102,6 +102,9 @@ from user_data.strategies.agents.persist import StateStore
 from user_data.strategies.agents.reservation import ReservationAgent
 from user_data.strategies.agents.risk import RiskAgent
 from user_data.strategies.agents.signal import builder, indicators, schemas
+# 让所有内置入场信号完成“注册”
+from user_data.strategies.agents.signal import builtin_signals as _signals  # noqa: F401
+
 from user_data.strategies.agents.signal.requirements import (
     collect_factor_requirements,
     collect_indicator_requirements,
@@ -111,8 +114,8 @@ from user_data.strategies.agents.tier import TierAgent, TierManager
 from user_data.strategies.agents.treasury import TreasuryAgent
 from user_data.strategies.config.v29_config import V29Config, apply_overrides
 
-from user_data.strategies.exits import rules_threshold  # 注册 SL/TP 规则
-from user_data.strategies.exits import rules_immediate  # 注册即时退出规则
+from user_data.strategies.agents.exits import rules_threshold  # 注册 SL/TP 规则
+from user_data.strategies.agents.exits import rules_immediate  # 注册即时退出规则
 
 class _NoopStateStore:
     """No-op persistence adapter used during backtests/hyperopt to keep state ephemeral."""
@@ -665,16 +668,14 @@ class TaxBrainV29(IStrategy):
             return
 
         @informative(timeframe)
-        def _informative_populator(self, dataframe: pd.DataFrame, metadata: dict, tf=timeframe):
-            suffix = tf.replace("/", "_")
-            requirements = getattr(self.__class__, "_indicator_requirements_map", {})
-            needs = requirements.get(tf)
+        def _informative_populator(self, dataframe, metadata, tf=timeframe):
+            needs = getattr(self.__class__, "_indicator_requirements_map", {}).get(tf)
             return indicators.compute_indicators(
                 dataframe,
                 self.cfg,
-                suffix=suffix,
-                required=needs if needs is not None else set(),
-                duplicate_ohlc=True,
+                suffix=None,            # ★ 不要在信息周期阶段加后缀
+                required=needs or set(),
+                duplicate_ohlc=True,    # 保留原始 OHLC（列名保持 open/close/volume）
             )
 
         _informative_populator.__name__ = func_name
@@ -735,13 +736,13 @@ class TaxBrainV29(IStrategy):
             当 cfg.adx_len != 14 时会记录动态列名日志，对应 V29.1 修订 #1。
         """
         pair = metadata["pair"]
-       
+        print(">>> base_needs:", self._indicator_requirements.get(None))
+
         pst = self.state.get_pair_state(pair)
         base_needs = self._indicator_requirements.get(None)
         df = indicators.compute_indicators(df, self.cfg, required=base_needs)
 
         informative_rows: Dict[str, pd.Series] = {}
-        print(f"[TaxBrainV29] _informative_timeframes_{self._informative_timeframes}")
         if self._informative_timeframes:
             for tf in self._informative_timeframes:
                 try:
@@ -756,13 +757,6 @@ class TaxBrainV29(IStrategy):
         elif pair in self._informative_last:
             self._informative_last.pop(pair, None)
 
-        if self.cfg.adx_len != 14 and "adx" in df.columns:
-            self.analytics.log_debug(
-                "adx_dynamic",
-                f"Using ADX_{self.cfg.adx_len}",
-                {"pair": pair},
-            )
-
         if len(df) == 0:
             return df
         last = df.iloc[-1].copy()
@@ -771,6 +765,17 @@ class TaxBrainV29(IStrategy):
         candidates = builder.build_candidates(last, self.cfg, informative=self._informative_last.get(pair))
         policy = self.tier_mgr.get(pst.closs)
         best = self.tier_agent.filter_best(policy, candidates)
+
+        #         # print(f"[TaxBrainV29] df_data_{df["newbars_high"]}")
+        # for index, row in df.iterrows():
+            
+        #     # 从 'row' 中按列名获取您需要的数据
+        #     low_value = row['high']
+        #     newbars_value = row['newbars_high']
+            
+        #     # 格式化打印
+        #     # {low_value:<4} 是为了让打印更整齐 (左对齐，占4个字符)
+        #     print(f"索引: {index} | high 值: {low_value:<4} | newbars_high 值: {newbars_value}")
         if best:
             pst.last_dir = best.direction
             pst.last_score = best.expected_edge
@@ -877,7 +882,7 @@ class TaxBrainV29(IStrategy):
                 row["LOSS_TIER_STATE"] = pst_snapshot.closs
 
                 # 为当行拿到每个 tf 的“行级 informative 视图”
-                inf_rows = {tf: aligned.loc[idx] for tf, aligned in aligned_info.items()}
+                inf_rows = {tf: aligned_info[tf].loc[idx] for tf in aligned_info.keys()}
 
                 sig = self._eval_entry_on_row(row, inf_rows, pst_snapshot)
                 if not sig:
@@ -890,6 +895,7 @@ class TaxBrainV29(IStrategy):
                     "kind": sig["kind"],
                     "score": sig["expected_edge"]
                 })
+                # print(f"tag_{tag}")
 
                 if sig["direction"] == "long":
                     df.at[idx, "enter_long"] = 1

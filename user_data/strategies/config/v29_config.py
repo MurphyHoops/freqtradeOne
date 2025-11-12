@@ -79,6 +79,9 @@ class V29Config:
     atr_len: int = 14  # ATR 长度
     adx_len: int = 14  # ADX 长度（支持动态列名）
 
+    # 离场
+    sl_k: float = 1.6
+    tp_k: float =2.0
     # Behaviour toggles
     suppress_baseline_when_stressed: bool = True  # 压力期是否抑制 baseline VaR
 

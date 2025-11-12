@@ -72,11 +72,11 @@ NEWBARS_THRESHOLD = 80
 
 
 def _newbars_sl(bag, _cfg):
-    return bag["ATR_PCT"] * 2
+    return bag["ATR_PCT"] * _cfg.sl_k
 
 
 def _newbars_tp(bag, _cfg):
-    return bag["ATR_PCT"] * 8
+    return bag["ATR_PCT"] * _cfg.tp_k
 
 
 def _newbars_raw(key: str):
@@ -98,9 +98,9 @@ def _newbars_win_prob(_key: str):
     tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_HIGH"),
     win_prob_fn=_newbars_win_prob("NEWBARS_HIGH"),
-    min_rr=1.3,
+    min_rr=0.1,
     min_edge=0.0,
-    required_factors=("NEWBARS_HIGH"),
+    required_factors=("NEWBARS_HIGH",),
 )
 def _newbars_breakout_long_5m() -> None:
     """九转 5m 多头，供 T0 healthy 使用。"""
@@ -117,9 +117,9 @@ def _newbars_breakout_long_5m() -> None:
     tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_HIGH"),
     win_prob_fn=_newbars_win_prob("NEWBARS_HIGH"),
-    min_rr=1.3,
+    min_rr=0.1,
     min_edge=0.0,
-    required_factors=("NEWBARS_HIGH"),
+    required_factors=("NEWBARS_HIGH",),
     timeframes=("30m",),
 )
 def _newbars_breakout_long_30m() -> None:
@@ -137,9 +137,9 @@ def _newbars_breakout_long_30m() -> None:
     tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_LOW"),
     win_prob_fn=_newbars_win_prob("NEWBARS_LOW"),
-    min_rr=1.3,
+    min_rr=0.1,
     min_edge=0.0,
-    required_factors=("NEWBARS_LOW"),
+    required_factors=("NEWBARS_LOW",),
 )
 def _newbars_breakdown_short_5m() -> None:
     """九转 5m 空头，供 T0 healthy 使用。"""
@@ -156,9 +156,9 @@ def _newbars_breakdown_short_5m() -> None:
     tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_LOW"),
     win_prob_fn=_newbars_win_prob("NEWBARS_LOW"),
-    min_rr=1.3,
+    min_rr=0.1,
     min_edge=0.0,
-    required_factors=("NEWBARS_LOW"),
+    required_factors=("NEWBARS_LOW",),
     timeframes=("30m",),
 )
 def _newbars_breakdown_short_30m() -> None:

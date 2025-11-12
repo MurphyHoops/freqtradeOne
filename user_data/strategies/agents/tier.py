@@ -41,14 +41,11 @@ class TierManager:
         self._t0 = TierPolicy(
             name="T0_healthy",
             allowed_kinds={
-                "mean_rev_long",
-                "pullback_long",
-                "trend_short",
                 "newbars_breakout_long_5m",
                 "newbars_breakdown_short_5m",
             },
             min_raw_score=0.20,
-            min_rr_ratio=1.2,
+            min_rr_ratio=0.2,
             min_edge=0.002,
             sizing_algo="BASELINE",
             k_mult_base_pct=1,

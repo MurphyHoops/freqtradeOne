@@ -7,6 +7,25 @@ from typing import Optional
 
 from .router import SLContext, TPContext, sl_rule, tp_rule
 
+def _trade_has_exit_profile(trade) -> bool:
+    if trade is None:
+        return False
+    try:
+        if hasattr(trade, "get_custom_data"):
+            profile = trade.get_custom_data("exit_profile")
+            if profile:
+                return True
+    except Exception:
+        pass
+    try:
+        if getattr(trade, "user_data", None):
+            profile = trade.user_data.get("exit_profile")
+            if profile:
+                return True
+    except Exception:
+        pass
+    return False
+
 # Helper: compute ATR(abs) as‑of now from dp/analyzed df
 
 def _atr_abs_asof(dp, pair: str, timeframe: str, now) -> Optional[float]:
@@ -48,6 +67,8 @@ def atr_k_sl(ctx: SLContext) -> Optional[float]:
     trade = ctx.trade
     if not trade or not getattr(trade, "open_rate", 0.0):
         return None
+    if _trade_has_exit_profile(trade):
+        return None
     atr_abs = _atr_abs_asof(ctx.dp, ctx.pair, getattr(ctx.cfg, "timeframe", ""), ctx.now)
     if not atr_abs:
         return None
@@ -76,6 +97,8 @@ def hard_sl_from_entry(ctx: SLContext) -> Optional[float]:
 def atr_k_tp(ctx: TPContext) -> Optional[float]:
     trade = ctx.trade
     if not trade or not getattr(trade, "open_rate", 0.0):
+        return None
+    if _trade_has_exit_profile(trade):
         return None
     atr_abs = _atr_abs_asof(ctx.dp, ctx.pair, getattr(ctx.cfg, "timeframe", ""), ctx.now)
     if not atr_abs:

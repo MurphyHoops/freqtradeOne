@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .factor_spec import DEFAULT_BAG_FACTORS, apply_timeframe_to_factor
 from .factors import FactorBank
 from .registry import REGISTRY
+from .risk import RiskEstimator
 from .schemas import Candidate, Condition
 
 _OPS = {
@@ -87,6 +88,7 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
     if any(math.isnan(v) for v in base_cache[None].values()):
         return []
 
+    risk = RiskEstimator(cfg)
     results: List[Candidate] = []
     for spec in REGISTRY.all():
         tf = spec.timeframe
@@ -97,8 +99,11 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
         if not _all_conditions_pass(fb, spec.conditions, tf):
             continue
 
-        sl = _safe(spec.sl_fn(bag, cfg))
-        tp = _safe(spec.tp_fn(bag, cfg))
+        plan = risk.plan(spec.name, tf, fb, bag)
+        exit_profile = plan.exit_profile if plan else None
+        recipe_name = plan.recipe if plan else None
+        sl = plan.sl_pct if plan else _safe(spec.sl_fn(bag, cfg))
+        tp = plan.tp_pct if plan else _safe(spec.tp_fn(bag, cfg))
         if sl <= 0 or tp <= 0:
             continue
         raw = _safe(spec.raw_fn(bag, cfg))
@@ -119,6 +124,8 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
                 win_prob=win,
                 expected_edge=edge,
                 squad=spec.squad,
+                exit_profile=exit_profile,
+                recipe=recipe_name,
             )
         )
     return results

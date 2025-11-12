@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional, Sequence
 
-from .signal import Candidate
+from .signal.schemas import Candidate
 
 
 @dataclass
@@ -37,7 +37,6 @@ class TierManager:
 
     def __init__(self) -> None:
         """初始化三档策略参数（Healthy / Recovery / ICU）。"""
-
         self._t0 = TierPolicy(
             name="T0_healthy",
             allowed_kinds={

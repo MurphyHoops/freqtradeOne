@@ -15,8 +15,71 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class ExitProfile:
+    """Unified parameters describing how exits should behave."""
+
+    atr_timeframe: Optional[str] = None
+    atr_mul_sl: float = 1.0
+    floor_sl_pct: float = 0.0
+    atr_mul_tp: Optional[float] = None
+    breakeven_lock_frac_of_tp: Optional[float] = None
+    trail_mode: Optional[str] = None  # e.g. "chandelier" / "percent"
+    trail_atr_mul: Optional[float] = None
+    trail_pct: Optional[float] = None
+    activation_atr_mul: Optional[float] = None
+    max_bars_in_trade: Optional[int] = None
+    ladder: Tuple[Tuple[float, float], ...] = ()
+
+
+@dataclass(frozen=True)
+class StrategyRecipe:
+    """Bind a set of entry signals to an exit profile + policy thresholds."""
+
+    name: str
+    entries: Tuple[str, ...]
+    exit_profile: str
+    tier: Optional[str] = None
+    min_rr: float = 0.0
+    min_edge: float = 0.0
+
+
+DEFAULT_EXIT_PROFILES: Dict[str, ExitProfile] = {
+    "ATRtrail_v1": ExitProfile(
+        atr_timeframe=None,
+        atr_mul_sl=8,
+        floor_sl_pct=0.006,
+        atr_mul_tp=2,
+        breakeven_lock_frac_of_tp=0.5,
+        trail_mode="chandelier",
+        trail_atr_mul=2.5,
+        activation_atr_mul=1.5,
+        max_bars_in_trade=240,
+    )
+}
+
+DEFAULT_STRATEGY_RECIPES: Tuple[StrategyRecipe, ...] = (
+    StrategyRecipe(
+        name="NBX_fast_default",
+        entries=("newbars_breakout_long_5m", "newbars_breakdown_short_5m"),
+        exit_profile="ATRtrail_v1",
+        tier="T0_healthy",
+        min_rr=1.2,
+        min_edge=0.0,
+    ),
+    StrategyRecipe(
+        name="NBX_recovery_default",
+        entries=("newbars_breakout_long_30m", "newbars_breakdown_short_30m"),
+        exit_profile="ATRtrail_v1",
+        tier="T12_recovery",
+        min_rr=1.2,
+        min_edge=0.0,
+    ),
+)
 
 
 @dataclass
@@ -79,15 +142,22 @@ class V29Config:
     atr_len: int = 14  # ATR 长度
     adx_len: int = 14  # ADX 长度（支持动态列名）
 
-    # 离场
-    sl_k: float = 1.6
-    tp_k: float =2.0
+    # 默认离场
+    atr_sl_k: float =8.0
+    atr_tp_k: float = 2.0
+    
     # Behaviour toggles
     suppress_baseline_when_stressed: bool = True  # 压力期是否抑制 baseline VaR
 
     # Runtime
     dry_run_wallet_fallback: float = 1000.0  # Dry-run 默认资金
     enforce_leverage: float = 1.0  # 使用的杠杆倍数
+    exit_profiles: Dict[str, ExitProfile] = field(
+        default_factory=lambda: dict(DEFAULT_EXIT_PROFILES)
+    )
+    strategy_recipes: Tuple[StrategyRecipe, ...] = field(
+        default_factory=lambda: DEFAULT_STRATEGY_RECIPES
+    )
 
 
 def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]) -> V29Config:
@@ -112,3 +182,30 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         if hasattr(cfg, key):
             setattr(cfg, key, value)
     return cfg
+
+
+def get_exit_profile(cfg: V29Config, name: str) -> ExitProfile:
+    """Fetch a named exit profile, raising for unknown profiles."""
+
+    try:
+        return cfg.exit_profiles[name]
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise ValueError(f"Unknown exit profile '{name}'") from exc
+
+
+def find_strategy_recipe(cfg: V29Config, recipe_name: str) -> Optional[StrategyRecipe]:
+    """Return the requested strategy recipe, if defined."""
+
+    for recipe in cfg.strategy_recipes:
+        if recipe.name == recipe_name:
+            return recipe
+    return None
+
+
+def entries_to_recipe(cfg: V29Config, entry_kind: str) -> Optional[StrategyRecipe]:
+    """Locate the first recipe that references the given entry signal."""
+
+    for recipe in cfg.strategy_recipes:
+        if entry_kind in recipe.entries:
+            return recipe
+    return None

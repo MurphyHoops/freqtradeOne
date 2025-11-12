@@ -5,7 +5,7 @@ import pytest
 
 from user_data.strategies.TaxBrainV29 import ActiveTradeMeta, PairState, TaxBrainV29
 from user_data.strategies.agents.exit import ExitPolicyV29
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v29_config import ExitProfile, V29Config
 
 
 class DummyState:
@@ -131,3 +131,32 @@ def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
 
     lock = strategy.custom_stoploss(pair, trade, None, 110.0, 0.04, False)
     assert lock > -0.02
+
+    # Exit profile should override baseline plan when sl/tp missing
+    profile_name = "unit_profile"
+    strategy.cfg.exit_profiles[profile_name] = ExitProfile(
+        atr_mul_sl=1.5,
+        floor_sl_pct=0.01,
+        atr_mul_tp=3.0,
+    )
+    trade2 = DummyTrade(trade_id=99)
+    trade2.set_custom_data("exit_profile", profile_name)
+    trade2.set_custom_data("sl_pct", 0.0)
+    trade2.set_custom_data("tp_pct", 0.0)
+    trade2.user_data["exit_profile"] = profile_name
+    pst.active_trades[str(trade2.trade_id)] = ActiveTradeMeta(
+        sl_pct=0.0,
+        tp_pct=0.0,
+        direction="long",
+        entry_bar_tick=0,
+        entry_price=100.0,
+        bucket="fast",
+        icu_bars_left=None,
+        exit_profile=profile_name,
+    )
+
+    df_profile = pd.DataFrame({"atr": [2.0], "close": [100.0]})
+    strategy.dp.get_analyzed_dataframe = lambda *args, **kwargs: (df_profile, None)
+    sl_profile = strategy.custom_stoploss(pair, trade2, None, 100.0, 0.0, False)
+    # ATR% = 0.02, *1.5 => 0.03 (> floor 0.01)
+    assert sl_profile == pytest.approx(-0.03)

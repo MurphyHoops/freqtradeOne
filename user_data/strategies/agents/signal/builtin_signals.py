@@ -72,11 +72,11 @@ NEWBARS_THRESHOLD = 80
 
 
 def _newbars_sl(bag, _cfg):
-    return bag["ATR_PCT"] * _cfg.sl_k
+    return bag["ATR_PCT"] * _cfg.atr_sl_k
 
 
 def _newbars_tp(bag, _cfg):
-    return bag["ATR_PCT"] * _cfg.tp_k
+    return bag["ATR_PCT"] * _cfg.atr_tp_k
 
 
 def _newbars_raw(key: str):

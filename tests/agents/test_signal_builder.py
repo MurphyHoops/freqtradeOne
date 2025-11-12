@@ -1,8 +1,9 @@
 """Integration tests for the plug-in candidate builder."""
 
+import math
 from types import SimpleNamespace
 
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v29_config import ExitProfile, StrategyRecipe, V29Config
 from user_data.strategies.agents.signal import build_candidates
 from user_data.strategies.agents.signal import builder as builder_module
 from user_data.strategies.agents.signal.schemas import Condition, SignalSpec
@@ -82,3 +83,47 @@ def test_builder_handles_timeframe_specific_spec(monkeypatch):
     cands = builder_module.build_candidates(row, cfg, informative={"1h": info_row})
     assert len(cands) == 1
     assert cands[0].kind == "tf_long"
+
+
+def test_builder_prefers_exit_profile_plan(monkeypatch):
+    cfg = V29Config()
+    cfg.exit_profiles = {
+        "custom_profile": ExitProfile(
+            atr_mul_sl=1.0,
+            floor_sl_pct=0.01,
+            atr_mul_tp=2.5,
+        )
+    }
+    cfg.strategy_recipes = (
+        StrategyRecipe(
+            name="custom_recipe",
+            entries=("tf_long",),
+            exit_profile="custom_profile",
+            tier=None,
+            min_rr=1.2,
+            min_edge=0.0,
+        ),
+    )
+    spec = SignalSpec(
+        name="tf_long",
+        direction="long",
+        squad="TF",
+        conditions=[Condition("RSI", ">", 40.0)],
+        sl_fn=lambda *_: 0.5,
+        tp_fn=lambda *_: 1.0,
+        raw_fn=lambda bag, _: bag["RSI"] / 100.0,
+        win_prob_fn=lambda bag, _, raw: 0.5 + raw * 0.2,
+        min_rr=1.0,
+        min_edge=0.0,
+        required_factors=("RSI",),
+    )
+    fake_registry = SimpleNamespace(all=lambda: [spec])
+    monkeypatch.setattr(builder_module, "REGISTRY", fake_registry)
+
+    row = _row(rsi=60.0, atr_pct=0.02)
+    cands = builder_module.build_candidates(row, cfg)
+    assert len(cands) == 1
+    cand = cands[0]
+    assert cand.exit_profile == "custom_profile"
+    assert math.isclose(cand.sl_pct, 0.02, rel_tol=1e-4)
+    assert math.isclose(cand.tp_pct, 0.05, rel_tol=1e-4)

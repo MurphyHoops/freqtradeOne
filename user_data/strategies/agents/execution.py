@@ -69,6 +69,8 @@ class ExecutionAgent:
         bucket = str(meta.get("bucket", "slow"))
         real_risk = float(meta.get("risk_final", meta.get("risk", 0.0)))
         entry_price = float(meta.get("entry_price", getattr(trade, "open_rate", 0.0)))
+        exit_profile = meta.get("exit_profile")
+        recipe = meta.get("recipe")
 
         # 正确的方法名：TierManager.get(closs)
         try:
@@ -87,6 +89,8 @@ class ExecutionAgent:
             bucket=bucket,
             entry_price=entry_price,
             tier_pol=tier_pol,
+            exit_profile=exit_profile,
+            recipe=recipe,
         )
 
         # 释放预约风险名额
@@ -98,12 +102,20 @@ class ExecutionAgent:
             if hasattr(trade, "set_custom_data"):
                 trade.set_custom_data("sl_pct", sl)
                 trade.set_custom_data("tp_pct", tp)
+                if exit_profile:
+                    trade.set_custom_data("exit_profile", exit_profile)
+                if recipe:
+                    trade.set_custom_data("recipe", recipe)
         except Exception:
             pass
         try:
             if hasattr(trade, "user_data") and isinstance(trade.user_data, dict):
                 trade.user_data["sl_pct"] = sl
                 trade.user_data["tp_pct"] = tp
+                if exit_profile:
+                    trade.user_data["exit_profile"] = exit_profile
+                if recipe:
+                    trade.user_data["recipe"] = recipe
         except Exception:
             pass
 

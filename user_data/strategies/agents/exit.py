@@ -1,14 +1,12 @@
 ﻿# agents/exit.py
-
 from __future__ import annotations
 from typing import Optional
 
 try:
-    from exits.router import EXIT_ROUTER, ImmediateContext
+    from .exits.router import EXIT_ROUTER, ImmediateContext
 except Exception:  # pragma: no cover
     EXIT_ROUTER = None  # type: ignore
     ImmediateContext = None  # type: ignore
-
 
 class ExitPolicyV29:
     def __init__(self, state, eq_provider, cfg, dp=None) -> None:
@@ -18,7 +16,7 @@ class ExitPolicyV29:
         self.dp = dp  # <--- 保存 dp，供 decide() 注入 Router Context
 
     def decide(self, pair: str, trade_id: str, current_profit_pct: Optional[float]) -> Optional[str]:
-        """先跑 ImmediateExit 规则，没命中再落回旧逻辑。"""
+        """ """
         if EXIT_ROUTER is not None and hasattr(self.state, "get_trade_by_id"):
             try:
                 trade = self.state.get_trade_by_id(trade_id)
@@ -27,7 +25,7 @@ class ExitPolicyV29:
                     trade=trade,
                     now=getattr(self.state, "now", None),
                     profit=(current_profit_pct or 0.0),
-                    dp=self.dp,           # <--- 这里原来用到了 self.dp
+                    dp=self.dp,           # <--- ???????????? self.dp
                     cfg=self.cfg,
                     state=self.state,
                 )
@@ -37,5 +35,55 @@ class ExitPolicyV29:
             except Exception:
                 pass
 
-        # 旧逻辑（保留你原有实现，先返回 None 也可）
+        pair_state = None
+        try:
+            if hasattr(self.state, "get_pair_state"):
+                pair_state = self.state.get_pair_state(pair)
+        except Exception:
+            pair_state = None
+        meta = None
+        if pair_state and getattr(pair_state, "active_trades", None):
+            meta = pair_state.active_trades.get(str(trade_id))
+
+        if meta:
+            if (
+                meta.tp_pct
+                and current_profit_pct is not None
+                and current_profit_pct >= float(meta.tp_pct)
+            ):
+                return "tp_hit"
+            if meta.icu_bars_left is not None and meta.icu_bars_left <= 0:
+                return "icu_timeout"
+            if (
+                pair_state
+                and pair_state.last_dir
+                and pair_state.last_dir != meta.direction
+                and getattr(pair_state, "last_score", 0.0) > 0.0
+            ):
+                return f"flip_{pair_state.last_dir}"
+
+        if (
+            current_profit_pct is not None
+            and current_profit_pct < 0
+            and getattr(self.state, "debt_pool", 0.0) > 0.0
+        ):
+            return "risk_off"
+
+        #  ????
+        return None
+
+    def early_lock_distance(
+        self,
+        trade,
+        current_rate: Optional[float],
+        current_profit_pct: Optional[float],
+        atr_pct_hint: float,
+    ) -> Optional[float]:
+        """Provide a simple breakeven/lock distance when profit exceeds threshold."""
+
+        base = atr_pct_hint if atr_pct_hint and atr_pct_hint > 0 else None
+        if base:
+            return -max(base * 0.5, 0.001)
+        if current_profit_pct is not None and current_profit_pct > 0:
+            return -abs(current_profit_pct) * 0.25
         return None

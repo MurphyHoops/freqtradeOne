@@ -39,6 +39,8 @@ class Candidate:
     win_prob: float
     expected_edge: float
     squad: str
+    exit_profile: Optional[str] = None
+    recipe: Optional[str] = None
 
 
 @dataclass(frozen=True)

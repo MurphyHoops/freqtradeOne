@@ -1,32 +1,18 @@
 # -*- coding: utf-8 -*-
-"""信号模块的依赖分析工具。
-
-该模块会在运行期遍历已经注册的 :class:`SignalSpec`，
-计算出「需要哪些 factor / indicator / timeframe」，
-用于驱动指标按需计算与自动 informative timeframe 注册。
-
-主要入口：
-
-* :func:`collect_factor_requirements` —— 返回每个 timeframe 需要的 factor 集合；
-* :func:`collect_indicator_requirements` —— 将 factor 需求映射为指标需求；
-* :func:`required_timeframes` —— 提取所有需要的 informative timeframe。
-
-所有函数都会自动确保默认因子（例如 DEFAULT_BAG_FACTORS）被纳入，
-因此调用方无需手动维护基础依赖。
-"""
+"""Signal module dependency analysis helpers."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from typing import Dict, Iterable, Optional, Set
 
+from ...config.v29_config import V29Config
 from .registry import REGISTRY
-
 from .factor_spec import (
     DEFAULT_BAG_FACTORS,
+    factor_components_with_default,
     factor_dependencies,
     parse_factor_name,
-    factor_components_with_default,
 )
 
 FactorMap = Dict[Optional[str], Set[str]]
@@ -34,7 +20,7 @@ IndicatorMap = Dict[Optional[str], Set[str]]
 
 
 def _normalized_extra(extra: Optional[Iterable[str]]) -> Iterable[str]:
-    """将用户传入的额外因子列表做一次去空/去重处理。"""
+    """Deduplicate/normalize user-provided factor names."""
 
     if not extra:
         return ()
@@ -42,22 +28,32 @@ def _normalized_extra(extra: Optional[Iterable[str]]) -> Iterable[str]:
     for item in extra:
         if not item:
             continue
-        key = item.upper()
+        token = item.strip()
+        if not token:
+            continue
+        base, _, tf = token.partition("@")
+        base_key = base.strip().upper()
+        tf_key = tf.strip().lower()
+        key = base_key if not tf_key else f"{base_key}@{tf_key}"
         if key in seen:
             continue
         seen.add(key)
         yield key
 
 
-def collect_factor_requirements(extra: Optional[Iterable[str]] = None) -> FactorMap:
-    """返回按 timeframe 分类的 factor 需求字典。
+def collect_factor_requirements(
+    extra: Optional[Iterable[str]] = None,
+    cfg: Optional[V29Config] = None,
+) -> FactorMap:
+    """Return per-timeframe factor requirements derived from registered signals.
 
     Args:
-        extra: 允许调用方追加的因子名（可带 @timeframe 后缀），通常来自配置。
-
-    Returns:
-        dict: key 为 timeframe（基础周期使用 None），value 为该 timeframe 需要的 factor 集合。
+        extra: Optional list of additional factors (with optional ``@timeframe`` suffix).
+        cfg: Optional V29Config; when provided, only signals listed in
+            ``cfg.enabled_signals`` are considered.
     """
+
+    enabled = {name for name in getattr(cfg, "enabled_signals", ()) or () if name}
 
     mapping: Dict[Optional[str], Set[str]] = defaultdict(set)
     mapping[None].update(DEFAULT_BAG_FACTORS)
@@ -65,8 +61,10 @@ def collect_factor_requirements(extra: Optional[Iterable[str]] = None) -> Factor
     for item in _normalized_extra(extra):
         base, tf = parse_factor_name(item)
         mapping[tf].add(base)
-    
+
     for spec in REGISTRY.all():
+        if enabled and spec.name not in enabled:
+            continue
         spec_tf = spec.timeframe
         if spec_tf not in defaults_injected:
             mapping[spec_tf].update(DEFAULT_BAG_FACTORS)
@@ -81,10 +79,13 @@ def collect_factor_requirements(extra: Optional[Iterable[str]] = None) -> Factor
     return {tf: set(values) for tf, values in mapping.items() if values}
 
 
-def collect_indicator_requirements(extra: Optional[Iterable[str]] = None) -> IndicatorMap:
-    """根据 factor 需求推导指标依赖。"""
+def collect_indicator_requirements(
+    extra: Optional[Iterable[str]] = None,
+    cfg: Optional[V29Config] = None,
+) -> IndicatorMap:
+    """Translate factor requirements into indicator dependencies."""
 
-    factor_map = collect_factor_requirements(extra)
+    factor_map = collect_factor_requirements(extra, cfg)
     indicator_map: Dict[Optional[str], Set[str]] = defaultdict(set)
     for tf, factors in factor_map.items():
         for factor in factors:
@@ -94,10 +95,13 @@ def collect_indicator_requirements(extra: Optional[Iterable[str]] = None) -> Ind
     return {tf: set(values) for tf, values in indicator_map.items() if values}
 
 
-def required_timeframes(extra: Optional[Iterable[str]] = None) -> Set[str]:
-    """列出除基础周期以外需要注册的所有 timeframe。"""
+def required_timeframes(
+    extra: Optional[Iterable[str]] = None,
+    cfg: Optional[V29Config] = None,
+) -> Set[str]:
+    """Return the set of informative timeframes needed beyond the base timeframe."""
 
-    factor_map = collect_factor_requirements(extra)
+    factor_map = collect_factor_requirements(extra, cfg)
     return {tf for tf in factor_map.keys() if tf}
 
 

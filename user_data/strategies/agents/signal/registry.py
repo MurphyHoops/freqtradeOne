@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .schemas import SignalSpec
 
@@ -42,11 +42,21 @@ class SignalRegistry:
 REGISTRY = SignalRegistry()
 
 
-def register_signal(*, name: str, direction: str, squad: str,
-                    conditions: Iterable, sl_fn, tp_fn, raw_fn, win_prob_fn,
-                    min_rr: float = 0.0, min_edge: float = 0.0,
-                    required_factors: Optional[Iterable[str]] = None,
-                    timeframes: Optional[Iterable[Optional[str]]] = None):
+def register_signal(
+    *,
+    name: str,
+    direction: str,
+    squad: str,
+    conditions: Iterable,
+    raw_fn,
+    win_prob_fn,
+    min_rr: float = 0.0,
+    min_edge: float = 0.0,
+    required_factors: Optional[Iterable[str]] = None,
+    timeframes: Optional[Iterable[Optional[str]]] = None,
+    sl_fn: Optional[Callable[[Dict[str, float], Any], float]] = None,
+    tp_fn: Optional[Callable[[Dict[str, float], Any], float]] = None,
+):
     """信号插件使用的注册装饰器。
 
     装饰器本身不需要访问被装饰函数的逻辑，函数主体仅用于占位，

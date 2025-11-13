@@ -23,6 +23,7 @@
     ...             "local_loss": 5.0,
     ...             "last_score": 8.0,
     ...             "last_dir": "long",
+    ...             "last_kind": "mean_rev_long",
     ...             "last_squad": "MRL",
     ...             "last_sl_pct": 0.02,
     ...             "cooldown_bars_left": 0,
@@ -168,11 +169,12 @@ class TreasuryAgent:
                 continue
             last_score = float(pdata.get("last_score", 0.0))
             last_dir = pdata.get("last_dir")
+            last_kind = pdata.get("last_kind")
             last_squad = pdata.get("last_squad")
-            if last_score <= 0 or not last_dir or not last_squad:
+            if last_score <= 0 or not last_dir or not last_kind:
                 continue
             tier_pol = self.tier_mgr.get(int(pdata.get("closs", 0)))
-            if last_squad not in tier_pol.allowed_kinds:
+            if not tier_pol.permits(kind=last_kind, squad=last_squad):
                 continue
             pain_weight = 1.0
             if equity > 0:

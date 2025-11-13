@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from user_data.strategies.agents.signal import requirements as req
 from user_data.strategies.agents.signal.schemas import Condition, SignalSpec
+from user_data.strategies.config.v29_config import V29Config
 
 
 def _spec(
@@ -14,8 +15,6 @@ def _spec(
         direction="long",
         squad="TEST",
         conditions=conditions,
-        sl_fn=lambda bag, cfg: 0.01,
-        tp_fn=lambda bag, cfg: 0.02,
         raw_fn=lambda bag, cfg: 0.5,
         win_prob_fn=lambda bag, cfg, raw: 0.6,
         min_rr=1.0,
@@ -52,3 +51,16 @@ def test_collect_factor_requirements_honors_extra(monkeypatch):
     monkeypatch.setattr(req.REGISTRY, "all", lambda: [])
     factor_map = req.collect_factor_requirements(extra=["ADX@4h"])
     assert "4h" in factor_map and "ADX" in factor_map["4h"]
+
+
+def test_collect_factor_requirements_respects_enabled_signals(monkeypatch):
+    keep = _spec("keep", [Condition("RSI", ">", 10.0)])
+    skip = _spec("skip", [Condition("EMA_FAST", ">", 0.0)], timeframe="4h")
+    monkeypatch.setattr(req.REGISTRY, "all", lambda: [keep, skip])
+    cfg = V29Config()
+    cfg.enabled_signals = ("keep",)
+
+    factor_map = req.collect_factor_requirements(cfg=cfg)
+
+    assert None in factor_map and "RSI" in factor_map[None]
+    assert "4h" not in factor_map  # skip is not enabled

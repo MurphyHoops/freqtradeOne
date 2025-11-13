@@ -14,6 +14,7 @@ class DummyPairState:
     def __init__(self, closs: int = 0, local_loss: float = 0.0):
         self.closs = closs
         self.local_loss = local_loss
+        self.last_kind = None
 
 
 class DummyState:
@@ -81,7 +82,8 @@ def build_policy(**overrides):
 
     defaults = dict(
         name="tier",
-        allowed_kinds={"mean_rev_long"},
+        allowed_entries={"mean_rev_long"},
+        allowed_squads=set(),
         min_raw_score=0.0,
         min_rr_ratio=0.0,
         min_edge=0.0,

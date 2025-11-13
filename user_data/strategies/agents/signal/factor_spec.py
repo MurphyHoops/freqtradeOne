@@ -72,7 +72,7 @@ DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {
     ),
 }
 
-DEFAULT_BAG_FACTORS = ("ATR", "ATR_PCT")
+DEFAULT_BAG_FACTORS = ("ATR", "ATR_PCT", "CLOSE")
 
 
 def factor_dependencies(factor: str) -> Set[str]:

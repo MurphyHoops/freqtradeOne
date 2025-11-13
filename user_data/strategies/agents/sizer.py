@@ -7,11 +7,23 @@ SizerAgent 综合基础 VaR、财政拨款、恢复目标与组合/单票 CAP �
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from ..config.v29_config import V29Config
 from .reservation import ReservationAgent
 from .tier import TierManager
+
+
+@dataclass
+class SizingContext:
+    pair: str
+    sl_pct: float
+    tp_pct: float
+    direction: str
+    min_stake: Optional[float]
+    max_stake: float
+    proposed_stake: Optional[float]
 
 
 class SizerAgent:
@@ -63,51 +75,82 @@ class SizerAgent:
             Tuple[float, float, str]: (名义下单额, 实际风险, 使用拨款桶)。
         """
 
+        ctx = SizingContext(
+            pair=pair,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            direction=direction,
+            min_stake=min_stake,
+            max_stake=max_stake,
+            proposed_stake=proposed_stake,
+        )
+        return self._compute_internal(ctx)
+
+    def _compute_internal(self, ctx: SizingContext) -> Tuple[float, float, str]:
         equity = self.eq.get_equity()
-        pst = self.state.get_pair_state(pair)
+        pst = self.state.get_pair_state(ctx.pair)
         tier_pol = self.tier_mgr.get(pst.closs)
 
-        base_risk = tier_pol.k_mult_base_pct * equity
-        if self.cfg.suppress_baseline_when_stressed and equity > 0:
-            if (self.state.debt_pool / equity) > self.cfg.drawdown_threshold_pct:
-                base_risk = 0.0
+        base_risk = self._baseline_risk(equity, tier_pol)
+        risk_local_need = self._apply_recovery_policy(base_risk, ctx.tp_pct, ctx.sl_pct, pst, tier_pol)
 
-        risk_local_need = base_risk
-        if tier_pol.sizing_algo == "TARGET_RECOVERY" and tp_pct > 0:
-            want_rec = pst.local_loss * tier_pol.recovery_factor
-            stake_rec = want_rec / tp_pct
-            risk_rec = stake_rec * sl_pct
-            risk_local_need = max(base_risk, risk_rec)
-
-        fast = self.state.treasury.fast_alloc_risk.get(pair, 0.0)
-        slow = self.state.treasury.slow_alloc_risk.get(pair, 0.0)
+        fast = self.state.treasury.fast_alloc_risk.get(ctx.pair, 0.0)
+        slow = self.state.treasury.slow_alloc_risk.get(ctx.pair, 0.0)
         alloc_total = max(fast, slow)
         bucket = "fast" if fast >= slow else "slow"
         risk_wanted = max(risk_local_need, alloc_total)
 
+        risk_room = self._available_risk_room(ctx.pair, equity, tier_pol)
+
+        risk_final = min(risk_wanted, risk_room)
+        if risk_final <= 0 or ctx.sl_pct <= 0:
+            return (0.0, 0.0, bucket)
+
+        stake_nominal = risk_final / ctx.sl_pct
+        stake_cap_notional = tier_pol.max_stake_notional_pct * equity
+        stake_nominal = min(stake_nominal, stake_cap_notional, float(ctx.max_stake))
+        if ctx.proposed_stake is not None:
+            if ctx.proposed_stake <= 0:
+                return (0.0, 0.0, bucket)
+            stake_nominal = min(stake_nominal, float(ctx.proposed_stake))
+        if ctx.min_stake is not None:
+            stake_nominal = max(stake_nominal, float(ctx.min_stake))
+        if stake_nominal <= 0:
+            return (0.0, 0.0, bucket)
+
+        real_risk = stake_nominal * ctx.sl_pct
+        return (float(stake_nominal), float(real_risk), bucket)
+
+    def _baseline_risk(self, equity: float, tier_pol) -> float:
+        base = tier_pol.k_mult_base_pct * equity
+        if not self.cfg.suppress_baseline_when_stressed or equity <= 0:
+            return base
+        drawdown = self.state.debt_pool / equity
+        if drawdown > self.cfg.drawdown_threshold_pct:
+            return 0.0
+        return base
+
+    def _apply_recovery_policy(
+        self,
+        baseline: float,
+        tp_pct: float,
+        sl_pct: float,
+        pst,
+        tier_pol,
+    ) -> float:
+        risk_need = baseline
+        if tier_pol.sizing_algo == "TARGET_RECOVERY" and tp_pct > 0 and sl_pct > 0:
+            want_rec = pst.local_loss * tier_pol.recovery_factor
+            stake_rec = want_rec / tp_pct
+            risk_rec = stake_rec * sl_pct
+            risk_need = max(baseline, risk_rec)
+        return risk_need
+
+    def _available_risk_room(self, pair: str, equity: float, tier_pol) -> float:
         cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
         port_cap = cap_pct * equity
         used = self.state.get_total_open_risk() + self.reservation.get_total_reserved()
         port_room = max(0.0, port_cap - used)
         pair_reserved = self.reservation.get_pair_reserved(pair)
         pair_room = self.state.per_pair_cap_room(pair, equity, tier_pol, pair_reserved)
-        risk_room = max(0.0, min(port_room, pair_room))
-
-        risk_final = min(risk_wanted, risk_room)
-        if risk_final <= 0 or sl_pct <= 0:
-            return (0.0, 0.0, bucket)
-
-        stake_nominal = risk_final / sl_pct
-        stake_cap_notional = tier_pol.max_stake_notional_pct * equity
-        stake_nominal = min(stake_nominal, stake_cap_notional, float(max_stake))
-        if proposed_stake is not None:
-            if proposed_stake <= 0:
-                return (0.0, 0.0, bucket)
-            stake_nominal = min(stake_nominal, float(proposed_stake))
-        if min_stake is not None:
-            stake_nominal = max(stake_nominal, float(min_stake))
-        if stake_nominal <= 0:
-            return (0.0, 0.0, bucket)
-
-        real_risk = stake_nominal * sl_pct
-        return (float(stake_nominal), float(real_risk), bucket)
+        return max(0.0, min(port_room, pair_room))

@@ -103,9 +103,19 @@ def compute_indicators(
     required: Optional[Iterable[str]] = None,
     duplicate_ohlc: bool = False,
 ) -> pd.DataFrame:
-    """Compute requested indicators and attach them to the dataframe."""
+    """Compute requested indicators and attach them to the dataframe.
 
-    needs = set(DEFAULT_INDICATORS if required is None else required)
+    Args:
+        df: DataFrame containing at least OHLCV columns.
+        cfg: Strategy configuration (provides indicator lengths).
+        suffix: Optional suffix (typically timeframe) appended to generated columns.
+        required: Optional iterable of indicator names (case-insensitive). When omitted,
+            all DEFAULT_INDICATORS are computed. Unknown names are ignored silently.
+        duplicate_ohlc: When True and suffix is provided, copies OHLCV columns with
+            the same suffix if they do not yet exist.
+    """
+
+    needs = _normalize_required(required)
     for key in needs:
         spec = INDICATOR_SPECS.get(key)
         if not spec:
@@ -119,13 +129,25 @@ def compute_indicators(
     return df
 
 
+def _normalize_required(required: Optional[Iterable[str]]) -> Set[str]:
+    if required is None:
+        return set(DEFAULT_INDICATORS)
+    normalized: Set[str] = set()
+    for item in required:
+        if not item:
+            continue
+        normalized.add(str(item).strip().upper())
+    return normalized or set(DEFAULT_INDICATORS)
+
+
 def _duplicate_ohlc_columns(df: pd.DataFrame, suffix: str) -> None:
     for col in _OHLC_COLUMNS:
+        if col not in df.columns:
+            continue
         suffixed = _col_name(col, suffix)
         if suffixed in df.columns:
             continue
-        if col in df.columns:
-            df[suffixed] = df[col]
+        df[suffixed] = df[col]
 
 
 def _bars_since_new_extreme(series: pd.Series, *, mode: str) -> pd.Series:

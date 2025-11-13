@@ -1,19 +1,45 @@
-﻿# agents/exit.py
+# agents/exit.py
 from __future__ import annotations
 from typing import Optional
 
 try:
     from .exits.router import EXIT_ROUTER, ImmediateContext
+    from .exits.exit_tags import ExitTags
 except Exception:  # pragma: no cover
     EXIT_ROUTER = None  # type: ignore
     ImmediateContext = None  # type: ignore
+
+    class _ExitTagsFallback:
+        CLOSE_FILLED = "close_filled"
+        ORDER_CANCELLED = "order_cancelled"
+        ORDER_REJECTED = "order_rejected"
+        TP_HIT = "tp_hit"
+        ICU_TIMEOUT = "icu_timeout"
+        RISK_OFF = "risk_off"
+        BREAKEVEN = "breakeven_lock"
+        HARD_STOP = "hard_stop"
+        HARD_TP = "hard_takeprofit"
+        FLIP_PREFIX = "flip_"
+
+        @staticmethod
+        def flip(direction: str | None) -> str:
+            token = (direction or "").strip().lower()
+            if token not in {"long", "short"}:
+                token = "unknown"
+            return f"{_ExitTagsFallback.FLIP_PREFIX}{token}"
+
+    ExitTags = _ExitTagsFallback()  # type: ignore
 
 class ExitPolicyV29:
     def __init__(self, state, eq_provider, cfg, dp=None) -> None:
         self.state = state
         self.eq_provider = eq_provider
         self.cfg = cfg
-        self.dp = dp  # <--- 保存 dp，供 decide() 注入 Router Context
+        self.dp = dp  # <--- dp���� Router Context
+        self.strategy = None
+
+    def set_strategy(self, strategy) -> None:
+        self.strategy = strategy
 
     def decide(self, pair: str, trade_id: str, current_profit_pct: Optional[float]) -> Optional[str]:
         """ """
@@ -28,6 +54,7 @@ class ExitPolicyV29:
                     dp=self.dp,           # <--- ???????????? self.dp
                     cfg=self.cfg,
                     state=self.state,
+                    strategy=self.strategy,
                 )
                 reason = EXIT_ROUTER.close_now_reason(ctx)
                 if reason:
@@ -51,23 +78,23 @@ class ExitPolicyV29:
                 and current_profit_pct is not None
                 and current_profit_pct >= float(meta.tp_pct)
             ):
-                return "tp_hit"
+                return ExitTags.TP_HIT
             if meta.icu_bars_left is not None and meta.icu_bars_left <= 0:
-                return "icu_timeout"
+                return ExitTags.ICU_TIMEOUT
             if (
                 pair_state
                 and pair_state.last_dir
                 and pair_state.last_dir != meta.direction
                 and getattr(pair_state, "last_score", 0.0) > 0.0
             ):
-                return f"flip_{pair_state.last_dir}"
+                return ExitTags.flip(pair_state.last_dir)
 
         if (
             current_profit_pct is not None
             and current_profit_pct < 0
             and getattr(self.state, "debt_pool", 0.0) > 0.0
         ):
-            return "risk_off"
+            return ExitTags.RISK_OFF
 
         #  ????
         return None
@@ -87,3 +114,4 @@ class ExitPolicyV29:
         if current_profit_pct is not None and current_profit_pct > 0:
             return -abs(current_profit_pct) * 0.25
         return None
+

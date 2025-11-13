@@ -1,24 +1,23 @@
-﻿# -*- coding: utf-8 -*-
-"""分层策略与候选过滤模块。
-
-根据交易对的连续亏损次数（CLOSS）选择对应 TierPolicy，并在信号阶段
-过滤满足当前档位约束的候选，确保风险与恢复策略匹配。
-"""
+# -*- coding: utf-8 -*-
+"""Tier-specific gating logic for candidate selection and sizing."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal, Optional, Sequence
 
-from .signal.schemas import Candidate
+from ..config.v29_config import TierSpec, V29Config
+from .schemas import Candidate
 
 
 @dataclass
 class TierPolicy:
-    """定义单个 Tier 档位下的策略与风险参数集合。"""
+    """Runtime representation of a tier and its guard-rails."""
 
     name: str
-    allowed_kinds: set[str]
+    allowed_recipes: set[str]
+    allowed_entries: set[str]
+    allowed_squads: set[str]
     min_raw_score: float
     min_rr_ratio: float
     min_edge: float
@@ -30,87 +29,97 @@ class TierPolicy:
     per_pair_risk_cap_pct: float
     max_stake_notional_pct: float
     icu_force_exit_bars: int
+    priority: int
+    default_exit_profile: Optional[str]
+
+    def permits(
+        self,
+        *,
+        kind: Optional[str] = None,
+        squad: Optional[str] = None,
+        recipe: Optional[str] = None,
+    ) -> bool:
+        """Check whether the candidate metadata is allowed by this tier."""
+
+        if recipe and recipe in self.allowed_recipes:
+            return True
+        if kind and kind in self.allowed_entries:
+            return True
+        if squad and squad in self.allowed_squads:
+            return True
+        return False
 
 
 class TierManager:
-    """负责根据 CLOSS 获取合适的 TierPolicy。"""
+    """Resolve TierPolicy objects for the current closs / routing state."""
 
-    def __init__(self) -> None:
-        """初始化三档策略参数（Healthy / Recovery / ICU）。"""
-        self._t0 = TierPolicy(
-            name="T0_healthy",
-            allowed_kinds={
-                "newbars_breakout_long_5m",
-                "newbars_breakdown_short_5m",
-            },
-            min_raw_score=0.20,
-            min_rr_ratio=0.2,
-            min_edge=0.002,
-            sizing_algo="BASELINE",
-            k_mult_base_pct=1,
-            recovery_factor=1.0,
-            cooldown_bars=5,
-            cooldown_bars_after_win=2,
-            per_pair_risk_cap_pct=0.03,
-            max_stake_notional_pct=0.15,
-            icu_force_exit_bars=0,
-        )
-        self._t12 = TierPolicy(
-            name="T12_recovery",
-            allowed_kinds={
-                "pullback_long",
-                "trend_short",
-                "newbars_breakout_long_30m",
-                "newbars_breakdown_short_30m",
-            },
-            min_raw_score=0.15,
-            min_rr_ratio=1.4,
-            min_edge=0.003,
-            sizing_algo="TARGET_RECOVERY",
-            k_mult_base_pct=1,
-            recovery_factor=1.5,
-            cooldown_bars=10,
-            cooldown_bars_after_win=4,
-            per_pair_risk_cap_pct=0.02,
-            max_stake_notional_pct=0.12,
-            icu_force_exit_bars=30,
-        )
-        self._t3p = TierPolicy(
-            name="T3p_ICU",
-            allowed_kinds={"trend_short", "mean_rev_long"},
-            min_raw_score=0.20,
-            min_rr_ratio=1.6,
-            min_edge=0.004,
-            sizing_algo="TARGET_RECOVERY",
-            k_mult_base_pct=1,
-            recovery_factor=2.0,
-            cooldown_bars=20,
-            cooldown_bars_after_win=6,
-            per_pair_risk_cap_pct=0.01,
-            max_stake_notional_pct=0.10,
-            icu_force_exit_bars=20,
-        )
+    def __init__(self, cfg: V29Config) -> None:
+        self._cfg = cfg
+        self._routing = getattr(cfg, "tier_routing", None)
+        tiers = getattr(cfg, "tiers", {}) or {}
+        if not tiers:
+            raise ValueError("Tier configuration is empty; supply at least one TierSpec.")
+        self._policies: dict[str, TierPolicy] = {name: self._from_spec(spec) for name, spec in tiers.items()}
+        self._ordered_policies = sorted(self._policies.values(), key=lambda pol: (-pol.priority, pol.name))
 
     def get(self, closs: int) -> TierPolicy:
-        """根据连续亏损次数返回对应档位策略。"""
+        """Return the TierPolicy selected by the routing rules."""
 
-        if closs <= 0:
-            return self._t0
-        if closs <= 2:
-            return self._t12
-        return self._t3p
+        tier_name = self._routing.resolve(closs) if self._routing else None
+        if tier_name and tier_name in self._policies:
+            return self._policies[tier_name]
+        # fallback: deterministic first tier
+        return next(iter(self._policies.values()))
+
+    def get_by_name(self, tier_name: str) -> TierPolicy:
+        """Fetch a tier policy directly by name."""
+
+        return self._policies[tier_name]
+
+    def resolve_for_candidate(self, closs: int, candidate: Candidate) -> TierPolicy:
+        """Return the tier that best accommodates the candidate."""
+
+        primary = self.get(closs)
+        if candidate and primary.permits(kind=candidate.kind, squad=candidate.squad, recipe=candidate.recipe):
+            return primary
+        for policy in self._ordered_policies:
+            if policy.permits(kind=candidate.kind, squad=candidate.squad, recipe=candidate.recipe):
+                return policy
+        return primary
+
+    @staticmethod
+    def _from_spec(spec: TierSpec) -> TierPolicy:
+        return TierPolicy(
+            name=spec.name,
+            allowed_recipes=set(spec.allowed_recipes),
+            allowed_entries=set(spec.allowed_entries),
+            allowed_squads=set(spec.allowed_squads),
+            min_raw_score=spec.min_raw_score,
+            min_rr_ratio=spec.min_rr_ratio,
+            min_edge=spec.min_edge,
+            sizing_algo=spec.sizing_algo,
+            k_mult_base_pct=spec.k_mult_base_pct,
+            recovery_factor=spec.recovery_factor,
+            cooldown_bars=spec.cooldown_bars,
+            cooldown_bars_after_win=spec.cooldown_bars_after_win,
+            per_pair_risk_cap_pct=spec.per_pair_risk_cap_pct,
+            max_stake_notional_pct=spec.max_stake_notional_pct,
+            icu_force_exit_bars=spec.icu_force_exit_bars,
+            priority=int(getattr(spec, "priority", 100)),
+            default_exit_profile=getattr(spec, "default_exit_profile", None),
+        )
 
 
 class TierAgent:
-    """依据 TierPolicy 对候选集合进行过滤与择优。"""
+    """Filter candidate lists according to tier rules."""
 
     @staticmethod
     def filter_best(policy: TierPolicy, candidates: Sequence[Candidate]) -> Optional[Candidate]:
-        """选出满足档位约束且期望收益最大的候选。"""
+        """Select the best candidate that satisfies the tier thresholds."""
 
         ok: list[Candidate] = []
         for cand in candidates:
-            if cand.kind not in policy.allowed_kinds:
+            if not policy.permits(kind=cand.kind, squad=cand.squad, recipe=cand.recipe):
                 continue
             if cand.raw_score < policy.min_raw_score:
                 continue

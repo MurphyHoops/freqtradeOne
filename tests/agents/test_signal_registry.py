@@ -14,8 +14,6 @@ def _dummy_spec(name: str) -> SignalSpec:
         direction="long",
         squad="TEST",
         conditions=[Condition("CLOSE", ">", 0.0)],
-        sl_fn=lambda bag, cfg: 0.01,
-        tp_fn=lambda bag, cfg: 0.02,
         raw_fn=lambda bag, cfg: 0.5,
         win_prob_fn=lambda bag, cfg, raw: 0.6,
         min_rr=1.0,

@@ -15,8 +15,6 @@ from .schemas import Condition
         Condition("RSI", "<", 25.0),
         Condition("DELTA_CLOSE_EMAFAST_PCT", "<", -0.015),
     ],
-    sl_fn=lambda bag, cfg: bag["ATR_PCT"] * 1.2,
-    tp_fn=lambda bag, cfg: bag["ATR_PCT"] * 2.4,
     raw_fn=lambda bag, cfg: max(0.0, (25.0 - bag["RSI"]) / 25.0),
     win_prob_fn=lambda bag, cfg, raw: min(0.9, max(0.5, 0.52 + 0.4 * raw)),
     min_rr=1.2,
@@ -35,8 +33,6 @@ def _mean_rev_long() -> None:
         Condition("ADX", ">", 20.0),
         Condition("DELTA_CLOSE_EMAFAST_PCT", "<", -0.01),
     ],
-    sl_fn=lambda bag, cfg: bag["ATR_PCT"] * 1.0,
-    tp_fn=lambda bag, cfg: bag["ATR_PCT"] * 2.0,
     raw_fn=lambda bag, cfg: 0.5 * max(0.0, bag["EMA_FAST"] / max(bag["EMA_SLOW"], 1e-9) - 1.0)
     + 0.5 * max(0.0, (bag["ADX"] - 20.0) / 20.0),
     win_prob_fn=lambda bag, cfg, raw: min(0.95, max(0.5, 0.55 + 0.4 * raw)),
@@ -56,8 +52,6 @@ def _pullback_long() -> None:
         Condition("ADX", ">", 25.0),
         Condition("DELTA_CLOSE_EMAFAST_PCT", ">", 0.01),
     ],
-    sl_fn=lambda bag, cfg: bag["ATR_PCT"] * 1.2,
-    tp_fn=lambda bag, cfg: bag["ATR_PCT"] * 2.4,
     raw_fn=lambda bag, cfg: 0.5 * max(0.0, (bag["ADX"] - 25.0) / 25.0)
     + 0.5 * max(0.0, 1.0 - bag["EMA_FAST"] / max(bag["EMA_SLOW"], 1e-9)),
     win_prob_fn=lambda bag, cfg, raw: min(0.95, max(0.5, 0.50 + 0.4 * raw)),
@@ -69,14 +63,6 @@ def _trend_short() -> None:
 
 
 NEWBARS_THRESHOLD = 80
-
-
-def _newbars_sl(bag, _cfg):
-    return bag["ATR_PCT"] * _cfg.atr_sl_k
-
-
-def _newbars_tp(bag, _cfg):
-    return bag["ATR_PCT"] * _cfg.atr_tp_k
 
 
 def _newbars_raw(key: str):
@@ -94,8 +80,6 @@ def _newbars_win_prob(_key: str):
     conditions=[
         Condition("NEWBARS_HIGH", ">", NEWBARS_THRESHOLD),
     ],
-    sl_fn=_newbars_sl,
-    tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_HIGH"),
     win_prob_fn=_newbars_win_prob("NEWBARS_HIGH"),
     min_rr=0.1,
@@ -113,8 +97,6 @@ def _newbars_breakout_long_5m() -> None:
     conditions=[
         Condition("NEWBARS_HIGH", ">", NEWBARS_THRESHOLD),
     ],
-    sl_fn=_newbars_sl,
-    tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_HIGH"),
     win_prob_fn=_newbars_win_prob("NEWBARS_HIGH"),
     min_rr=0.1,
@@ -133,8 +115,6 @@ def _newbars_breakout_long_30m() -> None:
     conditions=[
         Condition("NEWBARS_LOW", ">", NEWBARS_THRESHOLD),
     ],
-    sl_fn=_newbars_sl,
-    tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_LOW"),
     win_prob_fn=_newbars_win_prob("NEWBARS_LOW"),
     min_rr=0.1,
@@ -152,8 +132,6 @@ def _newbars_breakdown_short_5m() -> None:
     conditions=[
         Condition("NEWBARS_LOW", ">", NEWBARS_THRESHOLD),
     ],
-    sl_fn=_newbars_sl,
-    tp_fn=_newbars_tp,
     raw_fn=_newbars_raw("NEWBARS_LOW"),
     win_prob_fn=_newbars_win_prob("NEWBARS_LOW"),
     min_rr=0.1,

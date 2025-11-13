@@ -10,7 +10,7 @@ CycleAgent 在每根 K 线完成时负责驱动以下流程：
 from __future__ import annotations
 
 import time
-from typing import Iterable
+from typing import Any, Iterable
 
 from ..config.v29_config import V29Config
 from .analytics import AnalyticsAgent
@@ -106,6 +106,27 @@ class CycleAgent:
         cap_used_pct = (used_risk / cap_abs) if cap_abs > 0 else 0.0
         reservations_count = len(self.reservation.reservations)
 
+        tier_summary: dict[str, dict[str, Any]] = {}
+        for pair, pst in self.state.per_pair.items():
+            try:
+                tier_pol = self.tier_mgr.get(pst.closs) if self.tier_mgr else None
+                tier_name = getattr(tier_pol, "name", None) if tier_pol else None
+            except Exception:
+                tier_pol = None
+                tier_name = None
+            recipes = sorted(
+                {meta.recipe for meta in pst.active_trades.values() if getattr(meta, "recipe", None)}
+            )
+            profiles = sorted(
+                {meta.exit_profile for meta in pst.active_trades.values() if getattr(meta, "exit_profile", None)}
+            )
+            tier_summary[pair] = {
+                "tier": tier_name,
+                "active_trades": len(pst.active_trades),
+                "active_recipes": recipes,
+                "active_exit_profiles": profiles,
+            }
+
         self.analytics.log_finalize(
             bar_tick=self.state.bar_tick,
             pnl=pnl_since_cycle_start,
@@ -115,6 +136,7 @@ class CycleAgent:
             cap_used_pct=cap_used_pct,
             reservations=reservations_count,
             cycle_cleared=cycle_cleared,
+            tier_summary=tier_summary,
         )
 
         report = self.risk.check_invariants(self.state, equity, cap_pct)
@@ -188,6 +210,7 @@ class CycleAgent:
                 "cooldown_bars_left": pst.cooldown_bars_left,
                 "active_trades": len(pst.active_trades),
                 "last_score": pst.last_score,
+                "last_kind": getattr(pst, "last_kind", None),
                 "last_dir": pst.last_dir,
                 "last_squad": pst.last_squad,
                 "last_sl_pct": pst.last_sl_pct,

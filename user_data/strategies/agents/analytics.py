@@ -16,7 +16,8 @@ from __future__ import annotations
 import csv
 import json
 import threading
-from datetime import datetime
+from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,7 +34,7 @@ class AnalyticsAgent:
 
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.date_tag = datetime.utcnow().strftime("%Y%m%d")
+        self.date_tag = datetime.now(UTC).strftime("%Y%m%d")
         self.jsonl_path = self.log_dir / f"v29_analytics.{self.date_tag}.jsonl"
         self.csv_path = self.log_dir / "v29_analytics.csv"
         self._csv_headers = [
@@ -46,6 +47,7 @@ class AnalyticsAgent:
             "slow_alloc_size",
             "reservations",
             "cycle_cleared",
+            "tier_summary",
         ]
         self._csv_header_written = self.csv_path.exists() and self.csv_path.stat().st_size > 0
         self._lock = threading.Lock()
@@ -54,7 +56,7 @@ class AnalyticsAgent:
         """向 JSONL 文件追加一条事件记录。"""
 
         record = dict(payload)
-        record.setdefault("ts", datetime.utcnow().isoformat())
+        record.setdefault("ts", datetime.now(UTC).isoformat())
         with self._lock:
             with self.jsonl_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -81,10 +83,11 @@ class AnalyticsAgent:
         cap_used_pct: float,
         reservations: int,
         cycle_cleared: bool,
+        tier_summary: Optional[dict[str, Any]] = None,
     ) -> None:
         """记录 finalize 阶段的组合风险与拨款状态。"""
 
-        payload = {
+        payload: dict[str, Any] = {
             "event": "finalize",
             "bar_tick": bar_tick,
             "pnl": pnl,
@@ -95,9 +98,11 @@ class AnalyticsAgent:
             "reservations": reservations,
             "cycle_cleared": cycle_cleared,
         }
+        if tier_summary:
+            payload["tier_summary"] = tier_summary
         self._write_jsonl(payload)
         csv_row = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "bar_tick": bar_tick,
             "pnl": pnl,
             "debt_pool": debt_pool,
@@ -106,6 +111,7 @@ class AnalyticsAgent:
             "slow_alloc_size": slow_alloc_size,
             "reservations": reservations,
             "cycle_cleared": int(bool(cycle_cleared)),
+            "tier_summary": json.dumps(tier_summary, ensure_ascii=False) if tier_summary else "",
         }
         self._write_finalize_csv(csv_row)
 
@@ -129,16 +135,49 @@ class AnalyticsAgent:
         }
         self._write_jsonl(payload)
 
-    def log_exit(self, pair: str, trade_id: str, reason: str) -> None:
-        """记录单笔交易退出的原因。"""
+    def log_exit(self, pair: str, trade_id: str, reason: str, **details) -> None:
+        """��¼���ʽ����˳���ԭ�򲢷����ؼ�������."""
 
-        payload = {
+        payload: dict[str, Any] = {
             "event": "exit",
             "pair": pair,
             "trade_id": trade_id,
             "reason": reason,
         }
+        if details:
+            payload.update({k: v for k, v in details.items() if v is not None})
         self._write_jsonl(payload)
+
+    def log_exit_tag_series(self, pair: str, tags) -> None:
+        """Aggregate vectorized exit tags for observability."""
+
+        if tags is None:
+            return
+        values: list[str] = []
+        try:
+            iterable = tags.dropna()
+        except Exception:
+            iterable = tags
+        for item in getattr(iterable, "tolist", lambda: list(iterable))():
+            if not item:
+                continue
+            try:
+                token = str(item)
+            except Exception:
+                continue
+            if not token:
+                continue
+            values.append(token)
+        if not values:
+            return
+        counts = Counter(values)
+        self._write_jsonl(
+            {
+                "event": "exit_tag_agg",
+                "pair": pair,
+                "counts": dict(counts),
+            }
+        )
 
     def log_invariant(self, report: dict[str, Any]) -> None:
         """记录风险不变式检查的结果。"""

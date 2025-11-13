@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
+import pandas as pd
+
 # ---- Data contracts for threshold/immediate channels ----
 @dataclass(frozen=True)
 class SLContext:
@@ -15,6 +17,7 @@ class SLContext:
     dp: Any
     cfg: Any
     state: Any
+    strategy: Any | None = None
 
 @dataclass(frozen=True)
 class TPContext:
@@ -25,6 +28,7 @@ class TPContext:
     dp: Any
     cfg: Any
     state: Any
+    strategy: Any | None = None
 
 @dataclass(frozen=True)
 class ImmediateContext:
@@ -35,6 +39,7 @@ class ImmediateContext:
     dp: Any
     cfg: Any
     state: Any
+    strategy: Any | None = None
 
 # ---- New: Data contract for vector exit channel ----
 @dataclass(frozen=True)
@@ -46,6 +51,7 @@ class VectorContext:
     cfg: Any
     state: Any
     metadata: Dict[str, Any]
+    strategy: Any | None = None
 
 # Function signatures
 SLRuleFn = Callable[[SLContext], Optional[float]]      # -> sl_pct (>0). None: no opinion
@@ -126,7 +132,11 @@ class ExitRouter:
             except Exception:
                 val = None
             if val and val > 0:
-                best = max(best or 0.0, float(val))
+                tightened = float(val)
+                if best is None:
+                    best = tightened
+                else:
+                    best = max(best, tightened)
         return best
 
     def tp_best(self, ctx: TPContext, base_tp_pct: Optional[float]) -> Optional[float]:
@@ -138,7 +148,11 @@ class ExitRouter:
             except Exception:
                 val = None
             if val and val > 0:
-                best = min(best, float(val)) if best else float(val)
+                tightened = float(val)
+                if best is None:
+                    best = tightened
+                else:
+                    best = min(best, tightened)
         return best
 
     def close_now_reason(self, ctx: ImmediateContext) -> Optional[str]:
@@ -160,6 +174,7 @@ class ExitRouter:
         cfg: Any,
         state: Any,
         timeframe_col: str = None,
+        strategy: Any | None = None,
     ) -> Any:
         """Apply all registered vector exit rules to df (used in populate_exit_trend).
 
@@ -183,6 +198,21 @@ class ExitRouter:
                 # some DataFrame-likes may not support None -> use empty string
                 df["exit_tag"] = ""
 
+        def _series_from(value):
+            if isinstance(value, pd.Series):
+                series = value.reindex(df.index)
+            else:
+                try:
+                    series = pd.Series(value, index=df.index)
+                except Exception:
+                    series = pd.Series([value] * len(df.index), index=df.index)
+            return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
+
+        def _merge_or(col_name: str, incoming) -> None:
+            base = pd.to_numeric(df[col_name], errors="coerce").fillna(0).astype(int)
+            merged = pd.concat([base, _series_from(incoming)], axis=1).max(axis=1)
+            df[col_name] = merged.astype(int)
+
         pair = metadata.get("pair", "")
         timeframe = metadata.get("timeframe", getattr(cfg, "timeframe", ""))
 
@@ -193,6 +223,7 @@ class ExitRouter:
             cfg=cfg,
             state=state,
             metadata=metadata,
+            strategy=strategy,
         )
 
         for _, name, fn in self._vector_rules:
@@ -207,16 +238,9 @@ class ExitRouter:
             # If a dict of columns returned, merge columns
             if isinstance(out, dict):
                 if "exit_long" in out:
-                    # OR semantics
-                    df["exit_long"] = (df["exit_long"].astype(int)).where(True, 0)
-                    df["exit_long"] = df["exit_long"].combine(
-                        getattr(out["exit_long"], "astype", lambda _: out["exit_long"])(int), max
-                    )
+                    _merge_or("exit_long", out["exit_long"])
                 if "exit_short" in out:
-                    df["exit_short"] = (df["exit_short"].astype(int)).where(True, 0)
-                    df["exit_short"] = df["exit_short"].combine(
-                        getattr(out["exit_short"], "astype", lambda _: out["exit_short"])(int), max
-                    )
+                    _merge_or("exit_short", out["exit_short"])
                 if "exit_tag" in out:
                     # Higher-priority rules come later – allow overwrite
                     try:

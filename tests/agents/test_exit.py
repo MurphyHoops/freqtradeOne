@@ -5,6 +5,7 @@ import pytest
 
 from user_data.strategies.TaxBrainV29 import ActiveTradeMeta, PairState, TaxBrainV29
 from user_data.strategies.agents.exit import ExitPolicyV29
+from user_data.strategies.agents.exits.exit_tags import ExitTags
 from user_data.strategies.config.v29_config import ExitProfile, V29Config
 
 
@@ -72,20 +73,49 @@ def test_exit_policy_paths():
         icu_bars_left=3,
     )
 
-    assert exit_policy.decide(pair, "1", current_profit_pct=0.05) == "tp_hit"
+    assert exit_policy.decide(pair, "1", current_profit_pct=0.05) == ExitTags.TP_HIT
 
     pst.active_trades["1"].icu_bars_left = 0
-    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == "icu_timeout"
+    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == ExitTags.ICU_TIMEOUT
 
     pst.active_trades["1"].icu_bars_left = 5
     pst.last_dir = "short"
     pst.last_score = 0.05
-    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == "flip_short"
+    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == ExitTags.flip("short")
 
     pst.last_dir = None
     pst.last_score = 0.0
     state.debt_pool = 500.0
-    assert exit_policy.decide(pair, "1", current_profit_pct=-0.01) == "risk_off"
+    assert exit_policy.decide(pair, "1", current_profit_pct=-0.01) == ExitTags.RISK_OFF
+
+
+def test_exit_log_details_contains_enriched_fields(tmp_path):
+    config = {
+        "strategy_params": {
+            "timeframe": "5m",
+            "startup_candle_count": 20,
+        },
+        "dry_run_wallet": 1000,
+        "user_data_dir": str(tmp_path),
+    }
+    strategy = TaxBrainV29(config)
+    trade = DummyTrade(trade_id=10)
+    trade.user_data["exit_profile"] = "ATRtrail_v1"
+    trade.user_data["sl_pct"] = 0.05
+    meta = {
+        "plan_timeframe": "1h",
+        "plan_atr_pct": 0.01,
+        "tier_name": "T0_healthy",
+        "recipe": "NBX_fast_default",
+    }
+
+    details = strategy._exit_log_details(trade, meta)
+    assert details["tier_name"] == "T0_healthy"
+    assert details["recipe"] == "NBX_fast_default"
+    assert details["exit_profile_atr_mul_sl"] == strategy.cfg.exit_profiles["ATRtrail_v1"].atr_mul_sl
+    assert details["exit_profile_atr_timeframe"] == strategy.cfg.exit_profiles["ATRtrail_v1"].atr_timeframe
+    assert details["computed_sl_pct"] == pytest.approx(0.05)
+    assert details["plan_atr_pct"] == pytest.approx(0.01)
 
 
 def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):

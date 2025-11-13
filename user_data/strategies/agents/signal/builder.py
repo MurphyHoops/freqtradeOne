@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""信号注册表到候选列表的执行器。
-
-该模块读取 :data:`REGISTRY` 中的所有 :class:`SignalSpec`，
-并通过 :class:`FactorBank` 获取所需的因子，逐条验证条件、计算 sl/tp/raw。
-最终返回与 V29.1 兼容的 :class:`Candidate` 列表。
-"""
+"""Executor that turns registered signals into scored candidates."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .factor_spec import DEFAULT_BAG_FACTORS, apply_timeframe_to_factor
 from .factors import FactorBank
 from .registry import REGISTRY
-from .risk import RiskEstimator
+from .risk import RiskEstimator, RiskPlan
 from .schemas import Candidate, Condition
 
 _OPS = {
@@ -29,7 +24,7 @@ _OPS = {
 
 
 def _check_condition(fb: FactorBank, cond: Condition, timeframe: Optional[str]) -> bool:
-    """验证单条条件是否通过。"""
+    """Return True when a single condition passes."""
 
     try:
         factor_name = apply_timeframe_to_factor(cond.factor, timeframe)
@@ -55,7 +50,7 @@ def _check_condition(fb: FactorBank, cond: Condition, timeframe: Optional[str]) 
 
 
 def _safe(value: float, default: float = 0.0) -> float:
-    """在信号计算中统一兜底 NaN/Inf。"""
+    """Normalize NaN/None/inf values during scoring."""
 
     try:
         if value is None or math.isnan(value) or math.isinf(value):
@@ -66,7 +61,7 @@ def _safe(value: float, default: float = 0.0) -> float:
 
 
 class _FactorBag(dict):
-    """sl/tp/raw 等函数使用的惰性取值容器。"""
+    """Lazy-fetch container around FactorBank for sl/tp/raw calculations."""
 
     def __init__(self, fb: FactorBank, initial: Dict[str, float], timeframe: Optional[str]) -> None:
         super().__init__(initial)
@@ -81,16 +76,20 @@ class _FactorBag(dict):
 
 
 def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None) -> List[Candidate]:
-    """根据最新的行情行与（可选）informative 行生成候选。"""
+    """Build candidates for the latest market row (and optional informative rows)."""
+
     fb = FactorBank(row, informative=informative)
     base_cache: Dict[Optional[str], Dict[str, float]] = {}
     base_cache[None] = _prefetch_base(fb, None)
     if any(math.isnan(v) for v in base_cache[None].values()):
         return []
 
+    enabled = {name for name in getattr(cfg, "enabled_signals", ()) or () if name}
     risk = RiskEstimator(cfg)
     results: List[Candidate] = []
     for spec in REGISTRY.all():
+        if enabled and spec.name not in enabled:
+            continue
         tf = spec.timeframe
         if tf not in base_cache:
             base_cache[tf] = _prefetch_base(fb, tf)
@@ -100,25 +99,28 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
             continue
 
         plan = risk.plan(spec.name, tf, fb, bag)
-        exit_profile = plan.exit_profile if plan else None
-        recipe_name = plan.recipe if plan else None
-        sl = plan.sl_pct if plan else _safe(spec.sl_fn(bag, cfg))
-        tp = plan.tp_pct if plan else _safe(spec.tp_fn(bag, cfg))
+        if not plan:
+            continue
+
+        exit_profile = plan.exit_profile
+        recipe_name = plan.recipe
+        sl = _safe(plan.sl_pct)
+        tp = _safe(plan.tp_pct)
         if sl <= 0 or tp <= 0:
             continue
         raw = _safe(spec.raw_fn(bag, cfg))
         win = _safe(spec.win_prob_fn(bag, cfg, raw), default=0.5)
         rr = tp / max(sl, 1e-12)
         edge = win * tp - (1.0 - win) * sl
-        if rr < spec.min_rr or edge < spec.min_edge:
+        min_rr = plan.min_rr if plan.min_rr is not None else spec.min_rr
+        min_edge = plan.min_edge if plan.min_edge is not None else spec.min_edge
+        if rr < min_rr or edge < min_edge:
             continue
 
         results.append(
             Candidate(
                 direction=spec.direction,
                 kind=spec.name,
-                sl_pct=sl,
-                tp_pct=tp,
                 raw_score=raw,
                 rr_ratio=rr,
                 win_prob=win,
@@ -132,7 +134,7 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
 
 
 def _prefetch_base(fb: FactorBank, timeframe: Optional[str]) -> Dict[str, float]:
-    """预拉取指定 timeframe 的默认基础因子。"""
+    """Fetch default bag factors for a given timeframe upfront."""
 
     data: Dict[str, float] = {}
     for factor in DEFAULT_BAG_FACTORS:
@@ -151,3 +153,4 @@ def _all_conditions_pass(
         if not _check_condition(fb, cond, timeframe):
             return False
     return True
+

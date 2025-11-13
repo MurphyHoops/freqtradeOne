@@ -71,6 +71,8 @@ class ExecutionAgent:
         entry_price = float(meta.get("entry_price", getattr(trade, "open_rate", 0.0)))
         exit_profile = meta.get("exit_profile")
         recipe = meta.get("recipe")
+        plan_timeframe = meta.get("plan_timeframe")
+        plan_atr_pct = meta.get("atr_pct")
 
         # 正确的方法名：TierManager.get(closs)
         try:
@@ -91,6 +93,9 @@ class ExecutionAgent:
             tier_pol=tier_pol,
             exit_profile=exit_profile,
             recipe=recipe,
+            plan_timeframe=plan_timeframe,
+            plan_atr_pct=plan_atr_pct,
+            tier_name=getattr(tier_pol, "name", None) if tier_pol else None,
         )
 
         # 释放预约风险名额
@@ -98,6 +103,7 @@ class ExecutionAgent:
             self.reservation.release(str(rid))
 
         # 将 sl/tp 同步写入 trade.custom_data / user_data
+        tier_name = getattr(tier_pol, "name", None) if tier_pol else None
         try:
             if hasattr(trade, "set_custom_data"):
                 trade.set_custom_data("sl_pct", sl)
@@ -106,6 +112,8 @@ class ExecutionAgent:
                     trade.set_custom_data("exit_profile", exit_profile)
                 if recipe:
                     trade.set_custom_data("recipe", recipe)
+                if tier_name:
+                    trade.set_custom_data("tier_name", tier_name)
         except Exception:
             pass
         try:
@@ -116,6 +124,8 @@ class ExecutionAgent:
                     trade.user_data["exit_profile"] = exit_profile
                 if recipe:
                     trade.user_data["recipe"] = recipe
+                if tier_name:
+                    trade.user_data["tier_name"] = tier_name
         except Exception:
             pass
 

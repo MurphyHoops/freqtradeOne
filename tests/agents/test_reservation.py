@@ -2,7 +2,7 @@
 
 import pytest
 
-from user_data.strategies.agents.reservation import ReservationAgent
+from user_data.strategies.agents.portfolio.reservation import ReservationAgent
 from user_data.strategies.config.v29_config import V29Config
 
 

@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from user_data.strategies.agents.sizer import SizerAgent
+from user_data.strategies.agents.portfolio.sizer import SizerAgent
 from user_data.strategies.config.v29_config import V29Config
 
 
@@ -14,6 +14,7 @@ class DummyPairState:
     def __init__(self, closs: int = 0, local_loss: float = 0.0):
         self.closs = closs
         self.local_loss = local_loss
+        self.last_kind = None
 
 
 class DummyState:
@@ -81,7 +82,8 @@ def build_policy(**overrides):
 
     defaults = dict(
         name="tier",
-        allowed_kinds={"mean_rev_long"},
+        allowed_entries={"mean_rev_long"},
+        allowed_squads=set(),
         min_raw_score=0.0,
         min_rr_ratio=0.0,
         min_edge=0.0,
@@ -162,3 +164,30 @@ def test_sizer_respects_caps_and_minmax():
     assert bucket == "fast"
     assert stake == pytest.approx(200.0)
     assert risk == pytest.approx(10.0)
+
+
+def test_sizer_caps_with_proposed_stake():
+    """Freqtrade �Ƽ��µ����޺�Ӧ��Ϊ����һ������Լ��."""
+
+    cfg = V29Config()
+    pair_state = DummyPairState()
+    state = DummyState(debt_pool=0.0, cap_pct=1.0, total_open=0.0, pair_state=pair_state)
+    reservation = DummyReservation()
+    equity = DummyEquity(5000.0)
+    policy = build_policy()
+    tier_mgr = DummyTierMgr(policy)
+    sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
+
+    stake, risk, bucket = sizer.compute(
+        "TEST/USDT",
+        sl_pct=0.02,
+        tp_pct=0.04,
+        direction="long",
+        min_stake=None,
+        max_stake=1_000_000,
+        proposed_stake=100.0,
+    )
+
+    assert bucket == "fast"
+    assert stake == pytest.approx(100.0)
+    assert risk == pytest.approx(2.0)

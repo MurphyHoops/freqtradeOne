@@ -1,0 +1,81 @@
+{
+    "$schema": "https://schema.freqtrade.io/schema.json",
+    "strategy": "TaxBrainV29",
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+    "stake_currency": "USDT",
+    "stake_amount": "unlimited",
+    "max_open_trades": 50,
+    "tradable_balance_ratio": 0.99,
+    "timeframe": "5m",
+    "startup_candle_count": 210,
+    "datadir": "user_data/data",
+    "enable_protections": false,
+    "exchange": {
+        "name": "binanceusdm",
+        "key": "",
+        "secret": "",
+        "ccxt_config": {      
+            "proxies": {
+                "http":  "http://127.0.0.1:7890",
+                "https": "http://127.0.0.1:7890"
+                },
+            "aiohttp_proxy": "http://127.0.0.1:7890"
+            },
+        "ccxt_async_config": {},
+        "pair_whitelist": [
+            "BTC/USDT:USDT",
+            "ETH/USDT:USDT"
+        ],
+        "pair_blacklist": []
+    },
+    "pairlists": [
+        {
+            "method": "StaticPairList",
+            "pairs": [
+                "BTC/USDT:USDT",
+                "ETH/USDT:USDT"
+            ]
+        }
+    ],
+    "timeframes": [
+        "5m"
+    ],
+    "strategy_params": {
+        "timeframe": "5m",
+        "startup_candle_count": 210,
+        "adx_len": 14,
+        "ema_fast": 50,
+        "ema_slow": 200,
+        "treasury_fast_split_pct": 0.3,
+        "fast_topK_squads": 10,
+        "slow_universe_pct": 0.9,
+        "breakeven_lock_frac_of_tp": 0.5,
+        "breakeven_lock_eps_atr_pct": 0.1
+    },
+    "dataprovider": {
+        "freqaimodel": "",
+        "fetch_ohlcv_params": {}
+    },
+    "entry_pricing": {
+        "price_side": "same",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "exit_pricing": {
+        "price_side": "same",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",     
+        "listen_port": 8080,
+        "username": "Freqtrader",
+        "password": "SuperSecret1!",
+        "enable_openapi": true,
+        "CORS_origins": ["http://127.0.0.1:8080","http://localhost:8080"]
+    }
+}

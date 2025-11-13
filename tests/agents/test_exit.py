@@ -1,15 +1,17 @@
-﻿"""ExitPolicyV29 及 TaxBrainV29 自定义止损逻辑的单元测试。"""
+"""ExitPolicyV29 and TaxBrainV29 exit wiring unit tests."""
 
-import pandas as pd
+from __future__ import annotations
+
 import pytest
 
+import user_data.strategies.TaxBrainV29 as strat_mod
 from user_data.strategies.TaxBrainV29 import ActiveTradeMeta, PairState, TaxBrainV29
-from user_data.strategies.agents.exit import ExitPolicyV29
+from user_data.strategies.agents.exits.exit import ExitPolicyV29, ExitTags
 from user_data.strategies.config.v29_config import V29Config
 
 
 class DummyState:
-    """提供最少属性以支撑退出策略测试。"""
+    """Provide minimal state needed by ExitPolicyV29."""
 
     def __init__(self, cfg: V29Config):
         self.cfg = cfg
@@ -23,7 +25,7 @@ class DummyState:
 
 
 class DummyEquity:
-    """返回固定数值的权益桩对象。"""
+    """Fixed equity provider."""
 
     def __init__(self, value: float):
         self.value = value
@@ -36,7 +38,7 @@ class DummyEquity:
 
 
 class DummyTrade:
-    """模拟 Freqtrade Trade，用于 custom_stoploss 测试。"""
+    """Lightweight trade stub used by custom_stoploss/exit tests."""
 
     def __init__(self, trade_id: int = 1, is_long: bool = True):
         self.trade_id = trade_id
@@ -44,6 +46,7 @@ class DummyTrade:
         self.is_long = is_long
         self.user_data = {}
         self._custom = {}
+        self.exit_reason = None
 
     def get_custom_data(self, key):
         return self._custom.get(key)
@@ -53,7 +56,7 @@ class DummyTrade:
 
 
 def test_exit_policy_paths():
-    """覆盖 tp_hit、icu_timeout、flip 和 risk_off 等路径。"""
+    """Validate exit tags emitted by ExitPolicyV29."""
 
     cfg = V29Config()
     state = DummyState(cfg)
@@ -72,62 +75,61 @@ def test_exit_policy_paths():
         icu_bars_left=3,
     )
 
-    assert exit_policy.decide(pair, "1", current_profit_pct=0.05) == "tp_hit"
+    assert exit_policy.decide(pair, "1", current_profit_pct=0.05) == ExitTags.TP_HIT
 
     pst.active_trades["1"].icu_bars_left = 0
-    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == "icu_timeout"
+    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == ExitTags.ICU_TIMEOUT
 
     pst.active_trades["1"].icu_bars_left = 5
     pst.last_dir = "short"
     pst.last_score = 0.05
-    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == "flip_short"
+    assert exit_policy.decide(pair, "1", current_profit_pct=0.0) == ExitTags.flip("short")
 
     pst.last_dir = None
     pst.last_score = 0.0
     state.debt_pool = 500.0
-    assert exit_policy.decide(pair, "1", current_profit_pct=-0.01) == "risk_off"
+    assert exit_policy.decide(pair, "1", current_profit_pct=-0.01) == ExitTags.RISK_OFF
 
 
-def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
-    """验证三重 tp/sl 兜底及早锁盈触发逻辑。"""
+@pytest.mark.parametrize("router_value", [0.05, None])
+def test_custom_stoploss_router_behavior(monkeypatch, tmp_path, router_value):
+    """Custom stoploss should rely solely on ExitRouter outputs."""
 
     config = {
-        "strategy_params": {
-            "timeframe": "5m",
-            "startup_candle_count": 50,
-        },
+        "strategy_params": {"timeframe": "5m", "startup_candle_count": 50},
         "dry_run_wallet": 1000,
         "user_data_dir": str(tmp_path),
     }
     strategy = TaxBrainV29(config)
+    trade = DummyTrade(trade_id=42)
     pair = "BTC/USDT"
-    trade = DummyTrade(trade_id=77)
 
-    pst = strategy.state.get_pair_state(pair)
-    pst.active_trades[str(trade.trade_id)] = ActiveTradeMeta(
-        sl_pct=0.03,
-        tp_pct=0.06,
-        direction="long",
-        entry_bar_tick=0,
-        entry_price=100.0,
-        bucket="fast",
-        icu_bars_left=None,
+    monkeypatch.setattr(
+        strat_mod.EXIT_ROUTER,
+        "_sl_rules",
+        [(0, "test_stub", lambda ctx: router_value)],
     )
-    pst.last_atr_pct = 0.01
 
-    sl = strategy.custom_stoploss(pair, trade, None, 100.0, 0.0, False)
-    assert sl == pytest.approx(-0.03)
+    result = strategy.custom_stoploss(pair, trade, None, 100.0, 0.02, False)
+    if router_value is None:
+        assert result == strategy.stoploss
+    else:
+        assert result == pytest.approx(-router_value)
 
-    trade.user_data["sl_pct"] = 0.05
-    trade.user_data["tp_pct"] = 0.08
-    sl = strategy.custom_stoploss(pair, trade, None, 100.0, 0.0, False)
-    assert sl == pytest.approx(-0.05)
 
-    trade.set_custom_data("sl_pct", 0.02)
-    trade.set_custom_data("tp_pct", 0.04)
+def test_custom_exit_records_reason(monkeypatch, tmp_path):
+    """ExitPolicy decisions should be recorded and returned."""
 
-    df = pd.DataFrame({"atr": [1.0], "close": [100.0]})
-    strategy.dp.get_analyzed_dataframe = lambda *args, **kwargs: (df, None)
+    config = {
+        "strategy_params": {"timeframe": "5m", "startup_candle_count": 50},
+        "dry_run_wallet": 1000,
+        "user_data_dir": str(tmp_path),
+    }
+    strategy = TaxBrainV29(config)
+    trade = DummyTrade()
+    monkeypatch.setattr(strategy.exit_policy, "decide", lambda *args, **kwargs: ExitTags.ICU_TIMEOUT)
 
-    lock = strategy.custom_stoploss(pair, trade, None, 110.0, 0.04, False)
-    assert lock > -0.02
+    reason = strategy.custom_exit("BTC/USDT", trade, None, 100.0, 0.05)
+    assert reason == ExitTags.ICU_TIMEOUT
+    assert trade.exit_reason == ExitTags.ICU_TIMEOUT
+    assert trade.get_custom_data("exit_tag") == ExitTags.ICU_TIMEOUT

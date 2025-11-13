@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from user_data.strategies.agents.cycle import CycleAgent
+from user_data.strategies.agents.portfolio.cycle import CycleAgent
 from user_data.strategies.config.v29_config import V29Config
-from user_data.strategies.agents.treasury import AllocationPlan
+from user_data.strategies.agents.portfolio.treasury import AllocationPlan
 
 
 class DummyPairState:
@@ -20,6 +20,7 @@ class DummyPairState:
         self.cooldown_bars_left = 0
         self.active_trades = {}
         self.last_score = 0.0
+        self.last_kind = None
         self.last_dir = None
         self.last_squad = None
         self.last_sl_pct = 0.02
@@ -213,3 +214,6 @@ def test_cycle_finalize_clears_debt_on_profitable_cycle():
 
     final_entries = [call for call in analytics.finalize_calls if "cycle_cleared" in call]
     assert final_entries[-1]["cycle_cleared"] is False
+    last_entry = latest_finalize_entry(analytics)
+    assert "tier_summary" in last_entry
+    assert isinstance(last_entry["tier_summary"], dict)

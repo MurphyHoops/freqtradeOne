@@ -2,8 +2,8 @@
 
 import pytest
 
-from user_data.strategies.agents.tier import TierPolicy
-from user_data.strategies.agents.treasury import TreasuryAgent
+from user_data.strategies.agents.portfolio.tier import TierPolicy
+from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
 from user_data.strategies.config.v29_config import V29Config
 
 
@@ -22,7 +22,9 @@ def make_policy(**overrides) -> TierPolicy:
 
     data = dict(
         name="test",
-        allowed_kinds={"MRL", "PBL", "TRS"},
+        allowed_recipes=set(),
+        allowed_entries=set(),
+        allowed_squads={"MRL", "PBL", "TRS"},
         min_raw_score=0.0,
         min_rr_ratio=0.0,
         min_edge=0.0,
@@ -70,6 +72,7 @@ def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
             "active_trades": 0,
             "last_score": 3.0,
             "last_dir": "long",
+            "last_kind": "mean_rev_long",
             "last_squad": "MRL",
             "last_sl_pct": 0.02,
             "local_loss": 0.0,
@@ -82,6 +85,7 @@ def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
             "active_trades": 0,
             "last_score": 2.0,
             "last_dir": "long",
+            "last_kind": "mean_rev_long",
             "last_squad": "MRL",
             "last_sl_pct": 0.02,
             "local_loss": 0.0,
@@ -94,6 +98,7 @@ def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
             "active_trades": 0,
             "last_score": 1.5,
             "last_dir": "short",
+            "last_kind": "pullback_long",
             "last_squad": "PBL",
             "last_sl_pct": 0.03,
             "local_loss": 40.0,
@@ -132,6 +137,7 @@ def test_treasury_honours_min_injection_and_cap_trim():
             "active_trades": 0,
             "last_score": 5.0,
             "last_dir": "long",
+            "last_kind": "mean_rev_long",
             "last_squad": "MRL",
             "last_sl_pct": 0.01,
             "local_loss": 0.0,

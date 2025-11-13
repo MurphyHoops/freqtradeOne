@@ -196,11 +196,10 @@ except Exception:  # pragma: no cover
 
 # TaxBrainV29.py 顶部（和其它 import 放一起）
 
-from user_data.strategies.agents.exits import rules_immediate  # 注册即时退出规则
-
-from user_data.strategies.agents.exits import rules_threshold  # 注册 SL/TP 规则
+from user_data.strategies.agents.exits import rules_threshold  # 注册 SL/TP + 即时退出规则
 
 from user_data.strategies.config.v29_config import ExitProfile, V29Config, apply_overrides
+from user_data.strategies.agents.exits.profiles import ProfilePlan
 
 from user_data.strategies.agents.treasury import TreasuryAgent
 
@@ -1708,6 +1707,7 @@ class TaxBrainV29(IStrategy):
                     metadata=meta,
 
                     state=self.state,
+                    timeframe_col=None,
 
                 )
 
@@ -1724,6 +1724,7 @@ class TaxBrainV29(IStrategy):
                     cfg=self.cfg,
 
                     state=self.state,
+                    timeframe_col=None,
 
                 )
 
@@ -2091,84 +2092,6 @@ class TaxBrainV29(IStrategy):
 
         return released, meta_snapshot
 
-    def _exit_log_details(
-        self,
-        trade,
-        plan_meta: Optional[Dict[str, Any]] = None,
-        pair: Optional[str] = None,
-    ) -> Dict[str, Any]:
-
-        meta = dict(plan_meta or {})
-        pair = pair or meta.get("pair")
-        details: Dict[str, Any] = {
-            "tier_name": meta.get("tier_name"),
-            "recipe": meta.get("recipe"),
-            "plan_timeframe": meta.get("plan_timeframe"),
-            "plan_atr_pct": meta.get("plan_atr_pct"),
-            "pair": pair,
-            "trade_id": getattr(trade, "trade_id", getattr(trade, "id", None)),
-        }
-
-        profile_name = meta.get("exit_profile")
-        if not profile_name:
-            if pair:
-                try:
-                    profile_name = self._trade_exit_profile_name(pair, trade)
-                except Exception:
-                    profile_name = None
-            if not profile_name:
-                try:
-                    if hasattr(trade, "get_custom_data"):
-                        profile_name = trade.get_custom_data("exit_profile")
-                except Exception:
-                    profile_name = None
-                if not profile_name and getattr(trade, "user_data", None):
-                    profile_name = trade.user_data.get("exit_profile")
-        details["exit_profile"] = profile_name
-
-        profile = self.cfg.exit_profiles.get(profile_name) if profile_name else None
-        details["exit_profile_atr_mul_sl"] = getattr(profile, "atr_mul_sl", None)
-        details["exit_profile_atr_timeframe"] = getattr(profile, "atr_timeframe", None)
-
-        def _maybe_float(value: Any) -> Optional[float]:
-            try:
-                if value is None:
-                    return None
-                val = float(value)
-            except Exception:
-                return None
-            return val if val > 0 else None
-
-        sl_pct = _maybe_float(meta.get("sl_pct"))
-        if sl_pct is None and hasattr(trade, "get_custom_data"):
-            try:
-                sl_pct = _maybe_float(trade.get_custom_data("sl_pct"))
-            except Exception:
-                sl_pct = None
-        if sl_pct is None and getattr(trade, "user_data", None):
-            sl_pct = _maybe_float(trade.user_data.get("sl_pct"))
-        if sl_pct is None and pair and hasattr(self.state, "get_pair_state"):
-            try:
-                pst = self.state.get_pair_state(pair)
-                trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-                active = pst.active_trades.get(trade_id)
-                if active:
-                    sl_pct = _maybe_float(getattr(active, "sl_pct", None))
-            except Exception:
-                pass
-        if sl_pct is None and profile:
-            atr_pct = _maybe_float(meta.get("plan_atr_pct"))
-            if atr_pct is None and pair:
-                atr_pct = self._atr_pct_from_dp(pair, profile.atr_timeframe or self.timeframe, None)
-            if atr_pct and atr_pct > 0:
-                mul = profile.atr_mul_sl or 0.0
-                floor = profile.floor_sl_pct or 0.0
-                candidate = max(floor, atr_pct * mul)
-                sl_pct = candidate if candidate > 0 else None
-
-        details["computed_sl_pct"] = sl_pct
-        details["plan_atr_pct"] = _maybe_float(details["plan_atr_pct"])
-        return details
 
     def custom_stoploss(
 
@@ -2236,23 +2159,7 @@ class TaxBrainV29(IStrategy):
 
             pass
 
-        # 1.2 trade.user_data
-
-        try:
-
-            if (sl_pct is None or sl_pct <= 0) and getattr(trade, "user_data", None):
-
-                sl_pct = trade.user_data.get("sl_pct")
-
-            if (tp_pct is None or tp_pct <= 0) and getattr(trade, "user_data", None):
-
-                tp_pct = trade.user_data.get("tp_pct")
-
-        except Exception:
-
-            pass
-
-        # 1.3 active meta
+        # 1.2 active meta
 
         if (sl_pct is None or sl_pct <= 0) and meta:
 
@@ -2274,29 +2181,11 @@ class TaxBrainV29(IStrategy):
 
                 pass
 
-        # 1.4 entry_tag（回测兜底）
+        profile, plan = self._runtime_exit_plan(pair, trade, current_time)
+        planned_sl = plan.sl_pct if plan and plan.sl_pct and plan.sl_pct > 0 else None
+        planned_tp = plan.tp_pct if plan and plan.tp_pct and plan.tp_pct > 0 else None
 
-        if (sl_pct is None or sl_pct <= 0) and getattr(trade, "entry_tag", None):
-
-            try:
-
-                tag = json.loads(trade.entry_tag)
-
-                sl_pct = float(tag.get("sl_pct") or 0.0)
-
-                tp_pct = float(tag.get("tp_pct")) if tag.get(
-
-                    "tp_pct") is not None else None
-
-            except Exception:
-
-                pass
-
-        profile, planned_sl, planned_tp = self._runtime_exit_plan(
-
-            pair, trade, current_time)
-
-        if planned_sl and planned_sl > 0:
+        if planned_sl:
 
             if sl_pct is None or sl_pct <= 0:
 
@@ -2306,7 +2195,7 @@ class TaxBrainV29(IStrategy):
 
                 sl_pct = max(float(sl_pct), float(planned_sl))
 
-        if planned_tp and planned_tp > 0:
+        if planned_tp:
 
             tp_pct = planned_tp
 
@@ -2370,17 +2259,21 @@ class TaxBrainV29(IStrategy):
 
             try:
 
-                if float(current_profit) >= float(tp_pct) * breakeven_frac:
+                    if float(current_profit) >= float(tp_pct) * breakeven_frac:
 
-                    atr_pct_hint = self._atr_pct_from_dp(
-
-                        pair,
-
-                        profile.atr_timeframe if profile and profile.atr_timeframe else self.timeframe,
-
-                        current_time,
-
-                    ) or 0.0
+                        atr_pct_hint = (
+                            plan.atr_pct
+                            if plan and plan.atr_pct
+                            else (
+                                self.exit_facade.atr_pct(
+                                    pair,
+                                    profile.atr_timeframe if profile and profile.atr_timeframe else self.timeframe,
+                                    current_time,
+                                )
+                                if self.exit_facade
+                                else None
+                            )
+                        ) or 0.0
 
                     # 让你的已有 early_lock_distance 参与（若不可用则忽略）
 
@@ -2518,16 +2411,6 @@ class TaxBrainV29(IStrategy):
 
             pass
 
-        try:
-
-            if (tp_pct is None or tp_pct <= 0) and getattr(trade, "user_data", None):
-
-                tp_pct = trade.user_data.get("tp_pct")
-
-        except Exception:
-
-            pass
-
         if (tp_pct is None or tp_pct <= 0) and meta:
 
             try:
@@ -2538,23 +2421,11 @@ class TaxBrainV29(IStrategy):
 
                 pass
 
-        if (tp_pct is None or tp_pct <= 0) and getattr(trade, "entry_tag", None):
+        _, plan = self._runtime_exit_plan(pair, trade, current_time)
 
-            try:
+        planned_tp = plan.tp_pct if plan and plan.tp_pct and plan.tp_pct > 0 else None
 
-                tag = json.loads(trade.entry_tag)
-
-                tp_pct = float(tag.get("tp_pct")) if tag.get(
-
-                    "tp_pct") is not None else None
-
-            except Exception:
-
-                pass
-
-        _, _, planned_tp = self._runtime_exit_plan(pair, trade, current_time)
-
-        if planned_tp and planned_tp > 0:
+        if planned_tp:
 
             tp_pct = planned_tp
 
@@ -2614,197 +2485,17 @@ class TaxBrainV29(IStrategy):
 
         current_time: Optional[datetime],
 
-    ) -> Tuple[Optional[ExitProfile], Optional[float], Optional[float]]:
+    ) -> Tuple[Optional[ExitProfile], Optional[ProfilePlan]]:
 
-        profile_name = self._trade_exit_profile_name(pair, trade)
+        if not getattr(self, "exit_facade", None):
 
-        if not profile_name:
+            return (None, None)
 
-            return (None, None, None)
+        _, profile_def, plan = self.exit_facade.resolve_trade_plan(pair, trade, current_time)
 
-        profile = getattr(self.cfg, "exit_profiles", {}).get(profile_name)
+        if not profile_def:
 
-        if not profile:
+            return (None, None)
 
-            return (None, None, None)
-
-        atr_tf = profile.atr_timeframe or self.timeframe
-
-        atr_pct = self._atr_pct_from_dp(pair, atr_tf, current_time)
-
-        if atr_pct is None or atr_pct <= 0:
-
-            return (profile, None, None)
-
-        mul_sl = profile.atr_mul_sl if profile.atr_mul_sl is not None else 0.0
-
-        floor = profile.floor_sl_pct or 0.0
-
-        sl_val = max(floor, atr_pct * mul_sl)
-
-        tp_val = None
-
-        if profile.atr_mul_tp and profile.atr_mul_tp > 0:
-
-            tp_val = atr_pct * profile.atr_mul_tp
-
-        elif sl_val > 0:
-
-            tp_val = sl_val * 2.0
-
-        sl_ret = sl_val if sl_val and sl_val > 0 else None
-
-        tp_ret = tp_val if tp_val and tp_val > 0 else None
-
-        return (profile, sl_ret, tp_ret)
-
-    def _trade_exit_profile_name(self, pair: str, trade) -> Optional[str]:
-
-        profile = None
-
-        try:
-
-            if hasattr(trade, "get_custom_data"):
-
-                profile = trade.get_custom_data("exit_profile")
-
-        except Exception:
-
-            profile = None
-
-        if not profile:
-
-            try:
-
-                if getattr(trade, "user_data", None):
-
-                    profile = trade.user_data.get("exit_profile")
-
-            except Exception:
-
-                profile = None
-
-        pst = self.state.get_pair_state(pair) if hasattr(
-
-            self.state, "get_pair_state") else None
-
-        tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-
-        if not profile and pst and getattr(pst, "active_trades", None):
-
-            meta = pst.active_trades.get(tid)
-
-            if meta:
-
-                profile = getattr(meta, "exit_profile", None)
-
-        if not profile and getattr(trade, "entry_tag", None):
-
-            try:
-
-                tag = json.loads(trade.entry_tag)
-
-                profile = tag.get("exit_profile")
-
-            except Exception:
-
-                profile = None
-
-        if not profile and pst:
-
-            profile = getattr(pst, "last_exit_profile", None)
-
-        return profile
-
-    def _atr_pct_from_dp(
-
-        self, pair: str, timeframe: Optional[str], current_time: Optional[datetime]
-
-    ) -> Optional[float]:
-
-        tf = timeframe or self.timeframe
-
-        try:
-
-            analyzed = self.dp.get_analyzed_dataframe(pair, tf)
-
-        except Exception:
-
-            return None
-
-        df = analyzed[0] if isinstance(analyzed, (list, tuple)) else analyzed
-
-        if df is None or len(df) == 0:
-
-            return None
-
-        row = self._row_as_of(df, current_time)
-
-        if row is None:
-
-            return None
-
-        try:
-
-            close_v = float(row["close"])
-
-            atr_v = float(row["atr"])
-
-        except Exception:
-
-            return None
-
-        if close_v <= 0:
-
-            return None
-
-        return atr_v / close_v
-
-    @staticmethod
-
-    def _row_as_of(df, current_time: Optional[datetime]):
-
-        if df is None or len(df) == 0:
-
-            return None
-
-        if current_time is None:
-
-            try:
-
-                return df.iloc[-1]
-
-            except Exception:
-
-                return None
-
-        try:
-
-            upto = df.loc[:current_time]
-
-        except Exception:
-
-            try:
-
-                ct = current_time.replace(tzinfo=None) if getattr(
-
-                    current_time, "tzinfo", None) else current_time
-
-                upto = df.loc[:ct]
-
-            except Exception:
-
-                return None
-
-        if len(upto) == 0:
-
-            return None
-
-        try:
-
-            return upto.iloc[-1]
-
-        except Exception:
-
-            return None
+        return (profile_def, plan)
 

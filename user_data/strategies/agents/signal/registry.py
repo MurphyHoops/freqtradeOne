@@ -54,8 +54,6 @@ def register_signal(
     min_edge: float = 0.0,
     required_factors: Optional[Iterable[str]] = None,
     timeframes: Optional[Iterable[Optional[str]]] = None,
-    sl_fn: Optional[Callable[[Dict[str, float], Any], float]] = None,
-    tp_fn: Optional[Callable[[Dict[str, float], Any], float]] = None,
 ):
     """信号插件使用的注册装饰器。
 
@@ -73,8 +71,6 @@ def register_signal(
                 direction=direction,
                 squad=squad,
                 conditions=list(conditions),
-                sl_fn=sl_fn,
-                tp_fn=tp_fn,
                 raw_fn=raw_fn,
                 win_prob_fn=win_prob_fn,
                 min_rr=min_rr,

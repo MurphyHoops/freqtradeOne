@@ -3,12 +3,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Optional, Tuple
 
 from ...config.v29_config import V29Config
 from ..tier import TierManager
-from .profile_planner import ProfilePlan, atr_pct_from_dp, compute_plan_from_atr
+from .profiles import ProfilePlan, atr_pct_from_dp, compute_plan_from_atr
 from .router import EXIT_ROUTER
 
 
@@ -120,13 +119,6 @@ class ExitFacade:
                 profile = trade.get_custom_data("exit_profile")
             except Exception:
                 profile = None
-        if not profile and trade:
-            try:
-                user_data = getattr(trade, "user_data", None)
-                if user_data:
-                    profile = user_data.get("exit_profile")
-            except Exception:
-                profile = None
         state = pair_state or self._pair_state(pair)
         tid = (
             str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
@@ -137,14 +129,6 @@ class ExitFacade:
             meta = state.active_trades.get(tid)
             if meta:
                 profile = getattr(meta, "exit_profile", None)
-        if not profile and trade and getattr(trade, "entry_tag", None):
-            try:
-                tag = json.loads(trade.entry_tag)
-                profile = tag.get("exit_profile")
-            except Exception:
-                profile = None
-        if not profile and state:
-            profile = getattr(state, "last_exit_profile", None)
         if not profile and state:
             profile = self._tier_default_profile(state)
         if not profile:
@@ -159,11 +143,7 @@ class ExitFacade:
         closs = getattr(pair_state, "closs", None)
         if closs is None:
             return None
-        try:
-            policy = self.tier_mgr.get(closs)
-        except Exception:
-            return None
-        return getattr(policy, "default_exit_profile", None)
+        return self.tier_mgr.default_profile_for_closs(closs)
 
     def _pair_state(self, pair: str):
         state = getattr(self.strategy, "state", None) if self.strategy else None

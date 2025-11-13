@@ -128,6 +128,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         per_pair_risk_cap_pct=0.03,
         max_stake_notional_pct=0.15,
         icu_force_exit_bars=0,
+        default_exit_profile="ATRtrail_v1",
     ),
     "T12_recovery": TierSpec(
         name="T12_recovery",
@@ -150,6 +151,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         per_pair_risk_cap_pct=0.02,
         max_stake_notional_pct=0.12,
         icu_force_exit_bars=30,
+        default_exit_profile="ATRtrail_v1",
     ),
     "T3p_ICU": TierSpec(
         name="T3p_ICU",
@@ -167,6 +169,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         per_pair_risk_cap_pct=0.01,
         max_stake_notional_pct=0.10,
         icu_force_exit_bars=20,
+        default_exit_profile="ATRtrail_v1",
     ),
 }
 
@@ -234,10 +237,6 @@ class V29Config:
     atr_len: int = 14
     adx_len: int = 14
 
-    # Legacy ATR-based defaults (kept for compatibility toggles)
-    atr_sl_k: float = 8.0
-    atr_tp_k: float = 2.0
-
     # Behaviour toggles
     suppress_baseline_when_stressed: bool = True
 
@@ -248,7 +247,6 @@ class V29Config:
     exit_profile_version: str = DEFAULT_PROFILE_VERSION
     exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)
     default_exit_profile: Optional[str] = "ATRtrail_v1"
-    use_legacy_sl_tp: bool = False
     strategies: Dict[str, StrategySpec] = field(default_factory=_copy_strategies)
     tiers: Dict[str, TierSpec] = field(default_factory=_copy_tiers)
     tier_routing: TierRouting = field(default_factory=_default_tier_routing)
@@ -275,6 +273,20 @@ class V29Config:
         else:
             specs = tuple(self.strategies.values())
             self._strategy_recipes = specs
+
+        routing = getattr(self, "tier_routing", None)
+        referenced_tiers = set(routing.loss_tier_map.values()) if (routing and routing.loss_tier_map) else set()
+        for tier_name in referenced_tiers:
+            if tier_name not in self.tiers:
+                raise ValueError(f"TierRouting references unknown tier '{tier_name}'")
+        for tier_name in referenced_tiers:
+            spec = self.tiers[tier_name]
+            if not spec.default_exit_profile:
+                raise ValueError(f"Tier '{tier_name}' must declare default_exit_profile for routing")
+            if spec.default_exit_profile not in self.exit_profiles:
+                raise ValueError(
+                    f"Tier '{tier_name}' references unknown exit profile '{spec.default_exit_profile}'"
+                )
 
     @property
     def strategy_recipes(self) -> Tuple[StrategySpec, ...]:

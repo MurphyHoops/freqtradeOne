@@ -89,35 +89,6 @@ def test_exit_policy_paths():
     assert exit_policy.decide(pair, "1", current_profit_pct=-0.01) == ExitTags.RISK_OFF
 
 
-def test_exit_log_details_contains_enriched_fields(tmp_path):
-    config = {
-        "strategy_params": {
-            "timeframe": "5m",
-            "startup_candle_count": 20,
-        },
-        "dry_run_wallet": 1000,
-        "user_data_dir": str(tmp_path),
-    }
-    strategy = TaxBrainV29(config)
-    trade = DummyTrade(trade_id=10)
-    trade.user_data["exit_profile"] = "ATRtrail_v1"
-    trade.user_data["sl_pct"] = 0.05
-    meta = {
-        "plan_timeframe": "1h",
-        "plan_atr_pct": 0.01,
-        "tier_name": "T0_healthy",
-        "recipe": "NBX_fast_default",
-    }
-
-    details = strategy._exit_log_details(trade, meta)
-    assert details["tier_name"] == "T0_healthy"
-    assert details["recipe"] == "NBX_fast_default"
-    assert details["exit_profile_atr_mul_sl"] == strategy.cfg.exit_profiles["ATRtrail_v1"].atr_mul_sl
-    assert details["exit_profile_atr_timeframe"] == strategy.cfg.exit_profiles["ATRtrail_v1"].atr_timeframe
-    assert details["computed_sl_pct"] == pytest.approx(0.05)
-    assert details["plan_atr_pct"] == pytest.approx(0.01)
-
-
 def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
     """验证三重 tp/sl 兜底及早锁盈触发逻辑。"""
 
@@ -148,8 +119,8 @@ def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
     sl = strategy.custom_stoploss(pair, trade, None, 100.0, 0.0, False)
     assert sl == pytest.approx(-0.03)
 
-    trade.user_data["sl_pct"] = 0.05
-    trade.user_data["tp_pct"] = 0.08
+    trade.set_custom_data("sl_pct", 0.05)
+    trade.set_custom_data("tp_pct", 0.08)
     sl = strategy.custom_stoploss(pair, trade, None, 100.0, 0.0, False)
     assert sl == pytest.approx(-0.05)
 
@@ -173,7 +144,7 @@ def test_custom_stoploss_fallbacks_and_breakeven(tmp_path):
     trade2.set_custom_data("exit_profile", profile_name)
     trade2.set_custom_data("sl_pct", 0.0)
     trade2.set_custom_data("tp_pct", 0.0)
-    trade2.user_data["exit_profile"] = profile_name
+    trade2.set_custom_data("exit_profile", profile_name)
     pst.active_trades[str(trade2.trade_id)] = ActiveTradeMeta(
         sl_pct=0.0,
         tp_pct=0.0,

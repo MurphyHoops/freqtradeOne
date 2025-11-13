@@ -5,64 +5,7 @@
 from __future__ import annotations
 from typing import Optional
 
-from .profile_planner import atr_pct_from_dp
-from .router import SLContext, TPContext, sl_rule, tp_rule
-
-
-def percent_from_atr_k(ctx, timeframe: Optional[str], atr_k: float) -> Optional[float]:
-    """Return ATR-based percent distance with consistent data sources."""
-
-    if atr_k is None or atr_k <= 0:
-        return None
-    target_tf = timeframe or getattr(ctx.cfg, "timeframe", None)
-    atr_pct: Optional[float] = None
-    strategy = getattr(ctx, "strategy", None)
-    analytics = getattr(getattr(strategy, "analytics", None), "log_debug", None)
-    atr_source = None
-    facade = getattr(strategy, "exit_facade", None)
-    if facade and target_tf:
-        atr_pct = facade.atr_pct(ctx.pair, target_tf, ctx.now)
-        if atr_pct and atr_pct > 0:
-            atr_source = "facade"
-    if atr_pct is None or atr_pct <= 0:
-        fallback_tf = target_tf or getattr(ctx.cfg, "timeframe", "") or ""
-        if fallback_tf:
-            atr_pct = atr_pct_from_dp(ctx.dp, ctx.pair, fallback_tf, ctx.now)
-            if atr_pct and atr_pct > 0:
-                atr_source = "dataprovider"
-    if atr_pct is None or atr_pct <= 0:
-        if analytics:
-            analytics(
-                "threshold_atr_missing",
-                f"ATR pct unavailable for {ctx.pair}",
-                {"pair": ctx.pair, "timeframe": target_tf, "atr_k": atr_k},
-            )
-        return None
-    value = max(0.0, float(atr_pct) * float(atr_k))
-    if analytics and atr_source:
-        analytics(
-            "threshold_atr_pct",
-            "ATR pct resolved for tightening rule",
-            {"pair": ctx.pair, "timeframe": target_tf, "atr_pct": atr_pct, "atr_k": atr_k, "source": atr_source},
-        )
-    return value
-
-
-# ==== SL rules (percent of entry) ====
-@sl_rule(name="atr_k_sl", priority=60)
-def atr_k_sl(ctx: SLContext) -> Optional[float]:
-    """Stoploss distance = k * ATR / entry_price (percent of entry).
-    cfg keys: atr_len (optional), atr_sl_k (default 1.0), timeframe (use strategy.timeframe)
-    """
-    if not getattr(ctx.cfg, "use_legacy_sl_tp", False):
-        return None
-    trade = ctx.trade
-    if not trade or not getattr(trade, "open_rate", 0.0):
-        return None
-    tf = getattr(ctx.cfg, "atr_sl_timeframe", None)
-    k = float(getattr(ctx.cfg, "atr_sl_k", 1.0))
-    pct = percent_from_atr_k(ctx, tf, k)
-    return pct if pct and pct > 0 else None
+from .router import ImmediateContext, SLContext, TPContext, immediate_rule, sl_rule, tp_rule
 
 
 @sl_rule(name="hard_sl_from_entry", priority=50)
@@ -78,20 +21,6 @@ def hard_sl_from_entry(ctx: SLContext) -> Optional[float]:
     return sl if (sl and sl > 0) else None
 
 
-# ==== TP rules (percent of entry) ====
-@tp_rule(name="atr_k_tp", priority=80)
-def atr_k_tp(ctx: TPContext) -> Optional[float]:
-    if not getattr(ctx.cfg, "use_legacy_sl_tp", False):
-        return None
-    trade = ctx.trade
-    if not trade or not getattr(trade, "open_rate", 0.0):
-        return None
-    tf = getattr(ctx.cfg, "atr_tp_timeframe", None)
-    k = float(getattr(ctx.cfg, "atr_tp_k", 2.0))
-    pct = percent_from_atr_k(ctx, tf, k)
-    return pct if pct and pct > 0 else None
-
-
 @tp_rule(name="hard_tp_from_entry", priority=50)
 def hard_tp_from_entry(ctx: TPContext) -> Optional[float]:
     if ctx.trade is None:
@@ -103,11 +32,9 @@ def hard_tp_from_entry(ctx: TPContext) -> Optional[float]:
 
 
 __all__ = [
-    "atr_k_sl",
     "hard_sl_from_entry",
-    "atr_k_tp",
     "hard_tp_from_entry",
-    "percent_from_atr_k",
+    "flip_on_strong_opposite",
 ]
 
 def _trade_pct(trade, key: str) -> Optional[float]:
@@ -118,14 +45,6 @@ def _trade_pct(trade, key: str) -> Optional[float]:
                 return float(value)
     except Exception:
         pass
-    try:
-        user_data = getattr(trade, "user_data", None)
-        if user_data:
-            value = user_data.get(key)
-            if value and value > 0:
-                return float(value)
-    except Exception:
-        return None
     return None
 
 
@@ -141,3 +60,11 @@ def _plan_pct_from_facade(ctx, attribute: str) -> Optional[float]:
     if value is None or value <= 0:
         return None
     return float(value)
+
+
+@immediate_rule(name="flip_on_strong_opposite", priority=90)
+def flip_on_strong_opposite(ctx: ImmediateContext) -> Optional[str]:
+    """Example immediate exit: close when context marks strong opposite signal."""
+
+    # Placeholder – disable by default; wire via ctx.state as needed.
+    return None

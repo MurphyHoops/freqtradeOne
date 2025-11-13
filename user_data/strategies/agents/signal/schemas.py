@@ -134,10 +134,6 @@ class SignalSpec:
 
     win_prob_fn: Callable[[Dict[str, float], Any, float], float]
 
-    sl_fn: Optional[Callable[[Dict[str, float], Any], float]] = None
-
-    tp_fn: Optional[Callable[[Dict[str, float], Any], float]] = None
-
     min_rr: float = 0.0
 
     min_edge: float = 0.0
@@ -145,4 +141,3 @@ class SignalSpec:
     required_factors: tuple[str, ...] = ()
 
     timeframe: Optional[str] = None
-

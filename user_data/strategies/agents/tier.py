@@ -76,6 +76,15 @@ class TierManager:
 
         return self._policies[tier_name]
 
+    def default_profile_for_closs(self, closs: int) -> Optional[str]:
+        """Return the default exit profile configured for the tier covering this closs."""
+
+        try:
+            policy = self.get(closs)
+        except Exception:
+            return None
+        return getattr(policy, "default_exit_profile", None)
+
     def resolve_for_candidate(self, closs: int, candidate: Candidate) -> TierPolicy:
         """Return the tier that best accommodates the candidate."""
 

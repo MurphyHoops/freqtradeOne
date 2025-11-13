@@ -3,6 +3,6 @@
 
 from __future__ import annotations
 
-from .signal.schemas import Candidate, Condition, SignalSpec
+from .signals.schemas import Candidate, Condition, SignalSpec
 
 __all__ = ["Candidate", "Condition", "SignalSpec"]

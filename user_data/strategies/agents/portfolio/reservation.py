@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple, TYPE_CHECKING
 
-from ..config.v29_config import V29Config
+from ...config.v29_config import V29Config
 
 if TYPE_CHECKING:
     from .analytics import AnalyticsAgent

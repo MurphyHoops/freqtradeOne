@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from ..config.v29_config import V29Config
+from ...config.v29_config import V29Config
 from .reservation import ReservationAgent
 from .tier import TierManager
 

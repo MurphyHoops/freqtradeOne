@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ...config.v29_config import V29Config
-from ..tier import TierManager
-from .profiles import ProfilePlan, atr_pct_from_dp, compute_plan_from_atr
+from ..portfolio.tier import TierManager
+from .profiles import ProfilePlan, atr_pct_from_dp, atr_pct_from_rows, compute_plan_from_atr
 from .router import EXIT_ROUTER
 
 
@@ -31,11 +31,17 @@ class ExitFacade:
 
     # ---------- ATR helpers ----------
     def atr_pct(self, pair: str, timeframe: Optional[str], current_time) -> Optional[float]:
-        """Return ATR% for the requested timeframe using cache -> DP fallback."""
+        """Return ATR% for the requested timeframe preferring DP data."""
 
         tf = timeframe or getattr(self.cfg, "timeframe", None)
         if not tf:
             return None
+
+        provider = self.dp or getattr(self.strategy, "dp", None)
+        dp_value = atr_pct_from_dp(provider, pair, tf, current_time)
+        if dp_value and dp_value > 0:
+            return float(dp_value)
+
         strategy = self.strategy
         if strategy:
             try:
@@ -44,9 +50,55 @@ class ExitFacade:
                     return float(value)
             except Exception:
                 pass
-        return atr_pct_from_dp(self.dp, pair, tf, current_time)
+        return dp_value
 
     # ---------- Planning ----------
+    def resolve_entry_plan(
+        self,
+        pair: str,
+        candidate,
+        main_row,
+        informative_rows: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[str], Optional[Any], Optional[ProfilePlan]]:
+        """Resolve the profile plan for a fresh candidate before order placement."""
+
+        if not candidate:
+            return None, None, None
+        profile_name = getattr(candidate, "exit_profile", None)
+        profile_def = self.cfg.exit_profiles.get(profile_name) if profile_name else None
+        pair_state = self._pair_state(pair)
+        if not profile_def and pair_state:
+            fallback = self._tier_default_profile(pair_state)
+            profile_def = self.cfg.exit_profiles.get(fallback) if fallback else None
+            profile_name = fallback
+        if not profile_def:
+            fallback = getattr(self.cfg, "default_exit_profile", None)
+            profile_def = self.cfg.exit_profiles.get(fallback) if fallback else None
+            profile_name = fallback
+        if not profile_def:
+            return profile_name, None, None
+
+        tf_hint = getattr(candidate, "plan_timeframe", None)
+        atr_hint = getattr(candidate, "plan_atr_pct", None)
+        if atr_hint is None and main_row is not None:
+            atr_hint = atr_pct_from_rows(
+                main_row,
+                informative_rows or {},
+                target_timeframe=tf_hint or getattr(profile_def, "atr_timeframe", None),
+                main_timeframe=getattr(self.cfg, "timeframe", None),
+            )
+
+        current_time = getattr(main_row, "name", None) if main_row is not None else None
+        plan = self._plan_from_profile(
+            profile_name,
+            profile_def,
+            pair,
+            current_time,
+            plan_timeframe=tf_hint,
+            atr_hint=atr_hint,
+        )
+        return profile_name, profile_def, plan
+
     def resolve_trade_plan(
         self,
         pair: str,
@@ -56,10 +108,18 @@ class ExitFacade:
     ) -> Tuple[Optional[str], Optional[Any], Optional[ProfilePlan]]:
         """Return (profile_name, profile_def, plan) for a live trade."""
 
-        profile_name, profile_def = self._resolve_profile(pair, trade, pair_state)
+        profile_name, profile_def, meta = self._resolve_profile(pair, trade, pair_state)
         if not profile_name or not profile_def:
             return profile_name, None, None
-        plan = self._plan_from_profile(profile_name, profile_def, pair, current_time)
+        tf_hint, atr_hint = self._plan_hints_from_sources(trade, meta, pair_state or self._pair_state(pair))
+        plan = self._plan_from_profile(
+            profile_name,
+            profile_def,
+            pair,
+            current_time,
+            plan_timeframe=tf_hint,
+            atr_hint=atr_hint,
+        )
         return profile_name, profile_def, plan
 
     def plan_for_profile(
@@ -105,37 +165,96 @@ class ExitFacade:
         profile,
         pair: str,
         current_time,
+        *,
+        plan_timeframe: Optional[str] = None,
+        atr_hint: Optional[float] = None,
     ) -> Optional[ProfilePlan]:
-        atr_tf = getattr(profile, "atr_timeframe", None) or getattr(self.cfg, "timeframe", None)
-        atr_pct = self.atr_pct(pair, atr_tf, current_time)
+        atr_tf = (
+            self._normalize_tf(plan_timeframe)
+            or self._normalize_tf(getattr(profile, "atr_timeframe", None))
+            or self._normalize_tf(getattr(self.cfg, "timeframe", None))
+        )
+        atr_pct = self._coerce_positive_float(atr_hint)
+        if atr_pct is None or atr_pct <= 0:
+            atr_pct = self.atr_pct(pair, atr_tf, current_time)
         if atr_pct is None or atr_pct <= 0:
             return None
         return compute_plan_from_atr(profile_name, profile, atr_pct)
 
-    def _resolve_profile(self, pair: str, trade, pair_state=None) -> Tuple[Optional[str], Optional[Any]]:
-        profile = None
-        if trade and hasattr(trade, "get_custom_data"):
-            try:
-                profile = trade.get_custom_data("exit_profile")
-            except Exception:
-                profile = None
+    def _resolve_profile(
+        self, pair: str, trade, pair_state=None
+    ) -> Tuple[Optional[str], Optional[Any], Optional[Any]]:
+        profile = self._coerce_str(self._read_trade_custom(trade, "exit_profile"))
         state = pair_state or self._pair_state(pair)
         tid = (
             str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
             if trade is not None
             else None
         )
-        if not profile and state and getattr(state, "active_trades", None) and tid:
+        meta = None
+        if state and getattr(state, "active_trades", None) and tid:
             meta = state.active_trades.get(tid)
-            if meta:
-                profile = getattr(meta, "exit_profile", None)
+            if meta and not profile:
+                profile = self._coerce_str(getattr(meta, "exit_profile", None))
         if not profile and state:
             profile = self._tier_default_profile(state)
         if not profile:
             profile = getattr(self.cfg, "default_exit_profile", None)
         if profile:
-            return profile, self.cfg.exit_profiles.get(profile)
-        return None, None
+            return profile, self.cfg.exit_profiles.get(profile), meta
+        return None, None, meta
+
+    def _plan_hints_from_sources(self, trade, meta, pair_state) -> Tuple[Optional[str], Optional[float]]:
+        tf_hint = self._coerce_str(self._read_trade_custom(trade, "plan_timeframe"))
+        atr_hint = self._coerce_positive_float(self._read_trade_custom(trade, "atr_pct"))
+        if meta:
+            if not tf_hint:
+                tf_hint = self._coerce_str(getattr(meta, "plan_timeframe", None))
+            if atr_hint is None:
+                atr_hint = self._coerce_positive_float(getattr(meta, "plan_atr_pct", None))
+        provider_available = self.dp or getattr(self.strategy, "dp", None)
+        if atr_hint is None and pair_state is not None and not provider_available:
+            atr_hint = self._coerce_positive_float(getattr(pair_state, "last_atr_pct", None))
+        return tf_hint, atr_hint
+
+    @staticmethod
+    def _read_trade_custom(trade, key: str):
+        if not trade or not hasattr(trade, "get_custom_data"):
+            return None
+        try:
+            return trade.get_custom_data(key)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _coerce_str(value) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _coerce_positive_float(value) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        if num <= 0:
+            return None
+        return num
+
+    def _normalize_tf(self, timeframe: Optional[str]) -> Optional[str]:
+        if timeframe is None:
+            return None
+        token = str(timeframe).strip()
+        if not token:
+            return None
+        lowered = token.lower()
+        if lowered in {"primary", "main", "base"}:
+            return None
+        return token
 
     def _tier_default_profile(self, pair_state) -> Optional[str]:
         if not pair_state:

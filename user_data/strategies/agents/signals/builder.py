@@ -126,8 +126,12 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
                 win_prob=win,
                 expected_edge=edge,
                 squad=spec.squad,
+                sl_pct=sl,
+                tp_pct=tp,
                 exit_profile=exit_profile,
                 recipe=recipe_name,
+                plan_timeframe=plan.plan_timeframe,
+                plan_atr_pct=plan.plan_atr_pct,
             )
         )
     return results
@@ -153,4 +157,3 @@ def _all_conditions_pass(
         if not _check_condition(fb, cond, timeframe):
             return False
     return True
-

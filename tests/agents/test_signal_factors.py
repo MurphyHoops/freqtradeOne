@@ -2,7 +2,7 @@
 
 import math
 
-from user_data.strategies.agents.signal.factors import FactorBank
+from user_data.strategies.agents.signals.factors import FactorBank
 
 
 def test_factor_bank_atomic_and_composite_values():

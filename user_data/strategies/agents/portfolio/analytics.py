@@ -6,7 +6,7 @@
 
 示例：
     >>> from pathlib import Path
-    >>> from user_data.strategies.agents.analytics import AnalyticsAgent
+    >>> from user_data.strategies.agents.portfolio.analytics import AnalyticsAgent
     >>> agent = AnalyticsAgent(Path('user_data/logs'))
     >>> agent.log_exit('BTC/USDT', 'trade-1', 'manual_close')
 """

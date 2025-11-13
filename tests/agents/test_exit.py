@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from user_data.strategies.TaxBrainV29 import ActiveTradeMeta, PairState, TaxBrainV29
-from user_data.strategies.agents.exit import ExitPolicyV29
+from user_data.strategies.agents.exits.exit import ExitPolicyV29
 from user_data.strategies.agents.exits.exit_tags import ExitTags
 from user_data.strategies.config.v29_config import ExitProfile, V29Config
 

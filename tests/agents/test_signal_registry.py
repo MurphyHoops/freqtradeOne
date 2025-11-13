@@ -4,8 +4,8 @@ import dataclasses
 
 import pytest
 
-from user_data.strategies.agents.signal.registry import SignalRegistry
-from user_data.strategies.agents.signal.schemas import Condition, SignalSpec
+from user_data.strategies.agents.signals.registry import SignalRegistry
+from user_data.strategies.agents.signals.schemas import Condition, SignalSpec
 
 
 def _dummy_spec(name: str) -> SignalSpec:

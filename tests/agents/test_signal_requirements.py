@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from user_data.strategies.agents.signal import requirements as req
-from user_data.strategies.agents.signal.schemas import Condition, SignalSpec
+from user_data.strategies.agents.signals import requirements as req
+from user_data.strategies.agents.signals.schemas import Condition, SignalSpec
 from user_data.strategies.config.v29_config import V29Config
 
 

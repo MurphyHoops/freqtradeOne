@@ -23,6 +23,8 @@ class RiskPlan:
     recipe: Optional[str] = None
     min_rr: Optional[float] = None
     min_edge: Optional[float] = None
+    plan_timeframe: Optional[str] = None
+    plan_atr_pct: Optional[float] = None
 
 
 class RiskEstimator:
@@ -101,6 +103,8 @@ class RiskEstimator:
             recipe=recipe_name,
             min_rr=recipe_min_rr,
             min_edge=recipe_min_edge,
+            plan_timeframe=getattr(plan, "timeframe", None),
+            plan_atr_pct=getattr(plan, "atr_pct", None),
         )
 
     def _resolve_atr_pct(

@@ -7,9 +7,9 @@
 等参数展开，确保拨款结果既满足风险约束，又兼顾信号质量与恢复效率。
 
 使用示例::
-    >>> from user_data.strategies.agents.treasury import TreasuryAgent, AllocationPlan
+    >>> from user_data.strategies.agents.portfolio.treasury import TreasuryAgent, AllocationPlan
     >>> from user_data.strategies.config.v29_config import V29Config
-    >>> from user_data.strategies.agents.tier import TierManager
+    >>> from user_data.strategies.agents.portfolio.tier import TierManager
     >>> cfg = V29Config()
     >>> tier_mgr = TierManager(cfg)
     >>> treasury = TreasuryAgent(cfg, tier_mgr)
@@ -41,7 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
-from ..config.v29_config import V29Config
+from ...config.v29_config import V29Config
 from .tier import TierManager
 
 

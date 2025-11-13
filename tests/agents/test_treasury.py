@@ -2,8 +2,8 @@
 
 import pytest
 
-from user_data.strategies.agents.tier import TierPolicy
-from user_data.strategies.agents.treasury import TreasuryAgent
+from user_data.strategies.agents.portfolio.tier import TierPolicy
+from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
 from user_data.strategies.config.v29_config import V29Config
 
 

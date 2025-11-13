@@ -7,7 +7,7 @@ from user_data.strategies.agents.exits.facade import ExitFacade
 from user_data.strategies.agents.exits.exit_tags import ExitTags
 from user_data.strategies.agents.exits.rules_threshold import hard_sl_from_entry, hard_tp_from_entry
 from user_data.strategies.agents.exits.router import SLContext, TPContext
-from user_data.strategies.agents.tier import TierManager
+from user_data.strategies.agents.portfolio.tier import TierManager
 
 
 class _DummyTrade:

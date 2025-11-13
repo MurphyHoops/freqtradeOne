@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from user_data.strategies.agents.cycle import CycleAgent
+from user_data.strategies.agents.portfolio.cycle import CycleAgent
 from user_data.strategies.config.v29_config import V29Config
-from user_data.strategies.agents.treasury import AllocationPlan
+from user_data.strategies.agents.portfolio.treasury import AllocationPlan
 
 
 class DummyPairState:

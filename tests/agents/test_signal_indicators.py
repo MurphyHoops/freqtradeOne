@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from user_data.strategies.agents.signal.indicators import _bars_since_new_extreme
+from user_data.strategies.agents.signals.indicators import _bars_since_new_extreme
 
 
 def test_newbars_high_distance():

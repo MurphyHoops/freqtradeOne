@@ -114,6 +114,10 @@ class ExecutionAgent:
                     trade.set_custom_data("recipe", recipe)
                 if tier_name:
                     trade.set_custom_data("tier_name", tier_name)
+                if plan_timeframe:
+                    trade.set_custom_data("plan_timeframe", plan_timeframe)
+                if plan_atr_pct:
+                    trade.set_custom_data("atr_pct", plan_atr_pct)
         except Exception:
             pass
         try:
@@ -126,6 +130,10 @@ class ExecutionAgent:
                     trade.user_data["recipe"] = recipe
                 if tier_name:
                     trade.user_data["tier_name"] = tier_name
+                if plan_timeframe:
+                    trade.user_data["plan_timeframe"] = plan_timeframe
+                if plan_atr_pct:
+                    trade.user_data["atr_pct"] = plan_atr_pct
         except Exception:
             pass
 

@@ -18,7 +18,7 @@ import time
 
 import uuid
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from datetime import datetime
 
@@ -201,13 +201,13 @@ from user_data.strategies.agents.exits import rules_threshold  # 注册 SL/TP + 
 from user_data.strategies.config.v29_config import ExitProfile, V29Config, apply_overrides
 from user_data.strategies.agents.exits.profiles import ProfilePlan
 
-from user_data.strategies.agents.treasury import TreasuryAgent
+from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
 
-from user_data.strategies.agents.tier import TierAgent, TierManager
+from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
 
-from user_data.strategies.agents.sizer import SizerAgent
+from user_data.strategies.agents.portfolio.sizer import SizerAgent
 
-from user_data.strategies.agents.signal.requirements import (
+from user_data.strategies.agents.signals.requirements import (
 
     collect_factor_requirements,
 
@@ -215,21 +215,21 @@ from user_data.strategies.agents.signal.requirements import (
 
 )
 
-from user_data.strategies.agents.signal import builder, indicators, schemas
+from user_data.strategies.agents.signals import builder, indicators, schemas
 
-from user_data.strategies.agents.risk import RiskAgent
+from user_data.strategies.agents.portfolio.risk import RiskAgent
 
-from user_data.strategies.agents.reservation import ReservationAgent
+from user_data.strategies.agents.portfolio.reservation import ReservationAgent
 
-from user_data.strategies.agents.persist import StateStore
+from user_data.strategies.agents.portfolio.persist import StateStore
 
-from user_data.strategies.agents.exit import ExitPolicyV29
+from user_data.strategies.agents.exits.exit import ExitPolicyV29
 
-from user_data.strategies.agents.execution import ExecutionAgent
+from user_data.strategies.agents.portfolio.execution import ExecutionAgent
 
-from user_data.strategies.agents.cycle import CycleAgent
+from user_data.strategies.agents.portfolio.cycle import CycleAgent
 
-from user_data.strategies.agents.analytics import AnalyticsAgent
+from user_data.strategies.agents.portfolio.analytics import AnalyticsAgent
 
 # safe, optional import – file lives next to your strategy agents
 
@@ -247,7 +247,7 @@ except Exception:  # pragma: no cover
 
 # 让所有内置入场信号完成“注册”
 
-from user_data.strategies.agents.signal import builtin_signals as _signals  # noqa: F401
+from user_data.strategies.agents.signals import builtin_signals as _signals  # noqa: F401
 
 class _NoopStateStore:
     """No-op persistence adapter used during backtests/hyperopt to keep state ephemeral."""
@@ -998,6 +998,7 @@ class TaxBrainV29(IStrategy):
         )
 
         self._informative_last: Dict[str, Dict[str, pd.Series]] = {}
+        self._informative_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
 
         self._register_informative_methods()
 
@@ -1246,6 +1247,12 @@ class TaxBrainV29(IStrategy):
 
     def _get_informative_dataframe(self, pair: str, timeframe: str) -> Optional[pd.DataFrame]:
 
+        cached = self._informative_cache.get(pair, {}).get(timeframe)
+
+        if cached is not None and not cached.empty:
+
+            return cached
+
         getter = getattr(self.dp, 'get_informative_dataframe', None)
 
         if callable(getter):
@@ -1254,7 +1261,11 @@ class TaxBrainV29(IStrategy):
 
             if isinstance(result, tuple):
 
-                return result[0]
+                result = result[0]
+
+            if isinstance(result, pd.DataFrame) and not result.empty:
+
+                self._informative_cache.setdefault(pair, {})[timeframe] = result.copy()
 
             return result
 
@@ -1262,7 +1273,11 @@ class TaxBrainV29(IStrategy):
 
         if isinstance(result, tuple):
 
-            return result[0]
+            result = result[0]
+
+        if isinstance(result, pd.DataFrame) and not result.empty:
+
+            self._informative_cache.setdefault(pair, {})[timeframe] = result.copy()
 
         return result
 
@@ -1376,6 +1391,10 @@ class TaxBrainV29(IStrategy):
 
                 informative_rows[tf] = info_df.iloc[-1].copy()
 
+                cache = self._informative_cache.setdefault(pair, {})
+
+                cache[tf] = info_df.copy()
+
         if informative_rows:
 
             self._informative_last[pair] = informative_rows
@@ -1383,6 +1402,8 @@ class TaxBrainV29(IStrategy):
         elif pair in self._informative_last:
 
             self._informative_last.pop(pair, None)
+
+            self._informative_cache.pop(pair, None)
 
         if len(df) == 0:
 
@@ -1470,6 +1491,56 @@ class TaxBrainV29(IStrategy):
 
         return self.tier_agent.filter_best(policy, candidates)
 
+    def _candidate_with_plan(
+
+        self,
+
+        pair: str,
+
+        candidate: Optional[schemas.Candidate],
+
+        row: pd.Series,
+
+        inf_rows: Optional[Dict[str, pd.Series]],
+
+    ) -> Optional[schemas.Candidate]:
+
+        if not candidate or not getattr(self, "exit_facade", None):
+
+            return candidate
+
+        try:
+
+            _, _, plan = self.exit_facade.resolve_entry_plan(pair, candidate, row, inf_rows or {})
+
+        except Exception:
+
+            plan = None
+
+        if not plan:
+
+            return candidate
+
+        try:
+
+            return replace(
+
+                candidate,
+
+                sl_pct=float(plan.sl_pct) if getattr(plan, "sl_pct", None) else candidate.sl_pct,
+
+                tp_pct=float(plan.tp_pct) if getattr(plan, "tp_pct", None) else candidate.tp_pct,
+
+                plan_timeframe=getattr(plan, "timeframe", getattr(candidate, "plan_timeframe", None)),
+
+                plan_atr_pct=getattr(plan, "atr_pct", getattr(candidate, "plan_atr_pct", None)),
+
+            )
+
+        except Exception:
+
+            return candidate
+
     def _aligned_informative_for_df(self, pair: str, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
         """一次性把所有 informative timeframe merge_asof 到主周期索引，避免每行重复合并。"""
@@ -1545,6 +1616,14 @@ class TaxBrainV29(IStrategy):
             "recipe": candidate.recipe,
 
         }
+
+        if getattr(candidate, "plan_timeframe", None):
+
+            tag_payload["plan_timeframe"] = candidate.plan_timeframe
+
+        if getattr(candidate, "plan_atr_pct", None):
+
+            tag_payload["atr_pct"] = candidate.plan_atr_pct
 
         df.at[idx, "enter_long"] = 1 if candidate.direction == "long" else 0
 
@@ -1634,6 +1713,12 @@ class TaxBrainV29(IStrategy):
 
                     continue
 
+                sig = self._candidate_with_plan(pair, sig, row, inf_rows)
+
+                if not sig:
+
+                    continue
+
                 self._apply_entry_signal(df, idx, sig)
 
                 # pst_snapshot = advance_state(pst_snapshot, sig, row)
@@ -1651,6 +1736,10 @@ class TaxBrainV29(IStrategy):
         last_candidate = self._eval_entry_on_row(
 
             last_row, last_inf_rows, actual_state)
+
+        if last_candidate:
+
+            last_candidate = self._candidate_with_plan(pair, last_candidate, last_row, last_inf_rows)
 
         if not is_vector_pass and last_candidate:
 
@@ -1792,6 +1881,10 @@ class TaxBrainV29(IStrategy):
 
             "recipe": sig.recipe,
 
+            "plan_timeframe": getattr(sig, "plan_timeframe", None),
+
+            "atr_pct": getattr(sig, "plan_atr_pct", None),
+
         }
 
         return True
@@ -1841,6 +1934,36 @@ class TaxBrainV29(IStrategy):
             direction = 'short' if str(side).lower() == 'short' else 'long'
 
         normalized['dir'] = direction
+
+        if 'plan_timeframe' in normalized:
+
+            ptf = normalized.get('plan_timeframe')
+
+            if ptf is None:
+
+                normalized['plan_timeframe'] = None
+
+            else:
+
+                token = str(ptf).strip()
+
+                normalized['plan_timeframe'] = token or None
+
+        atr_val = normalized.get('atr_pct')
+
+        if atr_val is not None:
+
+            try:
+
+                normalized['atr_pct'] = float(atr_val)
+
+            except Exception:
+
+                normalized['atr_pct'] = None
+
+        else:
+
+            normalized['atr_pct'] = None
 
         return normalized
 
@@ -1927,6 +2050,10 @@ class TaxBrainV29(IStrategy):
                         'exit_profile': sig.exit_profile,
 
                         'recipe': sig.recipe,
+
+                        'plan_timeframe': getattr(sig, "plan_timeframe", None),
+
+                        'atr_pct': getattr(sig, "plan_atr_pct", None),
 
                     }, side)
 
@@ -2036,7 +2163,9 @@ class TaxBrainV29(IStrategy):
 
             if closed:
 
-                self.analytics.log_exit(pair, trade_id, "close_filled")
+                tag = ExitTags.CLOSE_FILLED if ExitTags else "close_filled"
+
+                self.analytics.log_exit(pair, trade_id, tag)
 
                 if self._persist_enabled:
 
@@ -2054,7 +2183,9 @@ class TaxBrainV29(IStrategy):
 
                 "reservation_id") if meta else "NA"))) if trade else meta.get("reservation_id", "NA") if meta else "NA"
 
-            self.analytics.log_exit(pair, trade_id, "order_cancelled")
+            tag = ExitTags.ORDER_CANCELLED if ExitTags else "order_cancelled"
+
+            self.analytics.log_exit(pair, trade_id, tag)
 
     def order_rejected(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
 
@@ -2068,7 +2199,9 @@ class TaxBrainV29(IStrategy):
 
                 "reservation_id") if meta else "NA"))) if trade else meta.get("reservation_id", "NA") if meta else "NA"
 
-            self.analytics.log_exit(pair, trade_id, "order_rejected")
+            tag = ExitTags.ORDER_REJECTED if ExitTags else "order_rejected"
+
+            self.analytics.log_exit(pair, trade_id, tag)
 
     def _handle_cancel_or_reject(self, pair: str) -> tuple[bool, Optional[dict[str, Any]]]:
 
@@ -2187,13 +2320,19 @@ class TaxBrainV29(IStrategy):
 
         if planned_sl:
 
+            planned_sl = float(planned_sl)
+
             if sl_pct is None or sl_pct <= 0:
 
                 sl_pct = planned_sl
 
             else:
 
-                sl_pct = max(float(sl_pct), float(planned_sl))
+                base_sl = float(sl_pct)
+
+                if planned_sl < base_sl:
+
+                    sl_pct = planned_sl
 
         if planned_tp:
 
@@ -2227,13 +2366,15 @@ class TaxBrainV29(IStrategy):
 
                     state=self.state,
 
+                    strategy=self,
+
                 )
 
                 tightened = EXIT_ROUTER.sl_best(ctx, float(sl_pct))
 
                 if tightened and tightened > 0:
 
-                    sl_pct = max(float(sl_pct), float(tightened))  # 只收紧
+                    sl_pct = min(float(sl_pct), float(tightened))  # 只收紧
 
             except Exception:
 
@@ -2452,6 +2593,8 @@ class TaxBrainV29(IStrategy):
                     cfg=self.cfg,
 
                     state=self.state,
+
+                    strategy=self,
 
                 )
 

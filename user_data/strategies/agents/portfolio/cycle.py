@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from typing import Any, Iterable
 
-from ..config.v29_config import V29Config
+from ...config.v29_config import V29Config
 from .analytics import AnalyticsAgent
 from .reservation import ReservationAgent
 from .risk import RiskAgent

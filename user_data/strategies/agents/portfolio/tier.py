@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence
+from typing import Literal, Optional, Sequence, TYPE_CHECKING
 
-from ..config.v29_config import TierSpec, V29Config
-from .schemas import Candidate
+from ...config.v29_config import TierSpec, V29Config
+
+if TYPE_CHECKING:
+    from ..signals.schemas import Candidate
 
 
 @dataclass
@@ -29,8 +31,8 @@ class TierPolicy:
     per_pair_risk_cap_pct: float
     max_stake_notional_pct: float
     icu_force_exit_bars: int
-    priority: int
-    default_exit_profile: Optional[str]
+    priority: int = 100
+    default_exit_profile: Optional[str] = None
 
     def permits(
         self,

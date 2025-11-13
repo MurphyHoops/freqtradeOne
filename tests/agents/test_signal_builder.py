@@ -2,10 +2,10 @@
 
 from types import SimpleNamespace
 
-from user_data.strategies.config.v29_config import ExitProfile, StrategyRecipe, V29Config
-from user_data.strategies.agents.signal import build_candidates
-from user_data.strategies.agents.signal import builder as builder_module
-from user_data.strategies.agents.signal.schemas import Condition, SignalSpec
+from user_data.strategies.config.v29_config import ExitProfile, StrategyRecipe, V29Config
+from user_data.strategies.agents.signals import build_candidates
+from user_data.strategies.agents.signals import builder as builder_module
+from user_data.strategies.agents.signals.schemas import Condition, SignalSpec
 
 
 def _row(**kwargs):

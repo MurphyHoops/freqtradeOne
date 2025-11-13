@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Optional
 
 try:
-    from .exits.router import EXIT_ROUTER, ImmediateContext
-    from .exits.exit_tags import ExitTags
+    from .router import EXIT_ROUTER, ImmediateContext
+    from .exit_tags import ExitTags
 except Exception:  # pragma: no cover
     EXIT_ROUTER = None  # type: ignore
     ImmediateContext = None  # type: ignore

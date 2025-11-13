@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from user_data.strategies.agents.sizer import SizerAgent
+from user_data.strategies.agents.portfolio.sizer import SizerAgent
 from user_data.strategies.config.v29_config import V29Config
 
 

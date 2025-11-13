@@ -122,7 +122,7 @@ class ExitRouter:
 
     # --------------- Evaluation: threshold/immediate ---------------
     def sl_best(self, ctx: SLContext, base_sl_pct: Optional[float]) -> Optional[float]:
-        """Return the tightest (max) sl percent (>0) among rules, compared vs base_sl_pct.
+        """Return the tightest (min) sl percent (>0) among rules, compared vs base_sl_pct.
         Router only tightens, never loosens.
         """
         best: Optional[float] = base_sl_pct if (base_sl_pct is not None and base_sl_pct > 0) else None
@@ -136,7 +136,7 @@ class ExitRouter:
                 if best is None:
                     best = tightened
                 else:
-                    best = max(best, tightened)
+                    best = min(best, tightened)
         return best
 
     def tp_best(self, ctx: TPContext, base_tp_pct: Optional[float]) -> Optional[float]:

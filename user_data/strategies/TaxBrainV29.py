@@ -58,7 +58,7 @@ try:
 
     from user_data.strategies.agents.exits.facade import ExitFacade
     from user_data.strategies.agents.exits.router import EXIT_ROUTER, SLContext, TPContext
-    from user_data.strategies.agents.exits.exit_tags import ExitTags
+    from user_data.strategies.agents.exits.exit import ExitTags
 except Exception:  # pragma: no cover
 
     ExitFacade = None  # type: ignore
@@ -198,8 +198,7 @@ except Exception:  # pragma: no cover
 
 from user_data.strategies.agents.exits import rules_threshold  # 注册 SL/TP + 即时退出规则
 
-from user_data.strategies.config.v29_config import ExitProfile, V29Config, apply_overrides
-from user_data.strategies.agents.exits.profiles import ProfilePlan
+from user_data.strategies.config.v29_config import V29Config, apply_overrides
 
 from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
 
@@ -207,7 +206,7 @@ from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
 
 from user_data.strategies.agents.portfolio.sizer import SizerAgent
 
-from user_data.strategies.agents.signals.requirements import (
+from user_data.strategies.agents.signals.builder import (
 
     collect_factor_requirements,
 
@@ -1026,6 +1025,14 @@ class TaxBrainV29(IStrategy):
 
         self.risk_agent = RiskAgent(self.cfg, self.reservation, self.tier_mgr)
 
+        self.exit_facade = ExitFacade(self.cfg, self.tier_mgr) if ExitFacade else None
+        if self.exit_facade:
+            self.exit_facade.attach_strategy(self)
+            self.exit_facade.set_dataprovider(getattr(self, "dp", None))
+
+        self.exit_policy = ExitPolicyV29(self.state, self.eq_provider, self.cfg, dp=getattr(self, "dp", None))
+        self.exit_policy.set_strategy(self)
+
         state_file = (user_data_dir / "taxbrain_v29_state.json").resolve()
 
         self._runmode_token: str = ""
@@ -1067,13 +1074,6 @@ class TaxBrainV29(IStrategy):
         self.sizer = SizerAgent(
 
             self.state, self.reservation, self.eq_provider, self.cfg, self.tier_mgr)
-
-        self.exit_policy = ExitPolicyV29(
-
-            self.state, self.eq_provider, self.cfg)
-        self.exit_facade = ExitFacade(self.cfg, self.tier_mgr) if ExitFacade else None
-        if self.exit_facade:
-            self.exit_facade.attach_strategy(self)
 
         self.execution = ExecutionAgent(
 
@@ -2246,199 +2246,43 @@ class TaxBrainV29(IStrategy):
 
     ) -> Optional[float]:
 
-        """
+        """Delegate stoploss calculation to ExitRouter rules."""
 
-        统一从 trade/custom/meta/tag 拿到 sl/tp（正百分比），
+        if EXIT_ROUTER is None or SLContext is None:
 
-        然后通过 Router 的 SL 聚合“只收紧不放松”，
-
-        再按早锁盈规则尝试上移（对齐 current_time 的 ATR）。
-
-        返回：
-
-        None -> 沿用默认止损
-
-        负数 -> 新止损距离（相对入场价的负百分比）
-
-        """
-
-        # 1) 读取 sl/tp（多级兜底）
-
-        tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-
-        pst = self.state.get_pair_state(pair) if hasattr(
-
-            self.state, "get_pair_state") else None
-
-        meta = (pst.active_trades.get(tid) if pst and getattr(
-
-            pst, "active_trades", None) else None)
-
-        sl_pct = None
-
-        tp_pct = None
-
-        # 1.1 trade.custom_data
+            return self.stoploss
 
         try:
 
-            if hasattr(trade, "get_custom_data"):
+            ctx = SLContext(
 
-                sl_pct = trade.get_custom_data("sl_pct")
+                pair=pair,
 
-                tp_pct = trade.get_custom_data("tp_pct")
+                trade=trade,
+
+                now=current_time,
+
+                profit=float(current_profit or 0.0),
+
+                dp=self.dp,
+
+                cfg=self.cfg,
+
+                state=self.state,
+
+                strategy=self,
+
+            )
+
+            sl_pct = EXIT_ROUTER.sl_best(ctx, base_sl_pct=None)
 
         except Exception:
 
-            pass
-
-        # 1.2 active meta
-
-        if (sl_pct is None or sl_pct <= 0) and meta:
-
-            try:
-
-                sl_pct = getattr(meta, "sl_pct", None)
-
-            except Exception:
-
-                pass
-
-        if (tp_pct is None or tp_pct <= 0) and meta:
-
-            try:
-
-                tp_pct = getattr(meta, "tp_pct", None)
-
-            except Exception:
-
-                pass
-
-        profile, plan = self._runtime_exit_plan(pair, trade, current_time)
-        planned_sl = plan.sl_pct if plan and plan.sl_pct and plan.sl_pct > 0 else None
-        planned_tp = plan.tp_pct if plan and plan.tp_pct and plan.tp_pct > 0 else None
-
-        if planned_sl:
-
-            planned_sl = float(planned_sl)
-
-            if sl_pct is None or sl_pct <= 0:
-
-                sl_pct = planned_sl
-
-            else:
-
-                base_sl = float(sl_pct)
-
-                if planned_sl < base_sl:
-
-                    sl_pct = planned_sl
-
-        if planned_tp:
-
-            tp_pct = planned_tp
-
-        # 拿不到 -> 用默认止损
+            sl_pct = None
 
         if sl_pct is None or sl_pct <= 0:
 
             return self.stoploss
-
-        # 2) 通过 Router 聚合 SL（只收紧不放松）
-
-        if EXIT_ROUTER is not None and SLContext is not None:
-
-            try:
-
-                ctx = SLContext(
-
-                    pair=pair,
-
-                    trade=trade,
-
-                    now=current_time,
-
-                    profit=(current_profit or 0.0),
-
-                    dp=self.dp,
-
-                    cfg=self.cfg,
-
-                    state=self.state,
-
-                    strategy=self,
-
-                )
-
-                tightened = EXIT_ROUTER.sl_best(ctx, float(sl_pct))
-
-                if tightened and tightened > 0:
-
-                    sl_pct = min(float(sl_pct), float(tightened))  # 只收紧
-
-            except Exception:
-
-                pass
-
-        try:
-
-            if profile and profile.breakeven_lock_frac_of_tp is not None:
-
-                breakeven_frac = float(profile.breakeven_lock_frac_of_tp)
-
-            else:
-
-                breakeven_frac = float(
-
-                    getattr(self.cfg, "breakeven_lock_frac_of_tp", 0.5))
-
-        except Exception:
-
-            breakeven_frac = 0.5
-
-        if tp_pct and current_profit and current_profit > 0:
-
-            try:
-
-                    if float(current_profit) >= float(tp_pct) * breakeven_frac:
-
-                        atr_pct_hint = (
-                            plan.atr_pct
-                            if plan and plan.atr_pct
-                            else (
-                                self.exit_facade.atr_pct(
-                                    pair,
-                                    profile.atr_timeframe if profile and profile.atr_timeframe else self.timeframe,
-                                    current_time,
-                                )
-                                if self.exit_facade
-                                else None
-                            )
-                        ) or 0.0
-
-                    # 让你的已有 early_lock_distance 参与（若不可用则忽略）
-
-                    try:
-
-                        dist = self.exit_policy.early_lock_distance(
-
-                            trade, current_rate, current_profit, atr_pct_hint)
-
-                    except Exception:
-
-                        dist = None
-
-                    if dist is not None:
-
-                        # 只收紧
-
-                        return max(-abs(float(sl_pct)), float(dist))
-
-            except Exception:
-
-                pass
-
-        # 常规返回：负数距离
 
         return -abs(float(sl_pct))
 
@@ -2492,9 +2336,31 @@ class TaxBrainV29(IStrategy):
 
         )
 
-        if reason:
+        if not reason:
 
-            self.analytics.log_exit(pair, tid, reason)
+            return None
+
+        try:
+
+            if hasattr(trade, "exit_reason"):
+
+                setattr(trade, "exit_reason", reason)
+
+        except Exception:
+
+            pass
+
+        try:
+
+            if hasattr(trade, "set_custom_data"):
+
+                trade.set_custom_data("exit_tag", reason)
+
+        except Exception:
+
+            pass
+
+        self.analytics.log_exit(pair, tid, reason)
 
         return reason
 
@@ -2516,129 +2382,43 @@ class TaxBrainV29(IStrategy):
 
     ) -> Optional[float]:
 
-        """
+        """Use ExitRouter TP aggregation for ROI backpressure."""
 
-        返回“当前时刻的 ROI 阈值（正百分比，基于入场价）”：
+        if EXIT_ROUTER is None or TPContext is None:
 
-        - 先取基线 TP（trade/custom/meta/tag）；
-
-        - 再通过 Router 的 TP 聚合得到最保守阈值；
-
-        - 返回 None 让引擎走 minimal_roi；或返回一个 >0 的百分比作为动态 ROI。
-
-        """
-
-        # 1) 拿基线 tp_pct（与 custom_stoploss 同源兜底）
-
-        tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-
-        pst = self.state.get_pair_state(pair) if hasattr(
-
-            self.state, "get_pair_state") else None
-
-        meta = (pst.active_trades.get(tid) if pst and getattr(
-
-            pst, "active_trades", None) else None)
-
-        tp_pct = None
+            return None
 
         try:
 
-            if hasattr(trade, "get_custom_data"):
+            ctx = TPContext(
 
-                tp_pct = trade.get_custom_data("tp_pct")
+                pair=pair,
+
+                trade=trade,
+
+                now=current_time,
+
+                profit=float(current_profit or 0.0),
+
+                dp=self.dp,
+
+                cfg=self.cfg,
+
+                state=self.state,
+
+                strategy=self,
+
+            )
+
+            tp_pct = EXIT_ROUTER.tp_best(ctx, base_tp_pct=None)
 
         except Exception:
 
-            pass
+            tp_pct = None
 
-        if (tp_pct is None or tp_pct <= 0) and meta:
+        if tp_pct is None or tp_pct <= 0:
 
-            try:
+            return None
 
-                tp_pct = getattr(meta, "tp_pct", None)
-
-            except Exception:
-
-                pass
-
-        _, plan = self._runtime_exit_plan(pair, trade, current_time)
-
-        planned_tp = plan.tp_pct if plan and plan.tp_pct and plan.tp_pct > 0 else None
-
-        if planned_tp:
-
-            tp_pct = planned_tp
-
-        base_tp = tp_pct if (tp_pct and tp_pct > 0) else None
-
-        # 2) 通过 Router 聚合 TP（取最保守）
-
-        if EXIT_ROUTER is not None and TPContext is not None:
-
-            try:
-
-                ctx = TPContext(
-
-                    pair=pair,
-
-                    trade=trade,
-
-                    now=current_time,
-
-                    profit=(current_profit or 0.0),
-
-                    dp=self.dp,
-
-                    cfg=self.cfg,
-
-                    state=self.state,
-
-                    strategy=self,
-
-                )
-
-                best_tp = EXIT_ROUTER.tp_best(ctx, base_tp)
-
-                if best_tp and best_tp > 0:
-
-                    return float(best_tp)
-
-            except Exception:
-
-                pass
-
-        # 3) 没有动态阈值 -> 交给 minimal_roi
-
-        return base_tp  # 可能为 None；freqtrade 将按 minimal_roi 处理
-
-    # ------------------------------------------------------------------ #
-
-    # Exit-profile helpers
-
-    # ------------------------------------------------------------------ #
-
-    def _runtime_exit_plan(
-
-        self,
-
-        pair: str,
-
-        trade,
-
-        current_time: Optional[datetime],
-
-    ) -> Tuple[Optional[ExitProfile], Optional[ProfilePlan]]:
-
-        if not getattr(self, "exit_facade", None):
-
-            return (None, None)
-
-        _, profile_def, plan = self.exit_facade.resolve_trade_plan(pair, trade, current_time)
-
-        if not profile_def:
-
-            return (None, None)
-
-        return (profile_def, plan)
+        return float(tp_pct)
 

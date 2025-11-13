@@ -1,3 +1,3 @@
-# Re-export router contexts / tags for convenience.
+"""Convenience re-exports for exit components."""
 
-from .exit_tags import ExitTags  # noqa: F401
+from .exit import ExitTags  # noqa: F401

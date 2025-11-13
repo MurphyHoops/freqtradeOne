@@ -6,7 +6,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional, Sequence, TYPE_CHECKING
 
-from ...config.v29_config import TierSpec, V29Config
+from ...config.v29_config import DEFAULT_TIERS, DEFAULT_TIER_ROUTING_MAP, TierSpec, V29Config
+
+__all__ = [
+    "TierPolicy",
+    "TierManager",
+    "TierAgent",
+    "CLOSS_TO_TIER",
+    "TIER_DEFAULT_PROFILE",
+]
 
 if TYPE_CHECKING:
     from ..signals.schemas import Candidate
@@ -63,11 +71,19 @@ class TierManager:
             raise ValueError("Tier configuration is empty; supply at least one TierSpec.")
         self._policies: dict[str, TierPolicy] = {name: self._from_spec(spec) for name, spec in tiers.items()}
         self._ordered_policies = sorted(self._policies.values(), key=lambda pol: (-pol.priority, pol.name))
+        self._routing_map = dict(getattr(self._routing, "loss_tier_map", {}) or {}) or dict(CLOSS_TO_TIER)
+        self._tier_profile_defaults = {
+            name: policy.default_exit_profile
+            for name, policy in self._policies.items()
+            if policy.default_exit_profile
+        }
+        if not self._tier_profile_defaults:
+            self._tier_profile_defaults = dict(TIER_DEFAULT_PROFILE)
 
     def get(self, closs: int) -> TierPolicy:
         """Return the TierPolicy selected by the routing rules."""
 
-        tier_name = self._routing.resolve(closs) if self._routing else None
+        tier_name = self._resolve_tier_name(closs)
         if tier_name and tier_name in self._policies:
             return self._policies[tier_name]
         # fallback: deterministic first tier
@@ -81,11 +97,13 @@ class TierManager:
     def default_profile_for_closs(self, closs: int) -> Optional[str]:
         """Return the default exit profile configured for the tier covering this closs."""
 
-        try:
-            policy = self.get(closs)
-        except Exception:
+        tier_name = self._resolve_tier_name(closs)
+        if not tier_name:
             return None
-        return getattr(policy, "default_exit_profile", None)
+        policy = self._policies.get(tier_name)
+        if policy and policy.default_exit_profile:
+            return policy.default_exit_profile
+        return self._tier_profile_defaults.get(tier_name) or TIER_DEFAULT_PROFILE.get(tier_name)
 
     def resolve_for_candidate(self, closs: int, candidate: Candidate) -> TierPolicy:
         """Return the tier that best accommodates the candidate."""
@@ -120,6 +138,17 @@ class TierManager:
             default_exit_profile=getattr(spec, "default_exit_profile", None),
         )
 
+    def _resolve_tier_name(self, closs: int) -> Optional[str]:
+        tier_name = self._routing.resolve(closs) if self._routing else None
+        if tier_name:
+            return tier_name
+        if not self._routing_map:
+            return None
+        for threshold, name in sorted(self._routing_map.items()):
+            if closs <= threshold:
+                return name
+        return next(reversed(sorted(self._routing_map.items())))[1]
+
 
 class TierAgent:
     """Filter candidate lists according to tier rules."""
@@ -143,3 +172,9 @@ class TierAgent:
             return None
         ok.sort(key=lambda c: (c.expected_edge, c.raw_score), reverse=True)
         return ok[0]
+CLOSS_TO_TIER: dict[int, str] = dict(DEFAULT_TIER_ROUTING_MAP)
+TIER_DEFAULT_PROFILE: dict[str, str] = {
+    name: spec.default_exit_profile
+    for name, spec in DEFAULT_TIERS.items()
+    if getattr(spec, "default_exit_profile", None)
+}

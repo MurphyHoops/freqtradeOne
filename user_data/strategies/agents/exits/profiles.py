@@ -11,7 +11,20 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class ExitProfile:
-    """Unified parameters describing how exits should behave."""
+    """Unified parameters describing how exits should behave.
+
+    Attributes:
+        atr_mul_sl: Multiplier applied to ATR% for the base stoploss distance.
+        floor_sl_pct: Absolute stoploss floor used when ATR-derived SL is too tight.
+        atr_mul_tp: Multiplier applied to ATR% for the base take-profit distance.
+        breakeven_lock_frac_of_tp: Fraction of tp_pct that must be reached before locking at breakeven.
+        trail_mode: Trailing style, e.g. ``"percent"`` or ``"chandelier"``.
+        trail_atr_mul: ATR multiple used by chandelier trails to offset from recent highs/lows.
+        trail_pct: Amount of open profit to give back when ``trail_mode="percent"``.
+        activation_atr_mul: Optional ATR multiplier used to delay trail activation.
+        max_bars_in_trade: Optional time stop expressed in bars.
+        ladder: Optional tuple describing staged take-profit levels (ratio, weight) pairs.
+    """
 
     atr_timeframe: Optional[str] = None
     atr_mul_sl: float = 1.0

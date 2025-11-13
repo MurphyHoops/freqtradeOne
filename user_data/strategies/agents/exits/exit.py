@@ -1,34 +1,52 @@
-# agents/exit.py
+"""Exit policy helpers and canonical exit tags."""
+
 from __future__ import annotations
+
 from typing import Optional
 
-try:
-    from .router import EXIT_ROUTER, ImmediateContext
-    from .exit_tags import ExitTags
-except Exception:  # pragma: no cover
-    EXIT_ROUTER = None  # type: ignore
-    ImmediateContext = None  # type: ignore
+from .router import EXIT_ROUTER, ImmediateContext
 
-    class _ExitTagsFallback:
-        CLOSE_FILLED = "close_filled"
-        ORDER_CANCELLED = "order_cancelled"
-        ORDER_REJECTED = "order_rejected"
-        TP_HIT = "tp_hit"
-        ICU_TIMEOUT = "icu_timeout"
-        RISK_OFF = "risk_off"
-        BREAKEVEN = "breakeven_lock"
-        HARD_STOP = "hard_stop"
-        HARD_TP = "hard_takeprofit"
-        FLIP_PREFIX = "flip_"
 
-        @staticmethod
-        def flip(direction: str | None) -> str:
-            token = (direction or "").strip().lower()
-            if token not in {"long", "short"}:
-                token = "unknown"
-            return f"{_ExitTagsFallback.FLIP_PREFIX}{token}"
+class ExitTags:
+    """Static string constants for exit reasons / tags."""
 
-    ExitTags = _ExitTagsFallback()  # type: ignore
+    CLOSE_FILLED = "close_filled"
+    ORDER_CANCELLED = "order_cancelled"
+    ORDER_REJECTED = "order_rejected"
+    TP_HIT = "tp_hit"
+    ICU_TIMEOUT = "icu_timeout"
+    RISK_OFF = "risk_off"
+    BREAKEVEN = "breakeven_lock"
+    ATR_TRAIL = "atr_trail_follow"
+    HARD_STOP = "hard_stop"
+    HARD_TP = "hard_takeprofit"
+    FLIP_PREFIX = "flip_"
+    VECTOR_TAGS = {
+        TP_HIT,
+        ICU_TIMEOUT,
+        RISK_OFF,
+        BREAKEVEN,
+        ATR_TRAIL,
+        HARD_STOP,
+        HARD_TP,
+    }
+
+    @staticmethod
+    def flip(direction: str | None) -> str:
+        """Return flip tag for the provided direction (long/short)."""
+
+        token = (direction or "").strip().lower()
+        if token not in {"long", "short"}:
+            token = "unknown"
+        return f"{ExitTags.FLIP_PREFIX}{token}"
+
+    @classmethod
+    def is_vector_tag(cls, tag: str | None) -> bool:
+        """Return True if the tag belongs to vector exit instrumentation."""
+
+        if not tag:
+            return False
+        return tag in cls.VECTOR_TAGS or tag.startswith(cls.FLIP_PREFIX)
 
 class ExitPolicyV29:
     def __init__(self, state, eq_provider, cfg, dp=None) -> None:
@@ -99,19 +117,5 @@ class ExitPolicyV29:
         #  ????
         return None
 
-    def early_lock_distance(
-        self,
-        trade,
-        current_rate: Optional[float],
-        current_profit_pct: Optional[float],
-        atr_pct_hint: float,
-    ) -> Optional[float]:
-        """Provide a simple breakeven/lock distance when profit exceeds threshold."""
-
-        base = atr_pct_hint if atr_pct_hint and atr_pct_hint > 0 else None
-        if base:
-            return -max(base * 0.5, 0.001)
-        if current_profit_pct is not None and current_profit_pct > 0:
-            return -abs(current_profit_pct) * 0.25
-        return None
+__all__ = ["ExitPolicyV29", "ExitTags"]
 

@@ -90,7 +90,13 @@ class SizerAgent:
         equity = self.eq.get_equity()
         pst = self.state.get_pair_state(ctx.pair)
         tier_pol = self.tier_mgr.get(pst.closs)
-
+        # --- 新增：单仓位限制 ---
+        # 当某个 tier 配置 single_position_only=True 时，只要该交易对有在市仓位，
+        # 无论是回测还是实盘，都直接返回 0 仓位，阻止再开新仓。
+        if tier_pol and getattr(tier_pol, "single_position_only", False) and pst.active_trades:
+            # bucket 返回什么无所谓，反正 stake=0 不会下单
+            return (0.0, 0.0, "fast")
+        
         base_risk = self._baseline_risk(equity, tier_pol)
         risk_local_need = self._apply_recovery_policy(base_risk, ctx.tp_pct, ctx.sl_pct, pst, tier_pol)
 
@@ -104,6 +110,22 @@ class SizerAgent:
 
         risk_final = min(risk_wanted, risk_room)
         if risk_final <= 0 or ctx.sl_pct <= 0:
+            print(
+                "[SIZER_ZERO]",
+                ctx.pair,
+                "equity", equity,
+                "debt_pool", self.state.debt_pool,
+                "cap_pct", self.state.get_dynamic_portfolio_cap_pct(equity),
+                "port_cap", self.state.get_dynamic_portfolio_cap_pct(equity) * equity,
+                "open_risk", self.state.get_total_open_risk(),
+                "reserved_port", self.reservation.get_total_reserved(),
+                "pair_open", self.state.pair_risk_open.get(ctx.pair, 0.0),
+                "pair_reserved", self.reservation.get_pair_reserved(ctx.pair),
+                "tier", tier_pol.name,
+                "per_pair_cap_pct", tier_pol.per_pair_risk_cap_pct,
+                "risk_wanted", risk_wanted,
+                "risk_room", risk_room,
+            )
             return (0.0, 0.0, bucket)
 
         stake_nominal = risk_final / ctx.sl_pct

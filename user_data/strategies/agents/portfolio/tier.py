@@ -41,6 +41,7 @@ class TierPolicy:
     icu_force_exit_bars: int
     priority: int = 100
     default_exit_profile: Optional[str] = None
+    single_position_only: bool = False  # 新增字段
 
     def permits(
         self,
@@ -136,6 +137,7 @@ class TierManager:
             icu_force_exit_bars=spec.icu_force_exit_bars,
             priority=int(getattr(spec, "priority", 100)),
             default_exit_profile=getattr(spec, "default_exit_profile", None),
+            single_position_only=getattr(spec, "single_position_only", False),
         )
 
     def _resolve_tier_name(self, closs: int) -> Optional[str]:

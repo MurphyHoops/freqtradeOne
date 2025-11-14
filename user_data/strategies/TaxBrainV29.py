@@ -1065,12 +1065,15 @@ class TaxBrainV29(IStrategy):
         if any(token in backtest_modes for token in (runmode_token, dp_mode_token) if token):
             return True
         pst = self.state.get_pair_state(pair)
-
-        #
-
-        if pst.cooldown_bars_left > 0 or len(pst.active_trades) > 0:
+        tier_pol = self.tier_mgr.get(pst.closs)
+        # 冷却期一律禁止开新仓
+        if pst.cooldown_bars_left > 0:
             return False
 
+        # 若当前 tier 配置了 single_position_only，则有仓位时禁止再开
+        if tier_pol and getattr(tier_pol, "single_position_only", False) and pst.active_trades:
+            return False
+        
         # 实盘 / 干跑：仍用“最新一拍”的 _last_signal 语义
         requested_dir = "long" if side.lower() in ("buy", "long") else "short"
         sig = self._last_signal.get(pair)
@@ -1184,6 +1187,15 @@ class TaxBrainV29(IStrategy):
             max_stake=max_stake,
         )
         if stake <= 0 or risk <= 0:
+            # print(
+            #     "[DEBUG stake=0]",
+            #     current_time, pair,
+            #     "sl", sl, "tp", tp, "dir", direction,
+            #     "equity", self.eq_provider.get_equity(),
+            #     "debt_pool", self.state.debt_pool,
+            #     "open_risk", self.state.get_total_open_risk(),
+            #     "reserved", self.reservation.get_total_reserved(),
+            # )
             return 0.0
         rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
         self.reservation.reserve(pair, rid, risk, bucket)

@@ -50,7 +50,7 @@ class TierSpec:
     icu_force_exit_bars: int = 0
     priority: int = 100
     default_exit_profile: Optional[str] = None
-
+    single_position_only: bool = False  # 新增：有仓位时是否禁止该 tier 再开新仓
 
 @dataclass(frozen=True)
 class TierRouting:
@@ -129,6 +129,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         max_stake_notional_pct=0.15,
         icu_force_exit_bars=0,
         default_exit_profile="ATRtrail_v1",
+        single_position_only=True,
     ),
     "T12_recovery": TierSpec(
         name="T12_recovery",
@@ -152,6 +153,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         max_stake_notional_pct=0.12,
         icu_force_exit_bars=30,
         default_exit_profile="ATRtrail_v1",
+        single_position_only=True,
     ),
     "T3p_ICU": TierSpec(
         name="T3p_ICU",
@@ -170,6 +172,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         max_stake_notional_pct=0.10,
         icu_force_exit_bars=20,
         default_exit_profile="ATRtrail_v1",
+        single_position_only=True,  
     ),
 }
 
@@ -242,7 +245,7 @@ class V29Config:
 
     # Runtime
     dry_run_wallet_fallback: float = 1000.0
-    enforce_leverage: float = 1.0
+    enforce_leverage: float = 10.0
     enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)
     exit_profile_version: str = DEFAULT_PROFILE_VERSION
     exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)

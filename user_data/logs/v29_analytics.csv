@@ -20,3 +20,9 @@ ts,bar_tick,pnl,debt_pool,cap_used_pct,fast_alloc_size,slow_alloc_size,reservati
 2025-11-11T16:13:20.130668,1,0.0,0.0,0.0,0,0,0,0
 2025-11-12T06:57:45.488834,1,0.0,0.0,0.0,0,0,0,0
 2025-11-13T14:03:39.720951+00:00,1,0.0,0.0,0.0,0,0,0,0,
+2025-11-13T15:37:40.913767+00:00,1,0.0,0.0,0.0,0,0,0,0,
+2025-11-13T16:06:48.479245+00:00,1,0.0,0.0,0.0,0,0,0,0,
+2025-11-13T16:10:35.231786+00:00,12,0.0,0.0,0.0,0,0,0,0,"{""BTC/USDT:USDT"": {""tier"": ""T0_healthy"", ""active_trades"": 0, ""active_recipes"": [], ""active_exit_profiles"": []}, ""ETH/USDT:USDT"": {""tier"": ""T0_healthy"", ""active_trades"": 0, ""active_recipes"": [], ""active_exit_profiles"": []}}"
+2025-11-13T16:20:52.044288+00:00,1,0.0,0.0,0.0,0,0,0,0,
+2025-11-13T16:32:33.076273+00:00,13,0.0,0.0,0.0,0,0,0,0,"{""BTC/USDT:USDT"": {""tier"": ""T0_healthy"", ""active_trades"": 0, ""active_recipes"": [], ""active_exit_profiles"": []}, ""ETH/USDT:USDT"": {""tier"": ""T0_healthy"", ""active_trades"": 0, ""active_recipes"": [], ""active_exit_profiles"": []}}"
+2025-11-14T04:50:14.642010+00:00,1,0.0,0.0,0.0,0,0,0,0,

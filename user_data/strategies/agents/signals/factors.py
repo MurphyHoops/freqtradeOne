@@ -68,6 +68,10 @@ class FactorBank:
             raise KeyError(base)
         row = self._row if timeframe is None else self._informative.get(timeframe)
         value = _safe_get(row, column)
+        if timeframe is not None and (row is None or math.isnan(value)):
+            # Freqtrade merges informative columns back onto the base timeframe dataframe,
+            # so fall back to the primary row when the per-timeframe snapshot is missing.
+            value = _safe_get(self._row, column)
         if (
             timeframe
             and (value is None or math.isnan(value))

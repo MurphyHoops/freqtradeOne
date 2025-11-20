@@ -165,14 +165,14 @@ PROFILE_LIBRARY: Dict[str, Dict[str, ExitProfile]] = {
     "v1": {
         "ATRtrail_v1": ExitProfile(
             atr_timeframe=None,
-            atr_mul_sl=8.0,
-            floor_sl_pct=0.006,
-            atr_mul_tp=2.0,
-            breakeven_lock_frac_of_tp=0.5,
-            trail_mode="chandelier",
-            trail_atr_mul=2.5,
-            activation_atr_mul=1.5,
-            max_bars_in_trade=240,
+            atr_mul_sl=3,
+            atr_mul_tp=3,
+            floor_sl_pct=0.000000000001,
+            breakeven_lock_frac_of_tp=0,
+            trail_mode=None,
+            trail_atr_mul=0,
+            activation_atr_mul=0,
+            max_bars_in_trade=0,
         )
     }
 }

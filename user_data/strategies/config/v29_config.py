@@ -77,7 +77,7 @@ DEFAULT_STRATEGIES: Dict[str, StrategySpec] = {
         name="NBX_fast_default",
         entries=("newbars_breakout_long_5m", "newbars_breakdown_short_5m"),
         exit_profile="ATRtrail_v1",
-        min_rr=0.1,
+        min_rr=0.00001,
         min_edge=0.0,
     ),
     "Recovery_mix": StrategySpec(
@@ -118,13 +118,13 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         allowed_entries=("newbars_breakout_long_5m", "newbars_breakdown_short_5m"),
         allowed_squads=("NBX",),
         min_raw_score=0.20,
-        min_rr_ratio=0.1,
+        min_rr_ratio=0.00001,
         min_edge=0.002,
         sizing_algo="BASELINE",
         k_mult_base_pct=1.0,
         recovery_factor=1.0,
-        cooldown_bars=5,
-        cooldown_bars_after_win=2,
+        cooldown_bars=0,
+        cooldown_bars_after_win=0,
         per_pair_risk_cap_pct=0.03,
         max_stake_notional_pct=0.15,
         icu_force_exit_bars=0,
@@ -142,13 +142,13 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         ),
         allowed_squads=("PBL", "TRS", "NBX"),
         min_raw_score=0.15,
-        min_rr_ratio=1.4,
-        min_edge=0.003,
+        min_rr_ratio=0.000001,
+        min_edge=0.000,
         sizing_algo="TARGET_RECOVERY",
         k_mult_base_pct=1.0,
         recovery_factor=1.5,
         cooldown_bars=10,
-        cooldown_bars_after_win=4,
+        cooldown_bars_after_win=0,
         per_pair_risk_cap_pct=0.02,
         max_stake_notional_pct=0.12,
         icu_force_exit_bars=30,
@@ -218,7 +218,7 @@ class V29Config:
     # Treasury controls
     treasury_fast_split_pct: float = 0.30
     fast_topK_squads: int = 10
-    slow_universe_pct: float = 0.90
+    slow_universe_pct: float = 1
     min_injection_nominal_fast: float = 30.0
     min_injection_nominal_slow: float = 7.0
     # Debt / decay
@@ -237,11 +237,30 @@ class V29Config:
     ema_fast: int = 50
     ema_slow: int = 200
     rsi_len: int = 14
-    atr_len: int = 14
-    adx_len: int = 14
+    atr_len: int = 20
+    adx_len: int = 20
 
     # Behaviour toggles
     suppress_baseline_when_stressed: bool = True
+
+    # ==== 新增：初始开仓量配置 ====
+    # 模式：
+    # - "static"  : 每次按静态名义额开仓（受 VaR 和 CAP 约束）
+    # - "dynamic" : 按权益百分比算开仓（受 min_stake 和 CAP 约束）
+    # - "hybrid"  : 两者结合，权益百分比在 [min_nominal, max_nominal] 之间
+    initial_size_mode: Literal["static", "dynamic", "hybrid"] = "static"
+
+    # 动态模式：初始开仓 = equity * 这个比例（再受上下限约束）
+    initial_size_equity_pct: float = 0.01  # 比如 1% 的权益
+
+    # 静态模式：如果为 0，则使用 Freqtrade 传过来的 min_stake
+    # 如果 > 0，则优先用这个值（单位：名义 USDT）
+    static_initial_nominal: float = 6
+
+    # 动静结合时的最大名义上限（单笔），可以不同于 per_pair_max_nominal_static
+    # 为 0 则只用 per_pair_max_nominal_static 约束整币总仓位。
+    initial_max_nominal_per_trade: float = 20
+    per_pair_max_nominal_static: float = 3000.0
 
     # Runtime
     dry_run_wallet_fallback: float = 1000.0

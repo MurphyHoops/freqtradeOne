@@ -110,36 +110,80 @@ class SizerAgent:
 
         risk_final = min(risk_wanted, risk_room)
         if risk_final <= 0 or ctx.sl_pct <= 0:
-            print(
-                "[SIZER_ZERO]",
-                ctx.pair,
-                "equity", equity,
-                "debt_pool", self.state.debt_pool,
-                "cap_pct", self.state.get_dynamic_portfolio_cap_pct(equity),
-                "port_cap", self.state.get_dynamic_portfolio_cap_pct(equity) * equity,
-                "open_risk", self.state.get_total_open_risk(),
-                "reserved_port", self.reservation.get_total_reserved(),
-                "pair_open", self.state.pair_risk_open.get(ctx.pair, 0.0),
-                "pair_reserved", self.reservation.get_pair_reserved(ctx.pair),
-                "tier", tier_pol.name,
-                "per_pair_cap_pct", tier_pol.per_pair_risk_cap_pct,
-                "risk_wanted", risk_wanted,
-                "risk_room", risk_room,
-            )
             return (0.0, 0.0, bucket)
 
         stake_nominal = risk_final / ctx.sl_pct
+
+        # ==== 新增：按照 sizing 模式，对 stake_nominal 做二次约束 ====
+        mode = getattr(self.cfg, "initial_size_mode", "hybrid")
+        lev = float(self.cfg.enforce_leverage or 1.0)
+
+        # 1）静态基础：静态名义（如果为 0，则用 Freqtrade 的 min_stake）
+        static_nominal = float(self.cfg.static_initial_nominal or 0.0)
+        if static_nominal <= 0 and ctx.min_stake is not None:
+            # ctx.min_stake 为 pre-leverage 的保证金，用它当静态初始手数
+            static_nominal = float(ctx.min_stake)
+
+        # 2）动态基础：equity * 百分比（转换成 pre-leverage 保证金）
+        dynamic_nominal = equity * float(self.cfg.initial_size_equity_pct or 0.0)
+
+        # 3）本笔的最大名义（per trade）
+        per_trade_max_nominal = float(self.cfg.initial_max_nominal_per_trade or 0.0)
+        if per_trade_max_nominal <= 0:
+            # 如果没有单笔上限，就只用「总仓位 3000」那个 CAP
+            per_trade_max_nominal = float("inf")
+
+        # 根据模式决定目标开仓名义（pre-leverage）
+        if mode == "static":
+            target_nominal = static_nominal
+        elif mode == "dynamic":
+            # 动态：不少于 min_stake，不超过单笔上限
+            target_nominal = max(static_nominal, dynamic_nominal)
+        else:  # "hybrid"
+            # 动静结合：动态目标落在 [static_nominal, per_trade_max_nominal] 之间
+            target_nominal = dynamic_nominal
+            if static_nominal > 0:
+                target_nominal = max(target_nominal, static_nominal)
+            target_nominal = min(target_nominal, per_trade_max_nominal)
+
+        # 最终 stake_nominal 不能超过「VaR 需求」和「尺寸策略」两者之一
+        stake_nominal = min(stake_nominal, target_nominal)
+
+        # === 新增：按名义仓位上限限制单币总保证金 ===
+        lev = float(self.cfg.enforce_leverage or 1.0)
+        per_pair_nominal_cap = float(self.cfg.per_pair_max_nominal_static or 0.0)
+
+        # 如果配置了 3000，则换算出「保证金上限」= 3000 / 杠杆
+        per_pair_stake_cap = per_pair_nominal_cap / lev if per_pair_nominal_cap > 0 else float("inf")
+        used_stake = self.state.pair_stake_open.get(ctx.pair, 0.0)
+        stake_room_pair = max(0.0, per_pair_stake_cap - used_stake)
+
+        # 原有的单笔 CAP（相对 equity）
         stake_cap_notional = tier_pol.max_stake_notional_pct * equity
-        stake_nominal = min(stake_nominal, stake_cap_notional, float(ctx.max_stake))
+
+        # 把所有 CAP 一起作用：单笔、全局 max_stake、单币名义 CAP
+        stake_nominal = min(
+            stake_nominal,
+            stake_cap_notional,
+            float(ctx.max_stake),
+            stake_room_pair,
+        )
+
+        # 如果 CAP 已经不允许再开仓，直接返回 0
+        if stake_nominal <= 0 or stake_room_pair <= 0:
+            return (0.0, 0.0, bucket)
+
+        # min_stake 只是“不要太小”，不能突破 CAP
+        if ctx.min_stake is not None and stake_nominal < float(ctx.min_stake):
+            # 想开的仓位达不到交易所最小要求，但 CAP 又不能给更多 → 放弃这笔机会
+            stake_nominal = ctx.min_stake
+
         if ctx.proposed_stake is not None:
             if ctx.proposed_stake <= 0:
                 return (0.0, 0.0, bucket)
             stake_nominal = min(stake_nominal, float(ctx.proposed_stake))
-        if ctx.min_stake is not None:
-            stake_nominal = max(stake_nominal, float(ctx.min_stake))
-        if stake_nominal <= 0:
-            return (0.0, 0.0, bucket)
 
+        # 此时 stake_nominal 已经在 [min_stake, CAP] 区间内
         real_risk = stake_nominal * ctx.sl_pct
         return (float(stake_nominal), float(real_risk), bucket)
 

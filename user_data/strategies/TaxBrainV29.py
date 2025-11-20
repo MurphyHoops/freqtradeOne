@@ -17,6 +17,7 @@ import types
 from typing import Any, Dict, Optional, Set, List, Tuple
 import pandas as pd
 from pandas import Timestamp
+import math
 
 ROOT_PATH = Path(__file__).resolve().parents[2]
 if str(ROOT_PATH) not in sys.path:
@@ -288,6 +289,15 @@ class GlobalState:
         self.reported_pairs_for_current_cycle: set[str] = set()
         self.last_finalize_walltime: float = time.time()
 
+        # === 新增：仓位金额账本（pre-leverage 的 stake）===
+        self.trade_stake_ledger: Dict[str, float] = {}
+        self.pair_stake_open: Dict[str, float] = {}
+
+    def _canonical_pair(self, pair: str | None) -> str:
+        if not pair:
+            return ""
+        return str(pair).split(":")[0]
+
     def get_pair_state(self, pair: str) -> PairState:
         """获取指定交易对的 PairState，如不存在则初始化默认实例。
         Args:
@@ -295,9 +305,10 @@ class GlobalState:
         Returns:
             PairState: 可供调用方修改的状态对象。
         """
-        if pair not in self.per_pair:
-            self.per_pair[pair] = PairState()
-        return self.per_pair[pair]
+        key = self._canonical_pair(pair)
+        if key not in self.per_pair:
+            self.per_pair[key] = PairState()
+        return self.per_pair[key]
 
     def get_total_open_risk(self) -> float:
         """汇总所有交易对当前在市风险，用于组合 CAP 控制。
@@ -330,8 +341,9 @@ class GlobalState:
         Returns:
             float: 在 CAP 范围内仍可追加的风险额度。
         """
+        key = self._canonical_pair(pair)
         cap = tier_pol.per_pair_risk_cap_pct * equity
-        used = self.pair_risk_open.get(pair, 0.0) + reserved
+        used = self.pair_risk_open.get(key, 0.0) + reserved
         return max(0.0, cap - used)
 
     def record_trade_open(
@@ -350,6 +362,7 @@ class GlobalState:
         plan_timeframe: Optional[str] = None,
         plan_atr_pct: Optional[float] = None,
         tier_name: Optional[str] = None,
+        stake_nominal: Optional[float] = None,  # ★ 新增
     ) -> None:
         """记录新建仓的风险占用，并创建 ActiveTradeMeta 以便执行与退出逻辑后续引用。
         Args:
@@ -364,10 +377,23 @@ class GlobalState:
             tier_pol: 所属 TierPolicy，用于初始化 ICU 倒计时与冷却时长。
         """
         pst = self.get_pair_state(pair)
+        pair_key = self._canonical_pair(pair)
         tier_name = tier_name or (getattr(tier_pol, "name", None) if tier_pol else None)
         self.trade_risk_ledger[trade_id] = float(real_risk)
-        self.pair_risk_open[pair] = self.pair_risk_open.get(
-            pair, 0.0) + float(real_risk)
+        self.pair_risk_open[pair_key] = self.pair_risk_open.get(
+            pair_key, 0.0) + float(real_risk)
+        
+        # === 新增：根据风险和 sl_pct 反推单笔 stake，并累计 pair 已用保证金 ===
+        if stake_nominal is None:
+            if sl_pct and sl_pct > 0:
+                stake_nominal = real_risk / sl_pct
+            else:
+                stake_nominal = 0.0
+
+        stake_nominal = float(max(stake_nominal or 0.0, 0.0))
+        self.trade_stake_ledger[trade_id] = stake_nominal
+        self.pair_stake_open[pair_key] = self.pair_stake_open.get(pair_key, 0.0) + stake_nominal
+
         icu_left = tier_pol.icu_force_exit_bars if tier_pol.icu_force_exit_bars > 0 else None
         pst.active_trades[trade_id] = ActiveTradeMeta(
             sl_pct=float(sl_pct),
@@ -395,11 +421,20 @@ class GlobalState:
             tier_mgr: TierManager，用于在状态更新后获取新的策略参数。
         """
         pst = self.get_pair_state(pair)
+        pair_key = self._canonical_pair(pair)
         was_risk = self.trade_risk_ledger.pop(trade_id, 0.0)
-        self.pair_risk_open[pair] = max(
-            0.0, self.pair_risk_open.get(pair, 0.0) - was_risk)
-        if self.pair_risk_open.get(pair, 0.0) <= 1e-12:
-            self.pair_risk_open[pair] = 0.0
+        self.pair_risk_open[pair_key] = max(
+            0.0, self.pair_risk_open.get(pair_key, 0.0) - was_risk)
+        if self.pair_risk_open.get(pair_key, 0.0) <= 1e-12:
+            self.pair_risk_open[pair_key] = 0.0
+
+
+        # === 新增：保证金账本同步回收 ===
+        was_stake = self.trade_stake_ledger.pop(trade_id, 0.0)
+        self.pair_stake_open[pair_key] = max(0.0, self.pair_stake_open.get(pair_key, 0.0) - was_stake)
+        if self.pair_stake_open.get(pair_key, 0.0) <= 1e-12:
+            self.pair_stake_open[pair_key] = 0.0
+
         pst.active_trades.pop(trade_id, None)
         if profit_abs >= 0:
             tax = profit_abs * self.cfg.tax_rate_on_wins
@@ -569,11 +604,12 @@ class TaxBrainV29(IStrategy):
     timeframe = V29Config().timeframe
     can_short = True
     startup_candle_count = V29Config().startup_candle_count
-    minimal_roi = {"0": 0.03}
-    stoploss = -0.2
-    use_custom_stoploss = True
+    # minimal_roi = {"0": 0.03}
+    # stoploss = -0.2
+    use_custom_roi = False
+    use_custom_stoploss = False
     trailing_stop = False
-    use_exit_signal = False
+    use_exit_signal = True
     exit_profit_only = False
     ignore_buy_signals = False
     ignore_sell_signals = True
@@ -584,7 +620,10 @@ class TaxBrainV29(IStrategy):
         base_cfg = V29Config()
         self.cfg = apply_overrides(base_cfg, config.get("strategy_params", {}))
         self.timeframe = self.cfg.timeframe
+
         self.startup_candle_count = self.cfg.startup_candle_count
+        self.stoploss = self.cfg.enforce_leverage*-0.2
+        self.minimal_roi = {"0": 0.50*self.cfg.enforce_leverage}
         try:
             self.__class__.timeframe = self.cfg.timeframe
             self.__class__.startup_candle_count = self.cfg.startup_candle_count
@@ -650,6 +689,9 @@ class TaxBrainV29(IStrategy):
         self._last_signal: Dict[str, Optional[schemas.Candidate]] = {}
         self._pending_entry_meta: Dict[str, Dict[str, Any]] = {}
         self._tf_sec = self._tf_to_sec(self.cfg.timeframe)
+        self._candidate_pool_limit = int(
+            max(1, getattr(self.cfg, "candidate_pool_max_per_side", 4))
+        )
 
     def set_dataprovider(self, dp):
         """
@@ -716,6 +758,28 @@ class TaxBrainV29(IStrategy):
                 ordered.append(normalized)
         return tuple(ordered)
 
+    @staticmethod
+    def _timeframe_suffix_token(timeframe: Optional[str]) -> str:
+        token = (timeframe or "").strip()
+        return token.replace("/", "_") if token else ""
+
+    def _prepare_informative_frame(self, frame: Optional[pd.DataFrame], timeframe: str) -> Optional[pd.DataFrame]:
+        if frame is None or frame.empty:
+            return frame
+        suffix = self._timeframe_suffix_token(timeframe)
+        if not suffix:
+            return frame
+        rename_map: dict[str, str] = {}
+        for col in list(frame.columns):
+            if col == "date":
+                continue
+            if col.endswith(f"_{suffix}"):
+                continue
+            rename_map[col] = f"{col}_{suffix}"
+        if rename_map:
+            frame = frame.rename(columns=rename_map)
+        return frame
+
     def _register_informative_methods(self) -> None:
         if not self._informative_timeframes:
             return
@@ -735,7 +799,7 @@ class TaxBrainV29(IStrategy):
             return indicators.compute_indicators(
                 dataframe,
                 self.cfg,
-                suffix=None,            # ★ 不要在信息周期阶段加后缀
+                suffix=None,
                 required=needs or set(),
                 duplicate_ohlc=True,    # 保留原始 OHLC（列名保持 open/close/volume）
             )
@@ -752,14 +816,18 @@ class TaxBrainV29(IStrategy):
             if isinstance(result, tuple):
                 result = result[0]
             if isinstance(result, pd.DataFrame) and not result.empty:
-                self._informative_cache.setdefault(pair, {})[timeframe] = result.copy()
-            return result
+                prepared = self._prepare_informative_frame(result.copy(), timeframe)
+                self._informative_cache.setdefault(pair, {})[timeframe] = prepared
+                return prepared
+            return self._prepare_informative_frame(result, timeframe)
         result = self.dp.get_analyzed_dataframe(pair, timeframe)
         if isinstance(result, tuple):
             result = result[0]
         if isinstance(result, pd.DataFrame) and not result.empty:
-            self._informative_cache.setdefault(pair, {})[timeframe] = result.copy()
-        return result
+            prepared = self._prepare_informative_frame(result.copy(), timeframe)
+            self._informative_cache.setdefault(pair, {})[timeframe] = prepared
+            return prepared
+        return self._prepare_informative_frame(result, timeframe)
 
     def informative_pairs(self):
         if not self._informative_timeframes:
@@ -855,10 +923,22 @@ class TaxBrainV29(IStrategy):
         if row is None:
             return default
         try:
-            value = row.get(column, default)  # pandas Series get
+            if column in row:
+                return row[column]
         except Exception:
-            value = default
-        return value
+            pass
+        suffix = self._timeframe_suffix_token(timeframe)
+        if suffix:
+            alt_col = f"{column}_{suffix}"
+            try:
+                if alt_col in row:
+                    return row[alt_col]
+            except Exception:
+                pass
+        try:
+            return row.get(column, default)  # pandas Series get fallback
+        except Exception:
+            return default
 
     def _eval_entry_on_row(self,
                            row: pd.Series,
@@ -928,23 +1008,87 @@ class TaxBrainV29(IStrategy):
                 continue
         return rows
 
-    def _apply_entry_signal(self, df: pd.DataFrame, idx, candidate: schemas.Candidate) -> None:
-        tag_payload = {
-            "dir": candidate.direction,
+    def _candidate_to_payload(self, candidate: schemas.Candidate) -> dict[str, Any]:
+        return {
+            "direction": candidate.direction,
             "kind": candidate.kind,
-            "score": candidate.expected_edge,
+            "raw_score": candidate.raw_score,
+            "rr_ratio": candidate.rr_ratio,
+            "expected_edge": candidate.expected_edge,
+            "win_prob": candidate.win_prob,
+            "squad": candidate.squad,
             "sl_pct": candidate.sl_pct,
             "tp_pct": candidate.tp_pct,
             "exit_profile": candidate.exit_profile,
             "recipe": candidate.recipe,
+            "plan_timeframe": getattr(candidate, "plan_timeframe", None),
+            "plan_atr_pct": getattr(candidate, "plan_atr_pct", None),
         }
-        if getattr(candidate, "plan_timeframe", None):
-            tag_payload["plan_timeframe"] = candidate.plan_timeframe
-        if getattr(candidate, "plan_atr_pct", None):
-            tag_payload["atr_pct"] = candidate.plan_atr_pct
-        df.at[idx, "enter_long"] = 1 if candidate.direction == "long" else 0
-        df.at[idx, "enter_short"] = 1 if candidate.direction == "short" else 0
-        df.at[idx, "enter_tag"] = json.dumps(tag_payload)
+
+    def _candidate_allowed_by_policy(self, policy, candidate: Optional[schemas.Candidate]) -> bool:
+        if not policy or not candidate:
+            return False
+        if not policy.permits(kind=candidate.kind, squad=candidate.squad, recipe=candidate.recipe):
+            return False
+        if candidate.raw_score < policy.min_raw_score:
+            return False
+        if candidate.rr_ratio < policy.min_rr_ratio:
+            return False
+        if candidate.expected_edge < policy.min_edge:
+            return False
+        return True
+
+    def _candidate_allowed_any_tier(self, candidate: Optional[schemas.Candidate]) -> bool:
+        if not candidate:
+            return False
+        iter_policies = getattr(self.tier_mgr, "policies", None)
+        policies = iter_policies() if callable(iter_policies) else ()
+        if not policies:
+            policies = (self.tier_mgr.get(0),)
+        for policy in policies:
+            if self._candidate_allowed_by_policy(policy, candidate):
+                return True
+        return False
+
+    def _group_candidates_by_direction(
+        self, candidates: list[schemas.Candidate]
+    ) -> dict[str, list[schemas.Candidate]]:
+        grouped: dict[str, list[schemas.Candidate]] = {"long": [], "short": []}
+        for cand in candidates:
+            grouped.setdefault(cand.direction, []).append(cand)
+        return grouped
+
+    def _trim_candidate_pool(
+        self, grouped: dict[str, list[schemas.Candidate]]
+    ) -> dict[str, list[schemas.Candidate]]:
+        limited: dict[str, list[schemas.Candidate]] = {"long": [], "short": []}
+        for direction, items in grouped.items():
+            ordered = sorted(items, key=lambda c: (c.expected_edge, c.raw_score), reverse=True)
+            limited[direction] = ordered[: self._candidate_pool_limit]
+        return limited
+
+    def _apply_entry_signal(
+        self, df: pd.DataFrame, idx, candidates_by_dir: dict[str, list[schemas.Candidate]]
+    ) -> None:
+        has_long = bool(candidates_by_dir.get("long"))
+        has_short = bool(candidates_by_dir.get("short"))
+        df.at[idx, "enter_long"] = 1 if has_long else 0
+        df.at[idx, "enter_short"] = 1 if has_short else 0
+        if not has_long and not has_short:
+            df.at[idx, "enter_tag"] = None
+            return
+        payload = {
+            "version": 2,
+            "candidates": {
+                "long": [
+                    self._candidate_to_payload(cand) for cand in candidates_by_dir.get("long", [])
+                ],
+                "short": [
+                    self._candidate_to_payload(cand) for cand in candidates_by_dir.get("short", [])
+                ],
+            },
+        }
+        df.at[idx, "enter_tag"] = json.dumps(payload)
 
     def _update_last_signal(self, pair: str, candidate: Optional[schemas.Candidate], row: pd.Series) -> None:
         pst = self.state.get_pair_state(pair)
@@ -954,7 +1098,8 @@ class TaxBrainV29(IStrategy):
             pst.last_atr_pct = 0.0
         if candidate:
             pst.last_dir = candidate.direction
-            pst.last_squad = candidate.kind
+            pst.last_kind = candidate.kind                           # ← 信号名（mean_rev_long / trend_short / …）
+            pst.last_squad = getattr(candidate, "squad", None)       # ← 所属 squad（MRL / PBL / TRS）
             pst.last_score = candidate.expected_edge
             pst.last_sl_pct = candidate.sl_pct
             pst.last_tp_pct = candidate.tp_pct
@@ -972,6 +1117,8 @@ class TaxBrainV29(IStrategy):
 
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         pair = metadata["pair"]
+        if "BNB" in pair:
+            print("BNB")
         df["enter_long"] = 0
         df["enter_short"] = 0
         df["enter_tag"] = None
@@ -980,18 +1127,40 @@ class TaxBrainV29(IStrategy):
         is_vector_pass = (RunMode and runmode in {
                           RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.PLOT})
         pst_snapshot = copy.deepcopy(self.state.get_pair_state(pair))
+        selected_column = df['newbars_high_30m']
+        
         if is_vector_pass:
             for idx in df.index:
                 row = df.loc[idx].copy()
+                # print(f"date_{df.loc[idx, 'date']}\n")
+                # if df.loc[idx, 'newbars_low_30m']>80:
+                #     print(f"newbars_low_{df.loc[idx, 'newbars_low_30m']}\n")
+                # if df.loc[idx, 'newbars_high_30m']>80:
+                #     print(f"newbars_high{df.loc[idx, 'newbars_high_30m']}\n")
+                #     print(selected_column[idx+50:idx+100])
                 row["LOSS_TIER_STATE"] = pst_snapshot.closs
                 inf_rows = self._informative_rows_for_index(aligned_info, idx)
-                sig = self._eval_entry_on_row(row, inf_rows, pst_snapshot)
-                if not sig:
+                raw_candidates = builder.build_candidates(row, self.cfg, informative=inf_rows)
+                if not raw_candidates:
                     continue
-                sig = self._candidate_with_plan(pair, sig, row, inf_rows)
-                if not sig:
+                planned: list[schemas.Candidate] = []
+                for candidate in raw_candidates:
+                    cand_with_plan = self._candidate_with_plan(pair, candidate, row, inf_rows)
+                    if cand_with_plan:
+                        planned.append(cand_with_plan)
+                if not planned:
                     continue
-                self._apply_entry_signal(df, idx, sig)
+                if is_vector_pass:
+                    planned = [
+                        cand for cand in planned
+                        if self._candidate_allowed_any_tier(cand)
+                    ]
+                    if not planned:
+                        continue
+                grouped = self._trim_candidate_pool(self._group_candidates_by_direction(planned))
+                if not grouped.get("long") and not grouped.get("short"):
+                    continue
+                self._apply_entry_signal(df, idx, grouped)
 
                 # pst_snapshot = advance_state(pst_snapshot, sig, row)
 
@@ -1005,7 +1174,10 @@ class TaxBrainV29(IStrategy):
         if last_candidate:
             last_candidate = self._candidate_with_plan(pair, last_candidate, last_row, last_inf_rows)
         if not is_vector_pass and last_candidate:
-            self._apply_entry_signal(df, last_idx, last_candidate)
+            grouped = self._trim_candidate_pool(
+                self._group_candidates_by_direction([last_candidate])
+            )
+            self._apply_entry_signal(df, last_idx, grouped)
         self._update_last_signal(pair, last_candidate, last_row)
         return df
 
@@ -1062,20 +1234,57 @@ class TaxBrainV29(IStrategy):
             getattr(dp_runmode, "value", dp_runmode) or "").lower()
         backtest_modes = {"runmode.backtest",
                           "backtest", "hyperopt", "runmode.hyperopt"}
-        if any(token in backtest_modes for token in (runmode_token, dp_mode_token) if token):
-            return True
+        is_backtest_mode = any(
+            token in backtest_modes for token in (runmode_token, dp_mode_token) if token)
         pst = self.state.get_pair_state(pair)
         tier_pol = self.tier_mgr.get(pst.closs)
+        if is_backtest_mode and pst.cooldown_bars_left > 0:
+            try:
+                now_ts = float(current_time.timestamp())
+            except Exception:
+                now_ts = None
+            if now_ts is not None:
+                last_ts = getattr(pst, "_cooldown_last_ts", None)
+                if last_ts is None:
+                    pst._cooldown_last_ts = now_ts
+                else:
+                    bars_elapsed = int((now_ts - last_ts) // self._tf_sec)
+                    if bars_elapsed > 0:
+                        pst.cooldown_bars_left = max(
+                            0, pst.cooldown_bars_left - bars_elapsed)
+                        pst._cooldown_last_ts = now_ts
         # 冷却期一律禁止开新仓
+        # print(f"pst.closs_{pst.closs}")
         if pst.cooldown_bars_left > 0:
             return False
 
         # 若当前 tier 配置了 single_position_only，则有仓位时禁止再开
         if tier_pol and getattr(tier_pol, "single_position_only", False) and pst.active_trades:
             return False
-        
+
         # 实盘 / 干跑：仍用“最新一拍”的 _last_signal 语义
         requested_dir = "long" if side.lower() in ("buy", "long") else "short"
+        payload = None
+        candidate_from_tag: Optional[schemas.Candidate] = None
+        if entry_tag:
+            try:
+                payload = json.loads(entry_tag)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                candidate_from_tag = self._resolve_candidate_from_tag(pair, payload, side)
+            elif payload is not None:
+                normalized = self._normalize_entry_meta(payload, side)
+                if normalized and pair not in self._pending_entry_meta:
+                    self._pending_entry_meta[pair] = normalized
+
+        if is_backtest_mode:
+            if not candidate_from_tag:
+                return False
+            if pair not in self._pending_entry_meta:
+                self._pending_entry_meta[pair] = self._candidate_meta_from_candidate(candidate_from_tag)
+            return True
+
         sig = self._last_signal.get(pair)
         if not sig or sig.direction != requested_dir:
             return False
@@ -1089,6 +1298,21 @@ class TaxBrainV29(IStrategy):
             "atr_pct": getattr(sig, "plan_atr_pct", None),
         }
         return True
+
+    @staticmethod
+    def _dir_from_side(side: str) -> str:
+        return "long" if str(side).lower() in ("buy", "long") else "short"
+
+    def _candidate_meta_from_candidate(self, candidate: schemas.Candidate) -> dict[str, Any]:
+        return {
+            "dir": candidate.direction,
+            "sl_pct": candidate.sl_pct,
+            "tp_pct": candidate.tp_pct,
+            "exit_profile": candidate.exit_profile,
+            "recipe": candidate.recipe,
+            "plan_timeframe": getattr(candidate, "plan_timeframe", None),
+            "atr_pct": getattr(candidate, "plan_atr_pct", None),
+        }
 
     def _normalize_entry_meta(self, meta: Optional[Dict[str, Any]], side: str) -> Optional[Dict[str, Any]]:
         """  """
@@ -1111,7 +1335,7 @@ class TaxBrainV29(IStrategy):
             normalized['tp_pct'] = 0.0
         direction = normalized.get('dir')
         if not direction:
-            direction = 'short' if str(side).lower() == 'short' else 'long'
+            direction = self._dir_from_side(side)
         normalized['dir'] = direction
         if 'plan_timeframe' in normalized:
             ptf = normalized.get('plan_timeframe')
@@ -1129,6 +1353,48 @@ class TaxBrainV29(IStrategy):
         else:
             normalized['atr_pct'] = None
         return normalized
+
+    def _resolve_candidate_from_tag(
+        self, pair: str, payload: Dict[str, Any], side: str
+    ) -> Optional[schemas.Candidate]:
+        candidates_pool = payload.get("candidates")
+        if not isinstance(candidates_pool, dict):
+            return None
+        direction = self._dir_from_side(side)
+        raw_list = candidates_pool.get(direction) or []
+        if not raw_list:
+            return None
+        hydrated: list[schemas.Candidate] = []
+        for raw in raw_list:
+            try:
+                plan_atr_val = raw.get("plan_atr_pct")
+                plan_atr = None
+                if plan_atr_val not in (None, ""):
+                    plan_atr = float(plan_atr_val)
+                hydrated.append(
+                    schemas.Candidate(
+                        direction=direction,
+                        kind=str(raw["kind"]),
+                        raw_score=float(raw["raw_score"]),
+                        rr_ratio=float(raw["rr_ratio"]),
+                        win_prob=float(raw.get("win_prob", 0.0)),
+                        expected_edge=float(raw["expected_edge"]),
+                        squad=str(raw["squad"]),
+                        sl_pct=float(raw["sl_pct"]),
+                        tp_pct=float(raw["tp_pct"]),
+                        exit_profile=raw.get("exit_profile"),
+                        recipe=raw.get("recipe"),
+                        plan_timeframe=raw.get("plan_timeframe"),
+                        plan_atr_pct=plan_atr,
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not hydrated:
+            return None
+        pst = self.state.get_pair_state(pair)
+        tier_pol = self.tier_mgr.get(pst.closs)
+        return self.tier_agent.filter_best(tier_pol, hydrated)
 
     def custom_stake_amount(
         self,
@@ -1152,7 +1418,13 @@ class TaxBrainV29(IStrategy):
                 parsed = json.loads(entry_tag)
             except Exception:
                 parsed = None
-            if parsed is not None:
+            if isinstance(parsed, dict) and "candidates" in parsed:
+                selected = self._resolve_candidate_from_tag(pair, parsed, side)
+                if selected:
+                    meta = self._normalize_entry_meta(
+                        self._candidate_meta_from_candidate(selected), side
+                    )
+            elif parsed is not None:
                 meta = self._normalize_entry_meta(parsed, side)
 
         if meta is None:
@@ -1187,16 +1459,8 @@ class TaxBrainV29(IStrategy):
             max_stake=max_stake,
         )
         if stake <= 0 or risk <= 0:
-            # print(
-            #     "[DEBUG stake=0]",
-            #     current_time, pair,
-            #     "sl", sl, "tp", tp, "dir", direction,
-            #     "equity", self.eq_provider.get_equity(),
-            #     "debt_pool", self.state.debt_pool,
-            #     "open_risk", self.state.get_total_open_risk(),
-            #     "reserved", self.reservation.get_total_reserved(),
-            # )
             return 0.0
+        
         rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
         self.reservation.reserve(pair, rid, risk, bucket)
 
@@ -1220,25 +1484,53 @@ class TaxBrainV29(IStrategy):
     def order_filled(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
         """处理开仓或平仓成交事件，更新风险账本、预约状态并触发持久化。"""
         trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-        is_open = bool(getattr(trade, "is_open", True))
-        if is_open:
-            meta = self._pending_entry_meta.get(pair)
-            if not meta:
-                return
+        side = getattr(order, "ft_order_side", None)
+
+        # Freqtrade 约定：entry_side / exit_side 与 ft_order_side 匹配
+        is_entry = side == getattr(trade, "entry_side", None)
+        is_exit  = side == getattr(trade, "exit_side", None)
+
+        if is_entry:
+            # 对 entry：尽量带上 meta，但没有也要能工作
+            meta = self._pending_entry_meta.pop(pair, None)
+
             opened = self.execution.on_open_filled(
-                pair, trade, order, meta, self.tier_mgr)
+                pair=pair,
+                trade=trade,
+                order=order,
+                pending_meta=meta,
+                tier_mgr=self.tier_mgr,
+            )
             if opened:
-                self._pending_entry_meta.pop(pair, None)
-                if self._persist_enabled:
-                    self.persist.save()
-        else:
+                try:
+                    self.state.get_pair_state(pair)._cooldown_last_ts = float(
+                        current_time.timestamp())
+                except Exception:
+                    pass
+            if opened and self._persist_enabled:
+                self.persist.save()
+
+        elif is_exit:
+            # 对 exit：完全不依赖 _pending_entry_meta
             closed = self.execution.on_close_filled(
-                pair, trade, order, self.tier_mgr)
+                pair=pair,
+                trade=trade,
+                order=order,
+                tier_mgr=self.tier_mgr,
+            )
             if closed:
-                tag = ExitTags.CLOSE_FILLED if ExitTags else "close_filled"
-                self.analytics.log_exit(pair, trade_id, tag)
-                if self._persist_enabled:
-                    self.persist.save()
+                try:
+                    self.state.get_pair_state(pair)._cooldown_last_ts = float(
+                        current_time.timestamp())
+                except Exception:
+                    pass
+            if closed and self._persist_enabled:
+                self.persist.save()
+
+        else:
+            # 其它类型（比如 reduce_only / 手动改单等），可以先忽略或简单打个日志
+            return
+
 
     def order_cancelled(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
         """当订单被撤销时，释放对应预约并记录分析日志，符合 V29.1 修订 #5（仅释放预约，不回灌财政字段）。"""
@@ -1271,6 +1563,35 @@ class TaxBrainV29(IStrategy):
         return released, meta_snapshot
 
 
+    @staticmethod
+    def _apply_leverage_pct(pct: Optional[float], trade) -> Optional[float]:
+        """
+        将基于“价格百分比”的 pct（例如 0.02 表示价格±2%）
+        转换为 freqtrade 期望的“含杠杆 ROI 百分比”。
+
+        - 对于期货：roi_pct = pct * trade.leverage
+        - 对于现货：leverage=1，相当于不变
+        """
+        if pct is None:
+            return None
+        try:
+            pct = float(pct)
+        except (TypeError, ValueError):
+            return None
+        if pct <= 0:
+            return None
+
+        lev = getattr(trade, "leverage", 1.0) or 1.0
+        try:
+            lev = float(lev)
+        except (TypeError, ValueError):
+            lev = 1.0
+        if lev <= 0:
+            lev = 1.0
+
+        return pct * lev
+
+
     def custom_stoploss(
         self,
         pair: str,
@@ -1298,8 +1619,13 @@ class TaxBrainV29(IStrategy):
             sl_pct = EXIT_ROUTER.sl_best(ctx, base_sl_pct=None)
         except Exception:
             sl_pct = None
+
+        # 转成含杠杆 ROI 百分比
+        sl_pct = self._apply_leverage_pct(sl_pct, trade)
+
         if sl_pct is None or sl_pct <= 0:
             return self.stoploss
+        
         return -abs(float(sl_pct))
 
     def custom_exit(
@@ -1311,26 +1637,35 @@ class TaxBrainV29(IStrategy):
         current_profit: float,
         **kwargs,
     ) -> Optional[str]:
-        """调用 ExitPolicyV29 判断是否需要触发自定义离场，并记录原因供分析。
-        Args:
-            pair: 交易对名称。
-            trade: 当前交易对象。
-            current_time: 当前时间。
-            current_rate: 当前价格。
-            current_profit: 当前收益率。
-            **kwargs: 预留参数。
-        Returns:
-            Optional[str]: 若返回字符串则表示触发指定退出原因，否则 None。
         """
+        自定义离场逻辑：
+        1. 先走 ExitPolicyV29 的风控 / flip 等“策略级规则”。
+        2. 如果没有触发，再用“持仓均价 ± N×ATR(当前K线)”价格触发离场。
+        """
+        # 1) 策略级风控 / flip / ICU / 债务风险 等
         tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-        reason = self.exit_policy.decide(
-            pair,
-            tid,
-            float(current_profit) if current_profit is not None else None,
-            trade=trade,
-        )
+        # reason = self.exit_policy.decide(
+        #     pair,
+        #     tid,
+        #     float(current_profit) if current_profit is not None else None,
+        #     trade=trade,
+        # )
+        reason = None
+
+        # 2) 如果策略级没有给出退出，再用 ATR 价格逻辑
+        if not reason:
+            reason = self._atr_entry_exit_reason(
+                pair,
+                trade,
+                current_time,
+                current_rate,
+                current_profit,
+            )
+
         if not reason:
             return None
+
+        # 3) 记录退出原因，方便回测 / 复盘分析
         try:
             if hasattr(trade, "exit_reason"):
                 setattr(trade, "exit_reason", reason)
@@ -1341,23 +1676,78 @@ class TaxBrainV29(IStrategy):
                 trade.set_custom_data("exit_tag", reason)
         except Exception:
             pass
-        self.analytics.log_exit(pair, tid, reason)
+
+        try:
+            self.analytics.log_exit(pair, tid, reason)
+        except Exception:
+            pass
+
         return reason
+
 
     def custom_roi(
         self,
         pair: str,
         trade,
         current_time: datetime,
-        current_rate: float,
-        current_profit: float,
+        trade_duration: int,
+        entry_tag: Optional[str],
+        side: str,
         **kwargs,
     ) -> Optional[float]:
-        """Use ExitRouter TP aggregation for ROI backpressure."""
+        """
+        自定义 ROI 回调：
+        - 由 freqtrade 在每次循环、每个未平仓交易上调用
+        - 返回当前应使用的最小 ROI 阈值（比例，如 0.05 表示 +5%）
+        - 实际阈值由 ExitRouter/ExitFacade 中的 TP 规则聚合得到
+        """
+        # 如果 Router / TPContext 尚未初始化，则回退到 minimal_roi 逻辑
         if EXIT_ROUTER is None or TPContext is None:
             return None
+
         try:
+            # 当前我们的 TP 规则并未使用 ctx.profit，因此这里给一个占位值即可
             ctx = TPContext(
+                pair=pair,
+                trade=trade,
+                now=current_time,
+                profit=0.0,
+                dp=self.dp,
+                cfg=self.cfg,
+                state=self.state,
+                strategy=self,
+            )
+            # 从所有 TP 规则中取“最保守的”（最小的正值）tp_pct
+            tp_pct = EXIT_ROUTER.tp_best(ctx, base_tp_pct=None)
+        except Exception:
+            tp_pct = None
+
+        # 把 tp_pct 换算成“账户收益百分比”的格式（考虑杠杆）
+        tp_pct = self._apply_leverage_pct(tp_pct, trade)
+
+        # 返回 None 表示“保持原有 minimal_roi”
+        if tp_pct is None or tp_pct <= 0:
+            return None
+
+        # freqtrade 期望的是一个 ROI 阈值（比例），由 min_roi_reached() 与当前利润对比后决定是否离场
+        return  float(tp_pct)
+
+    def _router_sl_tp_pct(
+        self,
+        pair: str,
+        trade,
+        current_time: datetime,
+        current_profit: float,
+    ) -> tuple[Optional[float], Optional[float]]:
+        """
+        使用 EXIT_ROUTER + ExitFacade 计算当前 trade 对应的 sl_pct / tp_pct。
+        返回值为“相对开仓价的百分比（ΔP / entry_price）”，不含杠杆。
+        """
+        if EXIT_ROUTER is None or SLContext is None or TPContext is None:
+            return None, None
+
+        try:
+            sl_ctx = SLContext(
                 pair=pair,
                 trade=trade,
                 now=current_time,
@@ -1367,9 +1757,175 @@ class TaxBrainV29(IStrategy):
                 state=self.state,
                 strategy=self,
             )
-            tp_pct = EXIT_ROUTER.tp_best(ctx, base_tp_pct=None)
+            sl_pct = EXIT_ROUTER.sl_best(sl_ctx, base_sl_pct=None)
+        except Exception:
+            sl_pct = None
+
+        try:
+            tp_ctx = TPContext(
+                pair=pair,
+                trade=trade,
+                now=current_time,
+                profit=float(current_profit or 0.0),
+                dp=self.dp,
+                cfg=self.cfg,
+                state=self.state,
+                strategy=self,
+            )
+            tp_pct = EXIT_ROUTER.tp_best(tp_ctx, base_tp_pct=None)
         except Exception:
             tp_pct = None
-        if tp_pct is None or tp_pct <= 0:
+
+        # 这里刻意不调用 self._apply_leverage_pct，保留为“价格百分比”
+        return (float(sl_pct) if sl_pct and sl_pct > 0 else None,
+                float(tp_pct) if tp_pct and tp_pct > 0 else None)
+
+    def _get_current_atr_abs(
+        self,
+        pair: str,
+        current_time: datetime,
+        profile: Optional[Any] = None,
+    ) -> Optional[float]:
+        """
+        从 DataProvider 的指标表里，按 current_time 精确地取这一根K线的 ATR 绝对值。
+
+        优先使用 profile.atr_timeframe；否则退回到策略 / 配置的主 timeframe。
+        """
+        dp = getattr(self, "dp", None)
+        if dp is None:
             return None
-        return float(tp_pct)
+
+        # 1) 决定 ATR 使用的 timeframe
+        atr_tf = None
+        if profile is not None:
+            atr_tf = getattr(profile, "atr_timeframe", None)
+        if not atr_tf:
+            # cfg.timeframe 一般等于策略主周期
+            atr_tf = getattr(self.cfg, "timeframe", None) or self.timeframe
+
+        try:
+            analyzed = dp.get_analyzed_dataframe(pair, atr_tf)
+        except Exception:
+            return None
+
+        df = analyzed[0] if isinstance(analyzed, (list, tuple)) else analyzed
+        if df is None or df.empty:
+            return None
+
+        # 2) 和 atr_pct_from_dp 一样的时间对齐逻辑：df.loc[:current_time]
+        try:
+            upto = df.loc[:current_time] if current_time is not None else df
+        except Exception:
+            try:
+                ct = (
+                    current_time.replace(tzinfo=None)
+                    if getattr(current_time, "tzinfo", None)
+                    else current_time
+                )
+                upto = df.loc[:ct]
+            except Exception:
+                upto = df
+
+        if upto is None or upto.empty:
+            return None
+
+        row = upto.iloc[-1]
+
+        # 3) 优先直接用 ATR 列；没有的话用 atr_pct * close 反推
+        try:
+            if "atr" in row.index:
+                atr_val = float(row["atr"])
+                if math.isfinite(atr_val) and atr_val > 0:
+                    return atr_val
+        except Exception:
+            pass
+
+        try:
+            atr_pct = float(row.get("atr_pct", 0.0))
+            close = float(row.get("close", 0.0))
+            if atr_pct > 0 and close > 0:
+                atr_val = atr_pct * close
+                if math.isfinite(atr_val) and atr_val > 0:
+                    return atr_val
+        except Exception:
+            return None
+
+        return None
+
+
+    def _atr_entry_exit_reason(
+        self,
+        pair: str,
+        trade,
+        current_time: datetime,
+        current_rate: float,
+        current_profit: float,
+    ) -> Optional[str]:
+        """
+        仅根据“持仓均价 ± N×ATR(当前K线)”判断是否离场：
+        - 多单: SL = entry - atr_mul_sl * ATR(t), TP = entry + atr_mul_tp * ATR(t)
+        - 空单: SL = entry + atr_mul_sl * ATR(t), TP = entry - atr_mul_tp * ATR(t)
+
+        N (atr_mul_sl / atr_mul_tp) 完全由 exit_profiles + ExitFacade 决定。
+        """
+        if self.exit_facade is None:
+            return None
+
+        # 1) 解析当前 trade 使用的 exit_profile
+        try:
+            profile_name, profile_def, _ = self.exit_facade.resolve_trade_plan(
+                pair, trade, current_time
+            )
+        except Exception:
+            profile_def = None
+
+        if not profile_def:
+            return None
+
+        # 2) 读取配置中的 ATR 倍数
+        k_sl = float(getattr(profile_def, "atr_mul_sl", 0.0) or 0.0)
+        k_tp = getattr(profile_def, "atr_mul_tp", None)
+        if k_tp is None or k_tp <= 0:
+            # 和 compute_plan_from_atr 保持一致：没配置 atr_mul_tp 就 >= 2×SL
+            k_tp = max(k_sl * 2.0, 0.0)
+        k_tp = float(k_tp)
+
+        # 3) 按 current_time 从原始指标数据里取这一根K线的 ATR 绝对值
+        atr_abs = self._get_current_atr_abs(pair, current_time, profile_def)
+        if atr_abs is None or atr_abs <= 0:
+            return None
+
+        entry = float(trade.open_rate)
+        price = float(current_rate)
+        is_short = bool(getattr(trade, "is_short", False))
+
+        sl_abs = k_sl * atr_abs if k_sl > 0 else None
+        tp_abs = k_tp * atr_abs if k_tp > 0 else None
+
+        # 4) 按“持仓均价 ± N×ATR”比较当前价格
+        if not is_short:
+            # 多单
+            if sl_abs is not None:
+                sl_price = entry - sl_abs
+                if price <= sl_price:
+                    # print(f"price_{price},atr_abs{atr_abs} sl_abs{sl_abs} current_time{current_time}\n")
+                    return "atr_entry_sl"
+            if tp_abs is not None:
+                tp_price = entry + tp_abs
+                if price >= tp_price:
+                    # print(f"price_{price},atr_abs{atr_abs} tp_price{tp_price} current_time{current_time}\n")
+                    return "atr_entry_tp"
+        else:
+            # 空单
+            if sl_abs is not None:
+                sl_price = entry + sl_abs
+                if price >= sl_price:
+                    # print(f"price_{price},atr_abs{atr_abs} sl_abs{sl_abs} current_time{current_time}\n")
+                    return "atr_entry_sl"
+            if tp_abs is not None:
+                tp_price = entry - tp_abs
+                if price <= tp_price:
+                    # print(f"price_{price},atr_abs{atr_abs} tp_price{tp_price} current_time{current_time}\n")
+                    return "atr_entry_tp"
+
+        return None

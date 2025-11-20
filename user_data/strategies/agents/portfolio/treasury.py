@@ -43,6 +43,7 @@ from typing import Dict, List, Tuple
 
 from ...config.v29_config import V29Config
 from .tier import TierManager
+import math
 
 
 @dataclass
@@ -184,20 +185,27 @@ class TreasuryAgent:
         scored.sort(key=lambda item: item[1], reverse=True)
 
         # fast 桶：为每个 squad 选出得分最高的代表信号，再按表现排序取前 K 个。
-        best_by_squad: Dict[str, Tuple[str, float]] = {}
-        for pair, score, squad in scored:
-            if (squad not in best_by_squad) or (score > best_by_squad[squad][1]):
-                best_by_squad[squad] = (pair, score)
-        top_squads = sorted(best_by_squad.items(), key=lambda kv: kv[1][1], reverse=True)
-        if self.cfg.fast_topK_squads > 0:
-            top_squads = top_squads[: self.cfg.fast_topK_squads]
-        fast_pairs = [pair for (_squad, (pair, _score)) in top_squads]
+        # 假设新增 cfg.fast_mode in {"per_squad", "top_pairs"}
+
+        if self.cfg.fast_mode == "top_pairs":
+            fast_pairs = [pair for (pair, _score, _sq) in scored[: self.cfg.fast_topK_squads]]
+        else:
+            # 原 per-squad 代表逻辑
+            best_by_squad = {}
+            for pair, score, squad in scored:
+                if (squad not in best_by_squad) or (score > best_by_squad[squad][1]):
+                    best_by_squad[squad] = (pair, score)
+            top_squads = sorted(best_by_squad.items(), key=lambda kv: kv[1][1], reverse=True)
+            if self.cfg.fast_topK_squads > 0:
+                top_squads = top_squads[: self.cfg.fast_topK_squads]
+            fast_pairs = [pair for (_squad, (pair, _score)) in top_squads]
+
         fast_each = 0.0
         if fast_budget > 0 and fast_pairs:
             fast_each = fast_budget / len(fast_pairs)
 
         # slow 桶：直接取前 M 名得分，M 由 slow_universe_pct 控制。
-        slow_cutoff = max(1, int(len(scored) * self.cfg.slow_universe_pct))
+        slow_cutoff = max(1, math.ceil(len(scored) * self.cfg.slow_universe_pct))
         slow_list = scored[:slow_cutoff]
         slow_each = 0.0
         if slow_budget > 0 and slow_list:

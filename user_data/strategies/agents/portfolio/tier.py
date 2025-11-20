@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence, TYPE_CHECKING
+from typing import Literal, Optional, Sequence, TYPE_CHECKING, Tuple
 
 from ...config.v29_config import DEFAULT_TIERS, DEFAULT_TIER_ROUTING_MAP, TierSpec, V29Config
 
@@ -52,13 +52,20 @@ class TierPolicy:
     ) -> bool:
         """Check whether the candidate metadata is allowed by this tier."""
 
-        if recipe and recipe in self.allowed_recipes:
-            return True
-        if kind and kind in self.allowed_entries:
-            return True
+        if recipe:
+            if recipe in self.allowed_recipes:
+                return True
+            # When recipes are explicitly configured, treat mismatches as hard rejects
+            if self.allowed_recipes:
+                return False
+        if kind:
+            if kind in self.allowed_entries:
+                return True
+            if self.allowed_entries:
+                return False
         if squad and squad in self.allowed_squads:
             return True
-        return False
+        return not (self.allowed_recipes or self.allowed_entries or self.allowed_squads)
 
 
 class TierManager:
@@ -94,6 +101,11 @@ class TierManager:
         """Fetch a tier policy directly by name."""
 
         return self._policies[tier_name]
+
+    def policies(self) -> Tuple[TierPolicy, ...]:
+        """Return all tier policies ordered by priority."""
+
+        return tuple(self._ordered_policies)
 
     def default_profile_for_closs(self, closs: int) -> Optional[str]:
         """Return the default exit profile configured for the tier covering this closs."""

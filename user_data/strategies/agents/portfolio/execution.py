@@ -80,6 +80,11 @@ class ExecutionAgent:
         except Exception:
             tier_pol = None
 
+        # 计算当前这单的 stake_nominal（pre-leverage）
+        stake_nominal = 0.0
+        if sl and sl > 0:
+            stake_nominal = real_risk / sl
+            
         # 按 GlobalState.record_trade_open 的签名顺序与命名传参
         self.state.record_trade_open(
             pair=pair,
@@ -96,6 +101,7 @@ class ExecutionAgent:
             plan_timeframe=plan_timeframe,
             plan_atr_pct=plan_atr_pct,
             tier_name=getattr(tier_pol, "name", None) if tier_pol else None,
+            stake_nominal=stake_nominal,  # ★ 新增
         )
 
         # 释放预约风险名额

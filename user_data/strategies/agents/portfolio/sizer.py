@@ -1,33 +1,21 @@
-﻿# -*- coding: utf-8 -*-
-"""仓位大小与风险分配计算模块。
-
-SizerAgent 综合基础 VaR、财政拨款、恢复目标与组合/单票 CAP 等限制，
-在 custom_stake_amount 阶段计算实际下单金额与风险敞口。
-"""
+# -*- coding: utf-8 -*-
+"""Sizing agent: combine tier policy, treasury allocation, recovery target and caps."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Tuple
 
-from ...config.v29_config import V29Config
+from ...config.v29_config import SizingAlgoConfig, V29Config, get_exit_profile
+from ...schemas import SizingContext
+from .sizing_algos import ALGO_REGISTRY, Caps, SizingInputs
 from .reservation import ReservationAgent
-from .tier import TierManager
-
-
-@dataclass
-class SizingContext:
-    pair: str
-    sl_pct: float
-    tp_pct: float
-    direction: str
-    min_stake: Optional[float]
-    max_stake: float
-    proposed_stake: Optional[float]
+from .tier import TierManager, TierPolicy
 
 
 class SizerAgent:
-    """将策略参数与财政分配合成最终仓位的代理。"""
+    """Combine sizing policies into a final pre-leverage stake and risk."""
 
     def __init__(
         self,
@@ -37,13 +25,23 @@ class SizerAgent:
         cfg: V29Config,
         tier_mgr: TierManager,
     ) -> None:
-        """初始化仓位计算器所需的依赖。"""
-
         self.state = state
         self.reservation = reservation
         self.eq = eq_provider
         self.cfg = cfg
         self.tier_mgr = tier_mgr
+        self._debug_file = (
+            Path(getattr(cfg, "user_data_dir", "user_data")) / "logs" / "sizer_debug.log"
+        )
+
+    def _log_debug(self, msg: str) -> None:
+        try:
+            self._debug_file.parent.mkdir(parents=True, exist_ok=True)
+            ts = datetime.utcnow().isoformat()
+            with open(self._debug_file, "a", encoding="utf-8") as handle:
+                handle.write(f"{ts} {msg}\n")
+        except Exception:
+            pass
 
     def compute(
         self,
@@ -53,36 +51,24 @@ class SizerAgent:
         direction: str,
         min_stake: Optional[float],
         max_stake: float,
+        leverage: float = 1.0,
         proposed_stake: Optional[float] = None,
+        plan_atr_pct: Optional[float] = None,
+        exit_profile: Optional[str] = None,
+        bucket: Optional[str] = None,
     ) -> Tuple[float, float, str]:
-        """计算名义下单量、实际风险以及拨款桶归属。
-
-        核心步骤：
-            1. 根据 TierPolicy 获取基础 VaR (k_mult_base_pct * equity)，压力期可抑制；
-            2. TARGET_RECOVERY 档位会考虑局部亏损以提高风险需求；
-            3. 与财政 fast/slow 拨款合并取最大需求，再尊重组合/单票 CAP；
-            4. 施加名义仓位上限与交易所 min/max 限制。
-
-        Args:
-            pair: 交易对名称。
-            sl_pct: 止损百分比（正值）。
-            tp_pct: 止盈百分比。
-            direction: 信号方向（当前逻辑未区分 long/short）。
-            min_stake: 交易所最小下单额，None 表示无限制。
-            max_stake: 交易所允许的最大下单额。
-
-        Returns:
-            Tuple[float, float, str]: (名义下单额, 实际风险, 使用拨款桶)。
-        """
-
         ctx = SizingContext(
             pair=pair,
             sl_pct=sl_pct,
             tp_pct=tp_pct,
             direction=direction,
-            min_stake=min_stake,
-            max_stake=max_stake,
+            min_stake=float(min_stake) if min_stake is not None else 0.0,
+            max_stake=float(max_stake or 0.0),
+            leverage=float(leverage or 0.0),
             proposed_stake=proposed_stake,
+            plan_atr_pct=plan_atr_pct,
+            exit_profile=exit_profile,
+            bucket=bucket,
         )
         return self._compute_internal(ctx)
 
@@ -90,38 +76,278 @@ class SizerAgent:
         equity = self.eq.get_equity()
         pst = self.state.get_pair_state(ctx.pair)
         tier_pol = self.tier_mgr.get(pst.closs)
+        algo_name = getattr(tier_pol, "sizing_algo", self.cfg.sizing_algos.default_algo)
+        bucket, bucket_risk = self._determine_bucket(ctx)
 
-        base_risk = self._baseline_risk(equity, tier_pol)
-        risk_local_need = self._apply_recovery_policy(base_risk, ctx.tp_pct, ctx.sl_pct, pst, tier_pol)
-
-        fast = self.state.treasury.fast_alloc_risk.get(ctx.pair, 0.0)
-        slow = self.state.treasury.slow_alloc_risk.get(ctx.pair, 0.0)
-        alloc_total = max(fast, slow)
-        bucket = "fast" if fast >= slow else "slow"
-        risk_wanted = max(risk_local_need, alloc_total)
-
-        risk_room = self._available_risk_room(ctx.pair, equity, tier_pol)
-
-        risk_final = min(risk_wanted, risk_room)
-        if risk_final <= 0 or ctx.sl_pct <= 0:
+        if tier_pol and getattr(tier_pol, "single_position_only", False) and pst.active_trades:
+            return (0.0, 0.0, bucket)
+        if ctx.sl_pct <= 0:
             return (0.0, 0.0, bucket)
 
-        stake_nominal = risk_final / ctx.sl_pct
-        stake_cap_notional = tier_pol.max_stake_notional_pct * equity
-        stake_nominal = min(stake_nominal, stake_cap_notional, float(ctx.max_stake))
-        if ctx.proposed_stake is not None:
-            if ctx.proposed_stake <= 0:
-                return (0.0, 0.0, bucket)
-            stake_nominal = min(stake_nominal, float(ctx.proposed_stake))
-        if ctx.min_stake is not None:
-            stake_nominal = max(stake_nominal, float(ctx.min_stake))
+        lev, sl_price_pct, sl_roi_pct, atr_pct_used, atr_mul_sl = self._derive_sl_context(ctx, tier_pol, pst)
+        if sl_price_pct <= 0:
+            return (0.0, 0.0, bucket)
+
+        base_nominal, min_entry_nominal, per_trade_cap_nominal, exchange_cap_nominal = self._compute_base_nominal(
+            ctx, tier_pol, equity, lev
+        )
+        base_risk = base_nominal * sl_price_pct
+        baseline_risk = self._baseline_risk(equity, tier_pol)
+
+        caps = self._compute_caps(
+            ctx,
+            tier_pol,
+            equity,
+            sl_price_pct,
+            bucket_risk,
+            per_trade_cap_nominal,
+            exchange_cap_nominal,
+            lev,
+        )
+        if caps.risk_room_nominal <= 0:
+            return (0.0, 0.0, bucket)
+
+        inputs = SizingInputs(
+            ctx=ctx,
+            tier=tier_pol,
+            pst=pst,
+            equity=equity,
+            lev=lev,
+            sl_price_pct=sl_price_pct,
+            sl_roi_pct=sl_roi_pct,
+            atr_pct_used=atr_pct_used,
+            atr_mul_sl=atr_mul_sl,
+            base_nominal=base_nominal,
+            min_entry_nominal=min_entry_nominal,
+            per_trade_cap_nominal=per_trade_cap_nominal,
+            exchange_cap_nominal=exchange_cap_nominal,
+            base_risk=base_risk,
+            baseline_risk=baseline_risk,
+            bucket_label=bucket,
+            bucket_risk=bucket_risk,
+            caps=caps,
+            state=self.state,
+        )
+
+        algo_fn = ALGO_REGISTRY.get(algo_name)
+        if not algo_fn:
+            algo_fn = ALGO_REGISTRY["BASE_ONLY"]
+        result = algo_fn(inputs, self.cfg)
+        target_risk = max(result.target_risk, 0.0)
+        if target_risk <= 0:
+            return (0.0, 0.0, bucket)
+
+        nominal_target = target_risk / sl_price_pct if sl_price_pct > 0 else 0.0
+
+        stake_nominal = self._apply_caps(nominal_target, caps, min_entry_nominal)
         if stake_nominal <= 0:
             return (0.0, 0.0, bucket)
 
-        real_risk = stake_nominal * ctx.sl_pct
-        return (float(stake_nominal), float(real_risk), bucket)
+        stake_margin = stake_nominal / lev
+        risk_final = stake_margin * sl_roi_pct
+        recovery_risk = getattr(result, "recovery_risk", 0.0)
 
-    def _baseline_risk(self, equity: float, tier_pol) -> float:
+        self._log_debug(
+            f"pair={ctx.pair} closs={pst.closs} local_loss={pst.local_loss:.4f} "
+            f"bucket={bucket} bucket_risk={bucket_risk:.6f} risk_room_nominal={caps.risk_room_nominal:.6f} "
+            f"base_nominal={base_nominal:.6f} recovery_risk={recovery_risk:.6f} sl_price_pct={sl_price_pct:.6f} "
+            f"atr_pct_used={atr_pct_used} atr_mul_sl={atr_mul_sl} nominal_target={nominal_target:.6f} "
+            f"min_entry_nominal={min_entry_nominal:.6f} stake_nominal={stake_nominal:.6f} "
+            f"stake_margin={stake_margin:.6f} risk_final={risk_final:.6f} "
+            f"algo={algo_name} reason={result.reason or algo_name}"
+        )
+
+        return (float(stake_margin), float(risk_final), bucket)
+
+    def _determine_bucket(self, ctx: SizingContext) -> Tuple[str, float]:
+        """Resolve bucket selection and available bucket risk."""
+
+        treasury_cfg = self.cfg.treasury
+        fast = self.state.treasury.fast_alloc_risk.get(ctx.pair, 0.0) if treasury_cfg.enable_fast_bucket else 0.0
+        slow = self.state.treasury.slow_alloc_risk.get(ctx.pair, 0.0) if treasury_cfg.enable_slow_bucket else 0.0
+
+        bucket_risk = fast + slow if treasury_cfg.bucket_sum_mode == "sum" else max(fast, slow)
+
+        if ctx.bucket:
+            bucket = ctx.bucket
+        elif fast > 0:
+            bucket = "fast"
+        elif slow > 0:
+            bucket = "slow"
+        else:
+            bucket = "slow"
+        return bucket, bucket_risk
+
+    def _derive_sl_context(
+        self, ctx: SizingContext, tier_pol: TierPolicy, pst
+    ) -> Tuple[float, float, float, Optional[float], float]:
+        """Return leverage, price-space SL pct, ROI-space SL pct, atr_pct and atr_mult used."""
+
+        lev_cfg = float(self.cfg.sizing.enforce_leverage or 0.0)
+        lev_ctx = float(getattr(ctx, "leverage", 0.0) or 0.0)
+        lev = lev_cfg or lev_ctx or 1.0
+
+        plan_atr_pct: Optional[float] = None
+        for candidate in (getattr(ctx, "plan_atr_pct", None), getattr(pst, "last_atr_pct", None)):
+            if candidate is None:
+                continue
+            try:
+                val = float(candidate)
+            except Exception:
+                continue
+            if val > 0:
+                plan_atr_pct = val
+                break
+
+        exit_profile_name = (
+            ctx.exit_profile
+            or getattr(tier_pol, "default_exit_profile", None)
+            or getattr(self.cfg, "default_exit_profile", None)
+        )
+        atr_mul_sl = 1.0
+        try:
+            profile = get_exit_profile(self.cfg, exit_profile_name) if exit_profile_name else None
+            if profile and getattr(profile, "atr_mul_sl", None):
+                atr_mul_sl = float(profile.atr_mul_sl)
+        except Exception:
+            atr_mul_sl = 1.0
+
+        if self.cfg.sizing_algos.target_recovery.use_atr_based and plan_atr_pct:
+            sl_price_pct = max(plan_atr_pct * atr_mul_sl, 0.0)
+        else:
+            sl_price_pct = abs(ctx.sl_pct) / max(lev, 1e-9)
+        sl_roi_pct = sl_price_pct * lev
+        return lev, sl_price_pct, sl_roi_pct, plan_atr_pct, atr_mul_sl
+
+    def _compute_base_nominal(
+        self, ctx: SizingContext, tier_pol: TierPolicy, equity: float, lev: float
+    ) -> Tuple[float, float, float, float]:
+        """Compute base nominal size ignoring recovery/buckets/caps."""
+
+        sizing_cfg = self.cfg.sizing
+        static_nominal = max(0.0, float(sizing_cfg.static_initial_nominal or 0.0))
+        dynamic_nominal = max(0.0, equity * float(sizing_cfg.initial_size_equity_pct or 0.0))
+        mode = str(getattr(sizing_cfg, "initial_size_mode", "hybrid")).lower()
+        if mode == "static":
+            base_nominal = static_nominal
+        elif mode == "dynamic":
+            base_nominal = dynamic_nominal
+            if static_nominal > 0:
+                base_nominal = max(base_nominal, static_nominal)
+        else:
+            base_nominal = max(static_nominal, dynamic_nominal)
+
+        min_notional = max(0.0, float(ctx.min_stake or 0.0) * lev) if ctx.min_stake else 0.0
+        max_notional_exchange = max(0.0, float(ctx.max_stake or 0.0) * lev) if ctx.max_stake else 0.0
+        min_entry_nominal = max(min_notional, static_nominal) if (min_notional > 0 or static_nominal > 0) else 0.0
+
+        per_trade_cap_nominal = float(sizing_cfg.initial_max_nominal_per_trade or 0.0)
+        if per_trade_cap_nominal <= 0:
+            per_trade_cap_nominal = float("inf")
+
+        per_pair_cap_static = float(sizing_cfg.per_pair_max_nominal_static or 0.0)
+        if per_pair_cap_static <= 0:
+            per_pair_cap_static = float("inf")
+
+        if min_entry_nominal > 0:
+            base_nominal = max(base_nominal, min_entry_nominal)
+
+        base_nominal = min(base_nominal, per_trade_cap_nominal, per_pair_cap_static)
+        if max_notional_exchange > 0:
+            base_nominal = min(base_nominal, max_notional_exchange)
+
+        return (
+            max(base_nominal, 0.0),
+            min_entry_nominal,
+            per_trade_cap_nominal,
+            max_notional_exchange if max_notional_exchange > 0 else float("inf"),
+        )
+
+    def _compute_caps(
+        self,
+        ctx: SizingContext,
+        tier_pol: TierPolicy,
+        equity: float,
+        sl_price_pct: float,
+        bucket_risk: float,
+        per_trade_cap_nominal: float,
+        exchange_cap_nominal: float,
+        lev: float,
+    ) -> Caps:
+        risk_room = self._available_risk_room(ctx.pair, equity, tier_pol)
+        risk_room_nominal = risk_room / sl_price_pct if (risk_room > 0 and sl_price_pct > 0) else 0.0
+
+        per_pair_cap_static = float(self.cfg.sizing.per_pair_max_nominal_static or 0.0)
+        used_stake = self.state.pair_stake_open.get(ctx.pair, 0.0)
+        per_pair_nominal_room = float("inf")
+        if per_pair_cap_static > 0:
+            per_pair_nominal_room = max(0.0, per_pair_cap_static - used_stake)
+
+        portfolio_cap_total = tier_pol.max_stake_notional_pct * equity
+        total_open_nominal = sum(self.state.pair_stake_open.values()) if getattr(self.state, "pair_stake_open", None) else 0.0
+        portfolio_nominal_room = max(0.0, portfolio_cap_total - total_open_nominal)
+
+        bucket_cap_nominal = float("inf")
+        if self.cfg.treasury.bucket_as_cap and bucket_risk > 0 and sl_price_pct > 0:
+            bucket_cap_nominal = bucket_risk / sl_price_pct
+
+        proposed_nominal_cap = float("inf")
+        if ctx.proposed_stake and ctx.proposed_stake > 0:
+            proposed_nominal_cap = float(ctx.proposed_stake) * lev
+
+        return Caps(
+            risk_room_nominal=risk_room_nominal,
+            bucket_cap_nominal=bucket_cap_nominal,
+            per_pair_nominal_room=per_pair_nominal_room,
+            portfolio_nominal_room=portfolio_nominal_room,
+            per_trade_nominal_cap=per_trade_cap_nominal if per_trade_cap_nominal > 0 else float("inf"),
+            exchange_max_nominal=exchange_cap_nominal if exchange_cap_nominal > 0 else float("inf"),
+            proposed_nominal_cap=proposed_nominal_cap,
+        )
+
+    def _compute_recovery_risk(
+        self,
+        ctx: SizingContext,
+        tier_pol: TierPolicy,
+        pst,
+        bucket_risk: float,
+        sizing_cfg: SizingAlgoConfig,
+        base_nominal: float,
+        sl_price_pct: float,
+        equity: float,
+        baseline_risk: float,
+        algo: str,
+    ) -> float:
+        """Deprecated: sizing algorithms now live in sizing_algos.py."""
+
+        raise RuntimeError("Use sizing_algos via SizerAgent pipeline instead.")
+
+    def _apply_caps(self, nominal_target: float, caps: Caps, min_entry_nominal: float) -> float:
+        """Clamp the nominal target by all caps, respecting exchange minimums."""
+
+        candidates = [
+            nominal_target,
+            caps.risk_room_nominal,
+            caps.bucket_cap_nominal,
+            caps.per_pair_nominal_room,
+            caps.portfolio_nominal_room,
+            caps.per_trade_nominal_cap,
+            caps.exchange_max_nominal,
+            caps.proposed_nominal_cap,
+        ]
+        stake_nominal = min([c for c in candidates if c > 0], default=0.0)
+        if stake_nominal <= 0:
+            return 0.0
+
+        if min_entry_nominal > 0 and stake_nominal < min_entry_nominal:
+            self._log_debug(
+                f"skip capacity_below_min_entry stake_nominal={stake_nominal:.6f} "
+                f"min_entry_nominal={min_entry_nominal:.6f}"
+            )
+            return 0.0
+        return stake_nominal
+
+    def _baseline_risk(self, equity: float, tier_pol: TierPolicy) -> float:
         base = tier_pol.k_mult_base_pct * equity
         if not self.cfg.suppress_baseline_when_stressed or equity <= 0:
             return base
@@ -130,23 +356,7 @@ class SizerAgent:
             return 0.0
         return base
 
-    def _apply_recovery_policy(
-        self,
-        baseline: float,
-        tp_pct: float,
-        sl_pct: float,
-        pst,
-        tier_pol,
-    ) -> float:
-        risk_need = baseline
-        if tier_pol.sizing_algo == "TARGET_RECOVERY" and tp_pct > 0 and sl_pct > 0:
-            want_rec = pst.local_loss * tier_pol.recovery_factor
-            stake_rec = want_rec / tp_pct
-            risk_rec = stake_rec * sl_pct
-            risk_need = max(baseline, risk_rec)
-        return risk_need
-
-    def _available_risk_room(self, pair: str, equity: float, tier_pol) -> float:
+    def _available_risk_room(self, pair: str, equity: float, tier_pol: TierPolicy) -> float:
         cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
         port_cap = cap_pct * equity
         used = self.state.get_total_open_risk() + self.reservation.get_total_reserved()

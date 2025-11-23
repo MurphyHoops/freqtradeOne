@@ -11,6 +11,7 @@
     "startup_candle_count": 210,
     "datadir": "user_data/data",
     "enable_protections": false,
+    "fee": 0.0005,
     "exchange": {
         "name": "binanceusdm",
         "key": "",
@@ -24,8 +25,7 @@
             },
         "ccxt_async_config": {},
         "pair_whitelist": [
-            "BTC/USDT:USDT",
-            "ETH/USDT:USDT"
+            "TRB/USDT:USDT"
         ],
         "pair_blacklist": []
     },
@@ -33,8 +33,7 @@
         {
             "method": "StaticPairList",
             "pairs": [
-                "BTC/USDT:USDT",
-                "ETH/USDT:USDT"
+            "TRB/USDT:USDT"
             ]
         }
     ],
@@ -49,9 +48,10 @@
         "ema_slow": 200,
         "treasury_fast_split_pct": 0.3,
         "fast_topK_squads": 10,
-        "slow_universe_pct": 0.9,
+        "slow_universe_pct": 1,
         "breakeven_lock_frac_of_tp": 0.5,
-        "breakeven_lock_eps_atr_pct": 0.1
+        "breakeven_lock_eps_atr_pct": 0.1,
+        "fast_mode": "top_pairs"
     },
     "dataprovider": {
         "freqaimodel": "",

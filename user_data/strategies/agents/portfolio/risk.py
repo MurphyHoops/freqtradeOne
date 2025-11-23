@@ -37,7 +37,6 @@ class InvariantReport:
 
     def to_dict(self) -> Dict[str, Any]:
         """将报告转换为可 JSON 序列化的结构。"""
-
         return {
             "ok": self.ok,
             "violations": [v.to_dict() for v in self.violations],

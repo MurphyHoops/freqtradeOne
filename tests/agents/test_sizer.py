@@ -1,6 +1,7 @@
-﻿"""SizerAgent 风险与仓位计算逻辑的测试。"""
+"""SizerAgent sizing logic tests."""
 
 import types
+from dataclasses import replace
 
 import pytest
 
@@ -9,7 +10,7 @@ from user_data.strategies.config.v29_config import V29Config
 
 
 class DummyPairState:
-    """提供 closs 与 local_loss 的最小占位对象。"""
+    """Provide closs/local_loss placeholders."""
 
     def __init__(self, closs: int = 0, local_loss: float = 0.0):
         self.closs = closs
@@ -18,7 +19,7 @@ class DummyPairState:
 
 
 class DummyState:
-    """模拟 GlobalState 检索接口供 SizerAgent 使用。"""
+    """Minimal GlobalState surface for SizerAgent."""
 
     def __init__(self, debt_pool: float, cap_pct: float, total_open: float, pair_state: DummyPairState):
         self.debt_pool = debt_pool
@@ -26,6 +27,7 @@ class DummyState:
         self._total_open = total_open
         self._pair_state = pair_state
         self.pair_risk_open = {"TEST/USDT": 0.0}
+        self.pair_stake_open = {"TEST/USDT": 0.0}
         self.treasury = types.SimpleNamespace(fast_alloc_risk={}, slow_alloc_risk={})
 
     def get_pair_state(self, pair: str) -> DummyPairState:
@@ -44,7 +46,7 @@ class DummyState:
 
 
 class DummyReservation:
-    """返回固定值的预约桩，用于 CAP 计算。"""
+    """Return zeroed reservations for CAP calculations."""
 
     def __init__(self):
         self._total_reserved = 0.0
@@ -58,7 +60,7 @@ class DummyReservation:
 
 
 class DummyEquity:
-    """固定返回 equity 的桩。"""
+    """Fixed equity provider."""
 
     def __init__(self, equity: float):
         self._equity = equity
@@ -68,7 +70,7 @@ class DummyEquity:
 
 
 class DummyTierMgr:
-    """返回预设 TierPolicy 的桩管理器。"""
+    """Return a prebuilt TierPolicy."""
 
     def __init__(self, policy):
         self.policy = policy
@@ -78,7 +80,7 @@ class DummyTierMgr:
 
 
 def build_policy(**overrides):
-    """构造简单的 TierPolicy 替身以便调整参数。"""
+    """Build a simple TierPolicy-like object."""
 
     defaults = dict(
         name="tier",
@@ -102,9 +104,10 @@ def build_policy(**overrides):
 
 
 def test_sizer_suppresses_baseline_when_stressed():
-    """压力期时 BASELINE VaR 应被压制导致拒单。"""
+    """Baseline risk suppressed under stress should skip sizing."""
 
     cfg = V29Config()
+    cfg.sizing = replace(cfg.sizing, enforce_leverage=1.0)
     pair_state = DummyPairState()
     state = DummyState(debt_pool=500.0, cap_pct=cfg.portfolio_cap_pct_base, total_open=0.0, pair_state=pair_state)
     reservation = DummyReservation()
@@ -117,38 +120,97 @@ def test_sizer_suppresses_baseline_when_stressed():
 
     assert stake == pytest.approx(0.0)
     assert risk == pytest.approx(0.0)
-    assert bucket == "fast"
+    assert bucket == "slow"
+
+
+def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
+    """BASE_ONLY should honor base nominal even if baseline risk is suppressed."""
+
+    cfg = V29Config()
+    cfg.sizing = replace(
+        cfg.sizing,
+        enforce_leverage=1.0,
+        static_initial_nominal=6.0,
+        initial_size_equity_pct=0.0,
+        initial_max_nominal_per_trade=1_000_000.0,
+        per_pair_max_nominal_static=1_000_000.0,
+    )
+    pair_state = DummyPairState()
+    state = DummyState(debt_pool=500.0, cap_pct=1.0, total_open=0.0, pair_state=pair_state)
+    reservation = DummyReservation()
+    equity = DummyEquity(1000.0)
+    policy = build_policy(
+        sizing_algo="BASE_ONLY",
+        k_mult_base_pct=0.0,
+        per_pair_risk_cap_pct=10.0,
+        max_stake_notional_pct=10.0,
+    )
+    tier_mgr = DummyTierMgr(policy)
+    sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
+
+    stake, risk, bucket = sizer.compute(
+        "TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000
+    )
+
+    assert bucket == "slow"
+    assert stake == pytest.approx(6.0)
+    assert risk == pytest.approx(0.12)
 
 
 def test_sizer_target_recovery_uses_local_loss():
-    """TARGET_RECOVERY 档位应根据 local_loss 放大风险需求。"""
+    """TARGET_RECOVERY sizing follows ATR-style formula when uncapped."""
 
     cfg = V29Config()
     cfg.suppress_baseline_when_stressed = False
+    cfg.sizing = replace(
+        cfg.sizing,
+        enforce_leverage=1.0,
+        static_initial_nominal=50.0,
+        initial_size_equity_pct=0.0,
+        initial_max_nominal_per_trade=1_000_000.0,
+        per_pair_max_nominal_static=1_000_000.0,
+    )
+    cfg.sizing_algos = replace(
+        cfg.sizing_algos,
+        target_recovery=replace(cfg.sizing_algos.target_recovery, max_recovery_multiple=1_000_000.0),
+    )
     pair_state = DummyPairState(local_loss=100.0)
     state = DummyState(debt_pool=0.0, cap_pct=1.0, total_open=0.0, pair_state=pair_state)
     reservation = DummyReservation()
     equity = DummyEquity(5000.0)
-    policy = build_policy(sizing_algo="TARGET_RECOVERY", recovery_factor=2.0)
+    policy = build_policy(sizing_algo="TARGET_RECOVERY", recovery_factor=2.0, per_pair_risk_cap_pct=10.0, max_stake_notional_pct=10.0)
     tier_mgr = DummyTierMgr(policy)
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
 
-    stake, risk, bucket = sizer.compute("TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=10_000)
+    stake, risk, bucket = sizer.compute("TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000)
 
-    assert bucket == "fast"
-    assert risk == pytest.approx(100.0, rel=1e-3)
-    assert stake == pytest.approx(5000.0, rel=1e-3)
+    expected_nominal = 50.0 + (pair_state.local_loss * policy.recovery_factor) / 0.02
+    assert bucket == "slow"
+    assert stake == pytest.approx(expected_nominal, rel=1e-3)
+    assert risk == pytest.approx(expected_nominal * 0.02, rel=1e-3)
 
 
 def test_sizer_respects_caps_and_minmax():
-    """组合/单票 CAP 与交易所 min/max 约束应正确生效。"""
+    """Caps and exchange constraints should clamp the nominal target."""
 
     cfg = V29Config()
+    cfg.sizing = replace(
+        cfg.sizing,
+        enforce_leverage=1.0,
+        static_initial_nominal=50.0,
+        initial_size_equity_pct=0.0,
+        initial_max_nominal_per_trade=1000.0,
+        per_pair_max_nominal_static=800.0,
+    )
+    cfg.sizing_algos = replace(
+        cfg.sizing_algos,
+        target_recovery=replace(cfg.sizing_algos.target_recovery, max_recovery_multiple=1000.0),
+    )
     pair_state = DummyPairState(local_loss=0.0)
-    state = DummyState(debt_pool=0.0, cap_pct=0.01, total_open=0.0, pair_state=pair_state)
+    state = DummyState(debt_pool=0.0, cap_pct=1.0, total_open=0.0, pair_state=pair_state)
     reservation = DummyReservation()
     equity = DummyEquity(5000.0)
-    policy = build_policy(per_pair_risk_cap_pct=0.02, max_stake_notional_pct=0.5)
+    policy = build_policy(per_pair_risk_cap_pct=10.0, max_stake_notional_pct=1.0)
     tier_mgr = DummyTierMgr(policy)
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
 
@@ -157,19 +219,30 @@ def test_sizer_respects_caps_and_minmax():
         sl_pct=0.05,
         tp_pct=0.10,
         direction="long",
-        min_stake=150.0,
+        min_stake=None,
         max_stake=200.0,
     )
 
-    assert bucket == "fast"
+    assert bucket == "slow"
     assert stake == pytest.approx(200.0)
     assert risk == pytest.approx(10.0)
 
 
 def test_sizer_caps_with_proposed_stake():
-    """Freqtrade �Ƽ��µ����޺�Ӧ��Ϊ����һ������Լ��."""
+    """Freqtrade proposed stake should act as a hard cap."""
 
     cfg = V29Config()
+    cfg.sizing = replace(
+        cfg.sizing,
+        enforce_leverage=1.0,
+        initial_size_equity_pct=0.0,
+        initial_max_nominal_per_trade=1_000_000.0,
+        per_pair_max_nominal_static=1_000_000.0,
+    )
+    cfg.sizing_algos = replace(
+        cfg.sizing_algos,
+        target_recovery=replace(cfg.sizing_algos.target_recovery, max_recovery_multiple=1_000_000.0),
+    )
     pair_state = DummyPairState()
     state = DummyState(debt_pool=0.0, cap_pct=1.0, total_open=0.0, pair_state=pair_state)
     reservation = DummyReservation()
@@ -188,6 +261,6 @@ def test_sizer_caps_with_proposed_stake():
         proposed_stake=100.0,
     )
 
-    assert bucket == "fast"
+    assert bucket == "slow"
     assert stake == pytest.approx(100.0)
     assert risk == pytest.approx(2.0)

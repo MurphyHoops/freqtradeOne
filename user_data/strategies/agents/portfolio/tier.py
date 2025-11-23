@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence, TYPE_CHECKING
+from typing import Literal, Optional, Sequence, TYPE_CHECKING, Tuple
 
 from ...config.v29_config import DEFAULT_TIERS, DEFAULT_TIER_ROUTING_MAP, TierSpec, V29Config
 
@@ -31,7 +31,7 @@ class TierPolicy:
     min_raw_score: float
     min_rr_ratio: float
     min_edge: float
-    sizing_algo: Literal["BASELINE", "TARGET_RECOVERY"]
+    sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"]
     k_mult_base_pct: float
     recovery_factor: float
     cooldown_bars: int
@@ -41,6 +41,7 @@ class TierPolicy:
     icu_force_exit_bars: int
     priority: int = 100
     default_exit_profile: Optional[str] = None
+    single_position_only: bool = False  # 新增字段
 
     def permits(
         self,
@@ -51,13 +52,20 @@ class TierPolicy:
     ) -> bool:
         """Check whether the candidate metadata is allowed by this tier."""
 
-        if recipe and recipe in self.allowed_recipes:
-            return True
-        if kind and kind in self.allowed_entries:
-            return True
+        if recipe:
+            if recipe in self.allowed_recipes:
+                return True
+            # When recipes are explicitly configured, treat mismatches as hard rejects
+            if self.allowed_recipes:
+                return False
+        if kind:
+            if kind in self.allowed_entries:
+                return True
+            if self.allowed_entries:
+                return False
         if squad and squad in self.allowed_squads:
             return True
-        return False
+        return not (self.allowed_recipes or self.allowed_entries or self.allowed_squads)
 
 
 class TierManager:
@@ -93,6 +101,11 @@ class TierManager:
         """Fetch a tier policy directly by name."""
 
         return self._policies[tier_name]
+
+    def policies(self) -> Tuple[TierPolicy, ...]:
+        """Return all tier policies ordered by priority."""
+
+        return tuple(self._ordered_policies)
 
     def default_profile_for_closs(self, closs: int) -> Optional[str]:
         """Return the default exit profile configured for the tier covering this closs."""
@@ -136,6 +149,7 @@ class TierManager:
             icu_force_exit_bars=spec.icu_force_exit_bars,
             priority=int(getattr(spec, "priority", 100)),
             default_exit_profile=getattr(spec, "default_exit_profile", None),
+            single_position_only=getattr(spec, "single_position_only", False),
         )
 
     def _resolve_tier_name(self, closs: int) -> Optional[str]:

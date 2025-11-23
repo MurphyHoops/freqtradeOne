@@ -151,7 +151,8 @@ def _duplicate_ohlc_columns(df: pd.DataFrame, suffix: str) -> None:
 
 
 def _bars_since_new_extreme(series: pd.Series, *, mode: str) -> pd.Series:
-    """Bars since the previous higher high or lower low (excludes current bar)."""
+    """Bars since the last bar $k < i$ such that $series[k]$ is an extreme value 
+    that has not yet been surpassed by any $series[j]$ where $k < j \le i$."""
 
     if mode not in {"high", "low"}:
         raise ValueError("mode must be 'high' or 'low'")

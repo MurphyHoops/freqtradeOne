@@ -59,17 +59,30 @@ class ExitPolicyV29:
     def set_strategy(self, strategy) -> None:
         self.strategy = strategy
 
-    def decide(self, pair: str, trade_id: str, current_profit_pct: Optional[float]) -> Optional[str]:
-        """ """
-        if EXIT_ROUTER is not None and hasattr(self.state, "get_trade_by_id"):
+    def decide(
+        self,
+        pair: str,
+        trade_id: str,
+        current_profit_pct: Optional[float],
+        trade=None,
+    ) -> Optional[str]:
+        """Return an exit tag when router or fallback heuristics request an immediate close."""
+
+        trade_obj = trade
+        if trade_obj is None and hasattr(self.state, "get_trade_by_id"):
             try:
-                trade = self.state.get_trade_by_id(trade_id)
+                trade_obj = self.state.get_trade_by_id(trade_id)
+            except Exception:
+                trade_obj = None
+
+        if EXIT_ROUTER is not None:
+            try:
                 ctx = ImmediateContext(
                     pair=pair,
-                    trade=trade,
+                    trade=trade_obj,
                     now=getattr(self.state, "now", None),
                     profit=(current_profit_pct or 0.0),
-                    dp=self.dp,           # <--- ???????????? self.dp
+                    dp=self.dp,
                     cfg=self.cfg,
                     state=self.state,
                     strategy=self.strategy,

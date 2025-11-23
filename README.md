@@ -220,4 +220,10 @@ pytest tests/agents -q
 - [Freqtrade Strategy Documentation](https://www.freqtrade.io/en/latest/strategy-customization/)
 - AGENT.MD：原始多代理架构设计说明（本仓库中的 docstring 与 README 以此为准绳）。
 
-如需进一步扩展或调参，可在 user_data/strategies/config/v29_config.py 中浏览完整参数注释，结合单元测试了解实际行为。希望本文档能帮助你快速理解并驾驭 TaxBrainV29 策略。
+
+## License & Commercial Use
+
+This project is open-source under the MIT License for educational and research purposes.
+
+**For Enterprise & Commercial Inquiries:**
+We provide professional customization, strategy optimization, and dedicated support for the TaxBrain architecture. If you wish to use this software for commercial proprietary trading or require a commercial license without open-source restrictions, please contact us.

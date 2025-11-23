@@ -1,4 +1,8 @@
-﻿# TaxBrainV29 Strategy Architecture
+﻿# TaxBrain: Modular Quantitative Analysis Framework
+
+> **Note for Stripe / Compliance:** This repository hosts the source code for a technical software architecture tailored for data analysis and backtesting. This is a software product for developers and researchers. No financial services, custody of funds, or investment advice are provided here.
+
+# TaxBrainV29 Strategy Architecture
 
 TaxBrainV29 是一套基于 Freqtrade 的多代理量化交易策略，实现了信号、分层、财政、预约、风险、执行、持久化等职能解耦的“模块化作战架构”。该仓库整理自 V29.1 版本，保留并显式记录了原策略的五项关键修订：
 
@@ -52,7 +56,8 @@ tests/agents/                  # 针对各代理的单元测试
 
 3. **下单前检查 (confirm_trade_entry, custom_stake_amount)**
    - 验证冷却与方向一致性，将信号元数据缓存至 _pending_entry_meta。
-   - sizer.compute 结合 VaR、财政拨款与 CAP 约束计算仓位；eservation.reserve 锁定风险额度。
+   - sizer.compute 结合 VaR、财政拨款与 CAP 约束计算仓位；
+eservation.reserve 锁定风险额度。
 
 4. **成交 & 撤单事件 (order_filled, order_cancelled, order_rejected)**
    - 开仓：execution.on_open_filled 创建 ActiveTradeMeta，释放预约，并写入 trade 自定义数据。
@@ -67,7 +72,8 @@ tests/agents/                  # 针对各代理的单元测试
    - 推进 ar_tick、衰减痛感、构造 Treasury 快照。
    - 	reasury.plan 生成 fast/slow 拨款并写回状态。
    - 盈利周期清债逻辑（V29.1 #2）。
-   - isk.check_invariants 校验 CAP、预约一致性；结果写入 Analytics 日志。
+   - 
+isk.check_invariants 校验 CAP、预约一致性；结果写入 Analytics 日志。
    - persist.save 落盘全局状态。
 
 ---
@@ -99,8 +105,10 @@ tests/agents/                  # 针对各代理的单元测试
 - **财政拨款**：	reasury_fast_split_pct, ast_topK_squads, slow_universe_pct, min_injection_nominal_fast/slow
 - **债务/衰减**：	ax_rate_on_wins, pain_decay_per_bar, clear_debt_on_profitable_cycle, cycle_len_bars
 - **早锁盈**：reakeven_lock_frac_of_tp, reakeven_lock_eps_atr_pct
-- **Finalize 节奏**：orce_finalize_mult, eservation_ttl_bars
-- **指标长度**：ema_fast, ema_slow, si_len, tr_len, dx_len
+- **Finalize 节奏**：orce_finalize_mult, 
+eservation_ttl_bars
+- **指标长度**：ema_fast, ema_slow, 
+si_len, tr_len, dx_len
 - **运行参数**：dry_run_wallet_fallback, enforce_leverage
 
 在 config.json 或 Freqtrade 命令行传入 strategy_params，由 pply_overrides 更新默认值。
@@ -112,8 +120,10 @@ tests/agents/                  # 针对各代理的单元测试
 AnalyticsAgent 默认写入：
 
 - **JSONL** (user_data/logs/v29_analytics.YYYYMMDD.jsonl)
-  - event=finalize：记录 pnl, debt_pool, cap_used_pct, eservations 等。
-  - event=reservation：create/elease/expire。
+  - event=finalize：记录 pnl, debt_pool, cap_used_pct, 
+eservations 等。
+  - event=reservation：create/
+elease/expire。
   - event=exit：退出原因。
   - event=invariant：风险检查结果。
 - **CSV** (user_data/logs/v29_analytics.csv)

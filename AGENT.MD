@@ -1,3 +1,6 @@
+# TaxBrain: Modular Quantitative Analysis Framework
+
+> **Note for Stripe / Compliance:** This repository hosts the source code for a technical software architecture tailored for data analysis and backtesting. This is a software product for developers and researchers. No financial services, custody of funds, or investment advice are provided here.
 ---
 
 # AGENTS.md — TaxBrain/Codex 多代理架构规范（无版本约束）

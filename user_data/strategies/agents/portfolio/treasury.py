@@ -158,7 +158,8 @@ class TreasuryAgent:
         if available_budget <= 0:
             return AllocationPlan()
 
-        fast_budget = available_budget * self.cfg.treasury_fast_split_pct
+        tcfg = self.cfg.treasury
+        fast_budget = available_budget * tcfg.treasury_fast_split_pct
         slow_budget = available_budget - fast_budget
 
         pairs_data = state_snapshot.get("pairs", {}) or {}
@@ -187,8 +188,8 @@ class TreasuryAgent:
         # fast 桶：为每个 squad 选出得分最高的代表信号，再按表现排序取前 K 个。
         # 假设新增 cfg.fast_mode in {"per_squad", "top_pairs"}
 
-        if self.cfg.fast_mode == "top_pairs":
-            fast_pairs = [pair for (pair, _score, _sq) in scored[: self.cfg.fast_topK_squads]]
+        if tcfg.fast_mode == "top_pairs":
+            fast_pairs = [pair for (pair, _score, _sq) in scored[: tcfg.fast_topK_squads]]
         else:
             # 原 per-squad 代表逻辑
             best_by_squad = {}
@@ -196,8 +197,8 @@ class TreasuryAgent:
                 if (squad not in best_by_squad) or (score > best_by_squad[squad][1]):
                     best_by_squad[squad] = (pair, score)
             top_squads = sorted(best_by_squad.items(), key=lambda kv: kv[1][1], reverse=True)
-            if self.cfg.fast_topK_squads > 0:
-                top_squads = top_squads[: self.cfg.fast_topK_squads]
+            if tcfg.fast_topK_squads > 0:
+                top_squads = top_squads[: tcfg.fast_topK_squads]
             fast_pairs = [pair for (_squad, (pair, _score)) in top_squads]
 
         fast_each = 0.0
@@ -205,7 +206,7 @@ class TreasuryAgent:
             fast_each = fast_budget / len(fast_pairs)
 
         # slow 桶：直接取前 M 名得分，M 由 slow_universe_pct 控制。
-        slow_cutoff = max(1, math.ceil(len(scored) * self.cfg.slow_universe_pct))
+        slow_cutoff = max(1, math.ceil(len(scored) * tcfg.slow_universe_pct))
         slow_list = scored[:slow_cutoff]
         slow_each = 0.0
         if slow_budget > 0 and slow_list:
@@ -226,7 +227,7 @@ class TreasuryAgent:
             for pair in fast_pairs:
                 pdata = pairs_data[pair]
                 tier_pol = self.tier_mgr.get(int(pdata.get("closs", 0)))
-                min_risk = max(0.0, self.cfg.min_injection_nominal_fast * max(1e-9, float(pdata.get("last_sl_pct", 0.0))))
+                min_risk = max(0.0, tcfg.min_injection_nominal_fast * max(1e-9, float(pdata.get("last_sl_pct", 0.0))))
                 room = per_pair_room(pair, tier_pol)
                 candidate = max(fast_each, min_risk)
                 alloc = min(candidate, room)
@@ -237,7 +238,7 @@ class TreasuryAgent:
             for pair, _score, _squad in slow_list:
                 pdata = pairs_data[pair]
                 tier_pol = self.tier_mgr.get(int(pdata.get("closs", 0)))
-                min_risk = max(0.0, self.cfg.min_injection_nominal_slow * max(1e-9, float(pdata.get("last_sl_pct", 0.0))))
+                min_risk = max(0.0, tcfg.min_injection_nominal_slow * max(1e-9, float(pdata.get("last_sl_pct", 0.0))))
                 room = per_pair_room(pair, tier_pol)
                 candidate = max(slow_each, min_risk)
                 alloc = min(candidate, room)

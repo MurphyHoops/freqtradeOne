@@ -19,7 +19,7 @@
         "ccxt_config": {},
         "ccxt_async_config": {},
         "pair_whitelist": [
-            "BTC/USDT:USDT"
+            "TRB/USDT:USDT"
         ],
         "pair_blacklist": []
     },
@@ -27,7 +27,7 @@
         {
             "method": "StaticPairList",
             "pairs": [
-                "BTC/USDT:USDT"
+                "TRB/USDT:USDT"
             ]
         }
     ],

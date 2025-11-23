@@ -165,8 +165,8 @@ PROFILE_LIBRARY: Dict[str, Dict[str, ExitProfile]] = {
     "v1": {
         "ATRtrail_v1": ExitProfile(
             atr_timeframe=None,
-            atr_mul_sl=3,
-            atr_mul_tp=3,
+            atr_mul_sl=8,
+            atr_mul_tp=2,
             floor_sl_pct=0.000000000001,
             breakeven_lock_frac_of_tp=0,
             trail_mode=None,

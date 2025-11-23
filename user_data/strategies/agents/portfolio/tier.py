@@ -31,7 +31,7 @@ class TierPolicy:
     min_raw_score: float
     min_rr_ratio: float
     min_edge: float
-    sizing_algo: Literal["BASELINE", "TARGET_RECOVERY"]
+    sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"]
     k_mult_base_pct: float
     recovery_factor: float
     cooldown_bars: int

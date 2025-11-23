@@ -8,7 +8,7 @@ via configuration. Besides the defaults, :func:`apply_overrides` helps align a
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, fields, replace
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 from ..agents.exits.profiles import DEFAULT_PROFILE_VERSION, ExitProfile, resolve_profiles
@@ -40,7 +40,7 @@ class TierSpec:
     min_raw_score: float = 0.0
     min_rr_ratio: float = 1.0
     min_edge: float = 0.0
-    sizing_algo: Literal["BASELINE", "TARGET_RECOVERY"] = "BASELINE"
+    sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"
     k_mult_base_pct: float = 1.0
     recovery_factor: float = 1.0
     cooldown_bars: int = 0
@@ -51,6 +51,53 @@ class TierSpec:
     priority: int = 100
     default_exit_profile: Optional[str] = None
     single_position_only: bool = False  # 新增：有仓位时是否禁止该 tier 再开新仓
+
+
+@dataclass(frozen=True)
+class SizingConfig:
+    """Aggregate all sizing knobs related to initial position sizing."""
+
+    initial_size_mode: Literal["static", "dynamic", "hybrid"] = "static"
+    static_initial_nominal: float = 6.0
+    initial_size_equity_pct: float = 0.0
+    initial_max_nominal_per_trade: float = 3000.0  # hard cap per trade, not a default stake size
+    per_pair_max_nominal_static: float = 3000.0
+    enforce_leverage: float = 10.0
+
+
+@dataclass(frozen=True)
+class TreasuryConfig:
+    """Fast/slow bucket controls and caps for treasury allocations."""
+
+    enable_fast_bucket: bool = True
+    enable_slow_bucket: bool = True
+    treasury_fast_split_pct: float = 0.4
+    fast_topK_squads: int = 10
+    slow_universe_pct: float = 1.0
+    min_injection_nominal_fast: float = 30.0
+    min_injection_nominal_slow: float = 7.0
+    fast_mode: Literal["per_squad", "top_pairs"] = "per_squad"
+    debt_pool_cap_pct: float = 0.15
+    bucket_as_cap: bool = True
+    bucket_sum_mode: Literal["sum", "max"] = "sum"
+
+
+@dataclass(frozen=True)
+class TargetRecoveryConfig:
+    """Parameters for ATR-based TARGET_RECOVERY sizing."""
+
+    use_atr_based: bool = True
+    include_bucket_in_recovery: bool = True
+    include_debt_pool: bool = False
+    max_recovery_multiple: float = 10900.0
+
+
+@dataclass(frozen=True)
+class SizingAlgoConfig:
+    """Algorithm selection and parameters for sizing."""
+
+    default_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"
+    target_recovery: TargetRecoveryConfig = field(default_factory=TargetRecoveryConfig)
 
 @dataclass(frozen=True)
 class TierRouting:
@@ -85,7 +132,6 @@ DEFAULT_STRATEGIES: Dict[str, StrategySpec] = {
         entries=(
             "pullback_long",
             "trend_short",
-            "newbars_breakout_long_30m",
             "newbars_breakdown_short_30m",
         ),
         exit_profile="ATRtrail_v1",
@@ -94,7 +140,7 @@ DEFAULT_STRATEGIES: Dict[str, StrategySpec] = {
     ),
     "ICU_conservative": StrategySpec(
         name="ICU_conservative",
-        entries=("trend_short", "mean_rev_long"),
+        entries=("trend_short", "mean_rev_long","newbars_breakout_long_30m"),
         exit_profile="ATRtrail_v1",
         min_rr=0.2,
         min_edge=0.0,
@@ -120,13 +166,13 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_raw_score=0.20,
         min_rr_ratio=0.00001,
         min_edge=0.002,
-        sizing_algo="BASELINE",
-        k_mult_base_pct=1.0,
+        sizing_algo="BASE_ONLY",
+        k_mult_base_pct=0.0,
         recovery_factor=1.0,
         cooldown_bars=0,
         cooldown_bars_after_win=0,
-        per_pair_risk_cap_pct=0.03,
-        max_stake_notional_pct=0.15,
+        per_pair_risk_cap_pct=0.02,
+        max_stake_notional_pct=0.5,
         icu_force_exit_bars=0,
         default_exit_profile="ATRtrail_v1",
         single_position_only=True,
@@ -135,42 +181,40 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         name="T12_recovery",
         allowed_recipes=("Recovery_mix",),
         allowed_entries=(
-            "pullback_long",
-            "trend_short",
-            "newbars_breakout_long_30m",
             "newbars_breakdown_short_30m",
         ),
         allowed_squads=("PBL", "TRS", "NBX"),
-        min_raw_score=0.15,
+        min_raw_score=0.20,
         min_rr_ratio=0.000001,
         min_edge=0.000,
         sizing_algo="TARGET_RECOVERY",
         k_mult_base_pct=1.0,
-        recovery_factor=1.5,
-        cooldown_bars=10,
+        recovery_factor=2,
+        cooldown_bars=0,
         cooldown_bars_after_win=0,
-        per_pair_risk_cap_pct=0.02,
-        max_stake_notional_pct=0.12,
-        icu_force_exit_bars=30,
+        per_pair_risk_cap_pct=1,
+        max_stake_notional_pct=1,
+        icu_force_exit_bars=0,
         default_exit_profile="ATRtrail_v1",
         single_position_only=True,
     ),
     "T3p_ICU": TierSpec(
         name="T3p_ICU",
         allowed_recipes=("ICU_conservative",),
-        allowed_entries=("trend_short", "mean_rev_long"),
-        allowed_squads=("TRS", "MRL"),
+        allowed_entries=("newbars_breakout_long_30m",
+        ),
+        allowed_squads=("TRS", "MRL","NBX"),
         min_raw_score=0.20,
-        min_rr_ratio=1.6,
-        min_edge=0.004,
+        min_rr_ratio=0.000001,
+        min_edge=0.000,
         sizing_algo="TARGET_RECOVERY",
         k_mult_base_pct=1.0,
-        recovery_factor=2.0,
-        cooldown_bars=20,
-        cooldown_bars_after_win=6,
-        per_pair_risk_cap_pct=0.01,
-        max_stake_notional_pct=0.10,
-        icu_force_exit_bars=20,
+        recovery_factor=2,
+        cooldown_bars=0,
+        cooldown_bars_after_win=0,
+        per_pair_risk_cap_pct=1,
+        max_stake_notional_pct=1,
+        icu_force_exit_bars=0,
         default_exit_profile="ATRtrail_v1",
         single_position_only=True,  
     ),
@@ -181,6 +225,9 @@ DEFAULT_TIER_ROUTING_MAP: Dict[int, str] = {
     1: "T12_recovery",
     2: "T12_recovery",
     3: "T3p_ICU",
+    4: "T3p_ICU",
+    5: "T3p_ICU",
+    6: "T3p_ICU",
 }
 
 
@@ -206,7 +253,12 @@ def _default_tier_routing() -> TierRouting:
 
 @dataclass
 class V29Config:
-    """V29 strategy parameters (signals → strategy → tier binding)."""
+    """V29 strategy parameters (signals/strategy/tier binding).
+
+    Notes:
+    - Any config field containing `nominal` is a nominal USDT amount (amount * price), leverage-agnostic.
+    - Freqtrade `stake_amount` / backtest "Total stake amount" represent margin = nominal / leverage.
+    """
 
     timeframe: str = "5m"
     startup_candle_count: int = 210
@@ -215,12 +267,7 @@ class V29Config:
     # Portfolio caps & stress adjustments
     portfolio_cap_pct_base: float = 0.20
     drawdown_threshold_pct: float = 0.15
-    # Treasury controls
-    treasury_fast_split_pct: float = 0.30
-    fast_topK_squads: int = 10
-    slow_universe_pct: float = 1
-    min_injection_nominal_fast: float = 30.0
-    min_injection_nominal_slow: float = 7.0
+    treasury: TreasuryConfig = field(default_factory=TreasuryConfig)
     # Debt / decay
     tax_rate_on_wins: float = 0.20
     pain_decay_per_bar: float = 0.999
@@ -243,28 +290,12 @@ class V29Config:
     # Behaviour toggles
     suppress_baseline_when_stressed: bool = True
 
-    # ==== 新增：初始开仓量配置 ====
-    # 模式：
-    # - "static"  : 每次按静态名义额开仓（受 VaR 和 CAP 约束）
-    # - "dynamic" : 按权益百分比算开仓（受 min_stake 和 CAP 约束）
-    # - "hybrid"  : 两者结合，权益百分比在 [min_nominal, max_nominal] 之间
-    initial_size_mode: Literal["static", "dynamic", "hybrid"] = "static"
-
-    # 动态模式：初始开仓 = equity * 这个比例（再受上下限约束）
-    initial_size_equity_pct: float = 0.01  # 比如 1% 的权益
-
-    # 静态模式：如果为 0，则使用 Freqtrade 传过来的 min_stake
-    # 如果 > 0，则优先用这个值（单位：名义 USDT）
-    static_initial_nominal: float = 6
-
-    # 动静结合时的最大名义上限（单笔），可以不同于 per_pair_max_nominal_static
-    # 为 0 则只用 per_pair_max_nominal_static 约束整币总仓位。
-    initial_max_nominal_per_trade: float = 20
-    per_pair_max_nominal_static: float = 3000.0
+    # Sizing and algorithm configuration
+    sizing: SizingConfig = field(default_factory=SizingConfig)
+    sizing_algos: SizingAlgoConfig = field(default_factory=SizingAlgoConfig)
 
     # Runtime
     dry_run_wallet_fallback: float = 1000.0
-    enforce_leverage: float = 10.0
     enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)
     exit_profile_version: str = DEFAULT_PROFILE_VERSION
     exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)
@@ -276,6 +307,19 @@ class V29Config:
     _strategy_recipes: Tuple[StrategySpec, ...] = field(init=False, repr=False, default_factory=tuple)
 
     def __post_init__(self, strategy_recipes_input: Optional[Tuple[StrategySpec, ...]]) -> None:
+        def _coerce_dc(value, cls):
+            if isinstance(value, cls):
+                return value
+            if isinstance(value, Mapping):
+                return cls(**{k: v for k, v in value.items() if k in {f.name for f in fields(cls)}})
+            return cls()
+
+        self.treasury = _coerce_dc(getattr(self, "treasury", None), TreasuryConfig)
+        self.sizing = _coerce_dc(getattr(self, "sizing", None), SizingConfig)
+        algos = _coerce_dc(getattr(self, "sizing_algos", None), SizingAlgoConfig)
+        algos_tr = _coerce_dc(getattr(algos, "target_recovery", None), TargetRecoveryConfig)
+        self.sizing_algos = replace(algos, target_recovery=algos_tr)
+
         version = getattr(self, "exit_profile_version", DEFAULT_PROFILE_VERSION)
         if not self.exit_profiles:
             self.exit_profiles = resolve_profiles(version)
@@ -326,7 +370,83 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
 
     if not strategy_params:
         return cfg
+
+    def _merge_dataclass(instance, cls, updates: Mapping[str, Any] | Any):
+        if isinstance(updates, cls):
+            return updates
+        base = {f.name: getattr(instance, f.name) for f in fields(cls)}
+        if isinstance(updates, Mapping):
+            for k, v in updates.items():
+                if k in base:
+                    base[k] = v
+        return cls(**base)
+
+    legacy_map: Dict[str, tuple[str, str]] = {
+        # sizing
+        "initial_size_mode": ("sizing", "initial_size_mode"),
+        "static_initial_nominal": ("sizing", "static_initial_nominal"),
+        "initial_size_equity_pct": ("sizing", "initial_size_equity_pct"),
+        "initial_max_nominal_per_trade": ("sizing", "initial_max_nominal_per_trade"),
+        "per_pair_max_nominal_static": ("sizing", "per_pair_max_nominal_static"),
+        "enforce_leverage": ("sizing", "enforce_leverage"),
+        # treasury
+        "treasury_fast_split_pct": ("treasury", "treasury_fast_split_pct"),
+        "fast_topK_squads": ("treasury", "fast_topK_squads"),
+        "slow_universe_pct": ("treasury", "slow_universe_pct"),
+        "enable_fast_bucket": ("treasury", "enable_fast_bucket"),
+        "enable_slow_bucket": ("treasury", "enable_slow_bucket"),
+        "min_injection_nominal_fast": ("treasury", "min_injection_nominal_fast"),
+        "min_injection_nominal_slow": ("treasury", "min_injection_nominal_slow"),
+        "fast_mode": ("treasury", "fast_mode"),
+        "debt_pool_cap_pct": ("treasury", "debt_pool_cap_pct"),
+        "bucket_as_cap": ("treasury", "bucket_as_cap"),
+        "bucket_sum_mode": ("treasury", "bucket_sum_mode"),
+    }
+
+    target_recovery_map: Dict[str, str] = {
+        "use_atr_based": "use_atr_based",
+        "include_bucket_in_recovery": "include_bucket_in_recovery",
+        "include_debt_pool": "include_debt_pool",
+        "max_recovery_multiple": "max_recovery_multiple",
+    }
+
     for key, value in strategy_params.items():
+        if key == "sizing":
+            cfg.sizing = _merge_dataclass(cfg.sizing, SizingConfig, value)
+            continue
+        if key == "treasury":
+            cfg.treasury = _merge_dataclass(cfg.treasury, TreasuryConfig, value)
+            continue
+        if key == "sizing_algos":
+            current = cfg.sizing_algos
+            merged = _merge_dataclass(current, SizingAlgoConfig, value)
+            tr_updates = value.get("target_recovery") if isinstance(value, Mapping) else getattr(value, "target_recovery", None)
+            merged_tr = _merge_dataclass(
+                getattr(merged, "target_recovery", TargetRecoveryConfig()),
+                TargetRecoveryConfig,
+                tr_updates or {},
+            )
+            cfg.sizing_algos = replace(merged, target_recovery=merged_tr)
+            continue
+        if key == "target_recovery":
+            tr = _merge_dataclass(cfg.sizing_algos.target_recovery, TargetRecoveryConfig, value)
+            cfg.sizing_algos = replace(cfg.sizing_algos, target_recovery=tr)
+            continue
+        if key in legacy_map:
+            container_name, field_name = legacy_map[key]
+            container = getattr(cfg, container_name)
+            cls = SizingConfig if container_name == "sizing" else TreasuryConfig
+            updated = _merge_dataclass(container, cls, {field_name: value})
+            setattr(cfg, container_name, updated)
+            continue
+        if key in target_recovery_map:
+            tr = _merge_dataclass(
+                cfg.sizing_algos.target_recovery,
+                TargetRecoveryConfig,
+                {target_recovery_map[key]: value},
+            )
+            cfg.sizing_algos = replace(cfg.sizing_algos, target_recovery=tr)
+            continue
         if hasattr(cfg, key):
             setattr(cfg, key, value)
     return cfg
@@ -392,6 +512,10 @@ __all__ = [
     "StrategyRecipe",
     "TierSpec",
     "TierRouting",
+    "SizingConfig",
+    "TreasuryConfig",
+    "TargetRecoveryConfig",
+    "SizingAlgoConfig",
     "V29Config",
     "apply_overrides",
     "entries_to_recipe",

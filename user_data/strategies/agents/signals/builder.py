@@ -8,14 +8,14 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from ...config.v29_config import V29Config
-from .factor_spec import (
+from .factors import (
     DEFAULT_BAG_FACTORS,
+    FactorBank,
     apply_timeframe_to_factor,
     factor_components_with_default,
     factor_dependencies,
     parse_factor_name,
 )
-from .factors import FactorBank
 from .registry import REGISTRY
 from .risk import RiskEstimator, RiskPlan
 from .schemas import Candidate, Condition

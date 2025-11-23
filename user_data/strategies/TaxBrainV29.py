@@ -289,7 +289,7 @@ class GlobalState:
         self.reported_pairs_for_current_cycle: set[str] = set()
         self.last_finalize_walltime: float = time.time()
 
-        # === 新增：仓位金额账本（pre-leverage 的 stake）===
+        # === Nominal position ledgers (amount * price, leverage-agnostic) ===
         self.trade_stake_ledger: Dict[str, float] = {}
         self.pair_stake_open: Dict[str, float] = {}
 
@@ -362,7 +362,7 @@ class GlobalState:
         plan_timeframe: Optional[str] = None,
         plan_atr_pct: Optional[float] = None,
         tier_name: Optional[str] = None,
-        stake_nominal: Optional[float] = None,  # ★ 新增
+        stake_nominal: Optional[float] = None,  # nominal position size (amount * price)
     ) -> None:
         """记录新建仓的风险占用，并创建 ActiveTradeMeta 以便执行与退出逻辑后续引用。
         Args:
@@ -379,11 +379,12 @@ class GlobalState:
         pst = self.get_pair_state(pair)
         pair_key = self._canonical_pair(pair)
         tier_name = tier_name or (getattr(tier_pol, "name", None) if tier_pol else None)
+        # 记录的风险应为含杠杆的实际损失额
         self.trade_risk_ledger[trade_id] = float(real_risk)
         self.pair_risk_open[pair_key] = self.pair_risk_open.get(
             pair_key, 0.0) + float(real_risk)
         
-        # === 新增：根据风险和 sl_pct 反推单笔 stake，并累计 pair 已用保证金 ===
+        # === Derive nominal stake from risk/sl_pct and accumulate per-pair exposure ===
         if stake_nominal is None:
             if sl_pct and sl_pct > 0:
                 stake_nominal = real_risk / sl_pct
@@ -417,41 +418,80 @@ class GlobalState:
         Args:
             pair: 交易对名称。
             trade_id: 交易标识。
-            profit_abs: 本次交易的绝对盈亏（正数表示盈利）。
+            profit_abs: 本次交易的绝对盈亏（正数表示盈利或打平）。
             tier_mgr: TierManager，用于在状态更新后获取新的策略参数。
         """
         pst = self.get_pair_state(pair)
         pair_key = self._canonical_pair(pair)
+
+        # 1) 回收风险账本
         was_risk = self.trade_risk_ledger.pop(trade_id, 0.0)
         self.pair_risk_open[pair_key] = max(
-            0.0, self.pair_risk_open.get(pair_key, 0.0) - was_risk)
+            0.0,
+            self.pair_risk_open.get(pair_key, 0.0) - was_risk,
+        )
         if self.pair_risk_open.get(pair_key, 0.0) <= 1e-12:
             self.pair_risk_open[pair_key] = 0.0
 
-
-        # === 新增：保证金账本同步回收 ===
+        # 2) 回收保证金账本
         was_stake = self.trade_stake_ledger.pop(trade_id, 0.0)
-        self.pair_stake_open[pair_key] = max(0.0, self.pair_stake_open.get(pair_key, 0.0) - was_stake)
+        self.pair_stake_open[pair_key] = max(
+            0.0,
+            self.pair_stake_open.get(pair_key, 0.0) - was_stake,
+        )
         if self.pair_stake_open.get(pair_key, 0.0) <= 1e-12:
             self.pair_stake_open[pair_key] = 0.0
 
+        # 3) 从活跃订单中移除
         pst.active_trades.pop(trade_id, None)
+        prev_closs = pst.closs
+
+        # 4) 根据 TierRouting / DEFAULT_TIER_ROUTING_MAP 计算最大 closs 等级
+        #    这里使用 TierManager 内部已经构造好的 _routing_map，
+        #    实际上就是你在 v29_config.DEFAULT_TIER_ROUTING_MAP / tier_routing.loss_tier_map 配的那一份。
+        routing_map = getattr(tier_mgr, "_routing_map", None) or {}
+        max_closs = max(routing_map.keys()) if routing_map else 3  # 没配置时退回旧行为 0–3
+
+        # 5) 盈利或打平：一律回到 T0，并使用 after_win 冷却
         if profit_abs >= 0:
             tax = profit_abs * self.cfg.tax_rate_on_wins
+            # 盈利用于偿还债务池
             self.debt_pool = max(0.0, self.debt_pool - tax)
+            # local_loss 也可以适度回收（避免永远挂着历史亏损）
             pst.local_loss = max(0.0, pst.local_loss - profit_abs)
-            pst.closs = max(0, pst.closs - 1)
+            # if pst.local_loss<=0: # 债务为0的时候,回到原点
+            #     pst.closs = 0
             pol = tier_mgr.get(pst.closs)
             pst.cooldown_bars_left = max(
-                pst.cooldown_bars_left, pol.cooldown_bars_after_win)
+                pst.cooldown_bars_left,
+                pol.cooldown_bars_after_win,
+            )
+            return
+
+        # 6) 亏损：先统一记账，再按 closs 规则路由
+        loss = abs(profit_abs)
+        pst.local_loss += loss
+        self.debt_pool += loss
+
+        if prev_closs >= max_closs:
+            # 处于“最后一级”（例如 ICU 最高级）时再亏一次：
+            # 按你的要求，这一笔视为“最后一次”，打完必须回到 T0。
+            pst.closs = 0
+            pol = tier_mgr.get(pst.closs)
+            pst.cooldown_bars_left = max(
+                pst.cooldown_bars_left,
+                pol.cooldown_bars,
+            )
         else:
-            loss = abs(profit_abs)
-            pst.local_loss += loss
-            self.debt_pool += loss
-            pst.closs += 1
+            # 尚未到达最高 closs：按连续亏损 +1 计数。
+            # 例如：0→1，1→2，2→3，3→4 ... 直到 max_closs。
+            pst.closs = prev_closs + 1
             pol = tier_mgr.get(pst.closs)
             pst.cooldown_bars_left = max(
-                pst.cooldown_bars_left, pol.cooldown_bars)
+                pst.cooldown_bars_left,
+                pol.cooldown_bars,
+            )
+
 
     def to_snapshot(self) -> Dict[str, Any]:
         """序列化全局状态为字典，便于持久化或调试。
@@ -622,8 +662,8 @@ class TaxBrainV29(IStrategy):
         self.timeframe = self.cfg.timeframe
 
         self.startup_candle_count = self.cfg.startup_candle_count
-        self.stoploss = self.cfg.enforce_leverage*-0.2
-        self.minimal_roi = {"0": 0.50*self.cfg.enforce_leverage}
+        self.stoploss = self.cfg.sizing.enforce_leverage*-0.2
+        self.minimal_roi = {"0": 0.50*self.cfg.sizing.enforce_leverage}
         try:
             self.__class__.timeframe = self.cfg.timeframe
             self.__class__.startup_candle_count = self.cfg.startup_candle_count
@@ -664,14 +704,24 @@ class TaxBrainV29(IStrategy):
         self.exit_policy = ExitPolicyV29(self.state, self.eq_provider, self.cfg, dp=getattr(self, "dp", None))
         self.exit_policy.set_strategy(self)
         state_file = (user_data_dir / "taxbrain_v29_state.json").resolve()
-        self._runmode_token: str = ""
-        self._persist_enabled: bool = True
+        # ���봰�岻�� bot_start() �� backtest/hyperopt ҲҪ����������־û�
+        self._runmode_token: str = self._compute_runmode_token()
+        self._persist_enabled: bool = not self._is_backtest_like_runmode()
         self.persist = StateStore(
             filepath=str(state_file),
             state=self.state,
             eq_provider=self.eq_provider,
             reservation_agent=self.reservation,
         )
+        if not self._persist_enabled:
+            # backtest/hyperopt ��չʾ���ڴ�״̬��ֹ���� closs �����ݣ�����ְ�� JSON �ļ�
+            self.persist = _NoopStateStore()
+        try:
+            self._tier_debug(
+                f"init runmode_token={self._runmode_token or 'unknown'} backtest_like={self._is_backtest_like_runmode()} persist_enabled={self._persist_enabled}"
+            )
+        except Exception:
+            pass
         self.cycle_agent = CycleAgent(
             cfg=self.cfg,
             state=self.state,
@@ -728,6 +778,18 @@ class TaxBrainV29(IStrategy):
             return int(tf[:-1]) * 86400
         return 300
 
+    def _tier_debug(self, message: str) -> None:
+        """Append lightweight tier debug info into user_data/logs/tier_debug.log."""
+        try:
+            user_dir = Path(self.config.get("user_data_dir", "user_data"))
+            log_path = user_dir / "logs" / "tier_debug.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            ts = datetime.utcnow().isoformat()
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write(f"{ts} {message}\n")
+        except Exception:
+            pass
+
     def _compute_runmode_token(self) -> str:
         cfg_mode = self.config.get("runmode") if hasattr(
             self, "config") else None
@@ -741,8 +803,13 @@ class TaxBrainV29(IStrategy):
             return str(getattr(dp_mode, "value", dp_mode)).lower()
         return ""
 
+    def _ensure_runmode_token(self) -> str:
+        if not self._runmode_token:
+            self._runmode_token = self._compute_runmode_token()
+        return self._runmode_token
+
     def _is_backtest_like_runmode(self) -> bool:
-        token = self._runmode_token or ""
+        token = self._ensure_runmode_token() or ""
         return any(key in token for key in ("backtest", "hyperopt"))
 
     def _derive_informative_timeframes(
@@ -852,7 +919,14 @@ class TaxBrainV29(IStrategy):
     def bot_start(self, **kwargs) -> None:
         """ """
         self._runmode_token = self._compute_runmode_token()
-        self._persist_enabled = not self._is_backtest_like_runmode()
+        backtest_like = self._is_backtest_like_runmode()
+        self._persist_enabled = not backtest_like
+        try:
+            self.logger.info(
+                f"[tier] runmode={self._runmode_token or 'unknown'} backtest_like={backtest_like} persist={'on' if self._persist_enabled else 'off'}"
+            )
+        except Exception:
+            pass
         if self._persist_enabled:
             self.persist.load_if_exists()
         else:
@@ -1127,17 +1201,10 @@ class TaxBrainV29(IStrategy):
         is_vector_pass = (RunMode and runmode in {
                           RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.PLOT})
         pst_snapshot = copy.deepcopy(self.state.get_pair_state(pair))
-        selected_column = df['newbars_high_30m']
-        
+
         if is_vector_pass:
             for idx in df.index:
                 row = df.loc[idx].copy()
-                # print(f"date_{df.loc[idx, 'date']}\n")
-                # if df.loc[idx, 'newbars_low_30m']>80:
-                #     print(f"newbars_low_{df.loc[idx, 'newbars_low_30m']}\n")
-                # if df.loc[idx, 'newbars_high_30m']>80:
-                #     print(f"newbars_high{df.loc[idx, 'newbars_high_30m']}\n")
-                #     print(selected_column[idx+50:idx+100])
                 row["LOSS_TIER_STATE"] = pst_snapshot.closs
                 inf_rows = self._informative_rows_for_index(aligned_info, idx)
                 raw_candidates = builder.build_candidates(row, self.cfg, informative=inf_rows)
@@ -1238,6 +1305,12 @@ class TaxBrainV29(IStrategy):
             token in backtest_modes for token in (runmode_token, dp_mode_token) if token)
         pst = self.state.get_pair_state(pair)
         tier_pol = self.tier_mgr.get(pst.closs)
+        try:
+            self._tier_debug(
+                f"cte called pair={pair} runmode_token={runmode_token} dp_token={dp_mode_token} backtest={is_backtest_mode} closs={pst.closs}"
+            )
+        except Exception:
+            pass
         if is_backtest_mode and pst.cooldown_bars_left > 0:
             try:
                 now_ts = float(current_time.timestamp())
@@ -1279,11 +1352,38 @@ class TaxBrainV29(IStrategy):
                     self._pending_entry_meta[pair] = normalized
 
         if is_backtest_mode:
-            if not candidate_from_tag:
+            try:
+                self._tier_debug(
+                    f"cte precheck pair={pair} candidate_present={bool(candidate_from_tag)} entry_tag_present={bool(entry_tag)}"
+                )
+                if not candidate_from_tag:
+                    tier_name = getattr(tier_pol, "name", None) if tier_pol else None
+                    try:
+                        self.logger.info(
+                            f"[tier] bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} reason=no_candidate"
+                        )
+                    except Exception:
+                        pass
+                    self._tier_debug(
+                        f"bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} reason=no_candidate"
+                    )
+                    return False
+                if pair not in self._pending_entry_meta:
+                    self._pending_entry_meta[pair] = self._candidate_meta_from_candidate(candidate_from_tag)
+                tier_name = getattr(tier_pol, "name", None) if tier_pol else None
+                try:
+                    self.logger.info(
+                        f"[tier] bt-entry pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} sl={getattr(candidate_from_tag, 'sl_pct', None)} tp={getattr(candidate_from_tag, 'tp_pct', None)}"
+                    )
+                except Exception:
+                    pass
+                self._tier_debug(
+                    f"bt-entry pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} sl={getattr(candidate_from_tag, 'sl_pct', None)} tp={getattr(candidate_from_tag, 'tp_pct', None)}"
+                )
+                return True
+            except Exception as exc:
+                self._tier_debug(f"bt-entry-error pair={pair} err={exc}")
                 return False
-            if pair not in self._pending_entry_meta:
-                self._pending_entry_meta[pair] = self._candidate_meta_from_candidate(candidate_from_tag)
-            return True
 
         sig = self._last_signal.get(pair)
         if not sig or sig.direction != requested_dir:
@@ -1394,7 +1494,87 @@ class TaxBrainV29(IStrategy):
             return None
         pst = self.state.get_pair_state(pair)
         tier_pol = self.tier_mgr.get(pst.closs)
-        return self.tier_agent.filter_best(tier_pol, hydrated)
+        best = self.tier_agent.filter_best(tier_pol, hydrated)
+        if best is None:
+            try:
+                tier_name = getattr(tier_pol, "name", None) if tier_pol else None
+                recipes = [getattr(h, "recipe", None) for h in hydrated]
+                kinds = [getattr(h, "kind", None) for h in hydrated]
+                self.logger.info(
+                    f"[tier] reject_by_tier pair={pair} closs={pst.closs} tier={tier_name} recipes={recipes} kinds={kinds}"
+                )
+                self._tier_debug(
+                    f"reject_by_tier pair={pair} closs={pst.closs} tier={tier_name} recipes={recipes} kinds={kinds}"
+                )
+            except Exception:
+                pass
+        return best
+
+    def _compute_profit_abs(self, trade, rate: float) -> float:
+        """Compute absolute PnL for a trade, falling back to a simple delta calc."""
+        try:
+            for attr in ("close_profit_abs", "profit_abs"):
+                val = getattr(trade, attr, None)
+                if val is not None:
+                    return float(val)
+        except Exception:
+            pass
+        try:
+            open_rate = float(getattr(trade, "open_rate", rate) or rate)
+            amount = float(getattr(trade, "amount", 0.0) or 0.0)
+            direction = -1.0 if getattr(trade, "is_short", False) else 1.0
+            return direction * (float(rate) - open_rate) * amount
+        except Exception:
+            return 0.0
+
+    def confirm_trade_exit(
+        self,
+        pair: str,
+        trade,
+        order_type: str,
+        amount: float,
+        rate: float,
+        time_in_force: str,
+        exit_reason: str,
+        current_time: datetime | None = None,
+        **kwargs,
+    ) -> bool:
+        """Ensure backtests/hyperopts update tier state on exits."""
+
+        backtest_like = self._is_backtest_like_runmode()
+        if backtest_like and self.tier_mgr:
+            trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
+            processed = getattr(self, "_bt_closed_trades", None)
+            if processed is None:
+                processed = set()
+                self._bt_closed_trades = processed
+            if trade_id not in processed:
+                profit_abs = self._compute_profit_abs(trade, rate)
+                try:
+                    self._tier_debug(
+                        f"ctx called pair={pair} id={trade_id} pnl={profit_abs}"
+                    )
+                    before = self.state.get_pair_state(pair).closs
+                    self.state.record_trade_close(pair, trade_id, profit_abs, self.tier_mgr)
+                    after = self.state.get_pair_state(pair).closs
+                    try:
+                        self.logger.info(
+                            f"[tier] bt-exit {pair} id={trade_id} pnl={profit_abs:.4f} closs {before}->{after}"
+                        )
+                        self._tier_debug(
+                            f"bt-exit pair={pair} id={trade_id} pnl={profit_abs:.4f} closs {before}->{after}"
+                        )
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    try:
+                        self.logger.warning(
+                            f"[tier] failed to record backtest exit {trade_id} {pair}: {exc}"
+                        )
+                    except Exception:
+                        pass
+                processed.add(trade_id)
+        return True
 
     def custom_stake_amount(
         self,
@@ -1409,8 +1589,14 @@ class TaxBrainV29(IStrategy):
         side: str,
         **kwargs,
     ) -> float:
-        """
+        """Compute margin stake for Freqtrade while keeping nominal sizing internal.
 
+        self.sizer.compute(ctx) returns:
+            - stake_margin: amount passed back to Freqtrade as stake_amount (margin)
+            - real_risk: max loss (USDT) at current stop based on the nominal position
+
+        When recording trades via state.record_trade_open(), always use nominal position sizes;
+        do not confuse stake_margin with any *_nominal field.
         """
         meta: Optional[Dict[str, Any]] = None
         if entry_tag:
@@ -1457,10 +1643,32 @@ class TaxBrainV29(IStrategy):
             proposed_stake=proposed_stake,
             min_stake=min_stake,
             max_stake=max_stake,
+            leverage=leverage,
+            plan_atr_pct=meta.get("atr_pct"),
+            exit_profile=meta.get("exit_profile"),
+            bucket=meta.get("bucket"),
         )
         if stake <= 0 or risk <= 0:
             return 0.0
         
+        # In backtests/hyperopt there is no asynchronous order lifecycle, so skip
+        # reservation bookkeeping to avoid leaking reserved_risk and starving sizing.
+        if self._is_backtest_like_runmode():
+            meta = meta or {}
+            meta.update(
+                {
+                    "sl_pct": sl,
+                    "tp_pct": tp,
+                    "stake_final": stake,
+                    "risk_final": risk,
+                    "bucket": bucket,
+                    "entry_price": current_rate,
+                    "dir": direction,
+                }
+            )
+            self._pending_entry_meta[pair] = meta
+            return float(stake)
+
         rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
         self.reservation.reserve(pair, rid, risk, bucket)
 
@@ -1479,7 +1687,7 @@ class TaxBrainV29(IStrategy):
 
     def leverage(self, *args, **kwargs) -> float:
         """返回配置中的强制杠杆倍数，供 Freqtrade 下单使用。"""
-        return self.cfg.enforce_leverage
+        return self.cfg.sizing.enforce_leverage
 
     def order_filled(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
         """处理开仓或平仓成交事件，更新风险账本、预约状态并触发持久化。"""
@@ -1512,12 +1720,17 @@ class TaxBrainV29(IStrategy):
 
         elif is_exit:
             # 对 exit：完全不依赖 _pending_entry_meta
-            closed = self.execution.on_close_filled(
-                pair=pair,
-                trade=trade,
-                order=order,
-                tier_mgr=self.tier_mgr,
-            )
+            closed = False
+            if self._is_backtest_like_runmode() and trade_id in getattr(self, "_bt_closed_trades", set()):
+                # 已在 confirm_trade_exit 中计数，避免重复累加 closs
+                closed = True
+            else:
+                closed = self.execution.on_close_filled(
+                    pair=pair,
+                    trade=trade,
+                    order=order,
+                    tier_mgr=self.tier_mgr,
+                )
             if closed:
                 try:
                     self.state.get_pair_state(pair)._cooldown_last_ts = float(

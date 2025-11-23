@@ -9,8 +9,7 @@ from typing import Dict, Optional
 
 from ...config.v29_config import ExitProfile, StrategyRecipe, V29Config
 from ..exits.profiles import compute_plan_from_atr
-from .factor_spec import apply_timeframe_to_factor
-from .factors import FactorBank
+from .factors import FactorBank, apply_timeframe_to_factor
 
 
 @dataclass(frozen=True)

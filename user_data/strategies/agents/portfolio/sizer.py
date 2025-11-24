@@ -362,7 +362,11 @@ class SizerAgent:
     def _available_risk_room(self, pair: str, equity: float, tier_pol: TierPolicy) -> float:
         cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
         port_cap = cap_pct * equity
-        used = self.state.get_total_open_risk() + self.reservation.get_total_reserved()
+        if self.backend:
+            backend_used = self.backend.get_snapshot().risk_used
+            used = float(backend_used)
+        else:
+            used = self.state.get_total_open_risk() + self.reservation.get_total_reserved()
         port_room = max(0.0, port_cap - used)
         pair_reserved = self.reservation.get_pair_reserved(pair)
         pair_room = self.state.per_pair_cap_room(pair, equity, tier_pol, pair_reserved)

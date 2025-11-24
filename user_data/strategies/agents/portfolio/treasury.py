@@ -146,6 +146,11 @@ class TreasuryAgent:
             AllocationPlan: fast 与 slow 两个拨款桶的结果；若预算为 0 则两个字典皆为空。
         """
 
+        if self.backend:
+            snap = self.backend.get_snapshot()
+            state_snapshot = dict(state_snapshot)
+            state_snapshot["debt_pool"] = snap.debt_pool
+
         debt_pool = float(state_snapshot.get("debt_pool", 0.0))
         total_open_risk = float(state_snapshot.get("total_open_risk", 0.0))
         reserved_portfolio = float(state_snapshot.get("reserved_portfolio_risk", 0.0))
@@ -248,3 +253,22 @@ class TreasuryAgent:
                     slow_alloc[pair] = alloc
 
         return AllocationPlan(fast_alloc_risk=fast_alloc, slow_alloc_risk=slow_alloc)
+
+
+    def evaluate_signal_quality(self, pair: str, score: float) -> dict:
+        """Gate incoming signals using global debt and percentile thresholds."""
+        if not self.backend:
+            return {"allowed": True, "bucket": "slow", "reason": "no_backend"}
+
+        snap = self.backend.get_snapshot()
+        debt = float(getattr(snap, 'debt_pool', 0.0) or 0.0)
+        threshold_high = float(self.backend.get_score_percentile_threshold(80))
+        is_high_quality = bool(score >= threshold_high)
+
+        if debt > 0:
+            if is_high_quality:
+                return {"allowed": True, "bucket": "fast", "reason": "high_quality_with_debt", "threshold": threshold_high}
+            return {"allowed": False, "bucket": "slow", "reason": "Debt protection", "threshold": threshold_high}
+
+        bucket = "fast" if is_high_quality else "slow"
+        return {"allowed": True, "bucket": bucket, "reason": "no_debt", "threshold": threshold_high}

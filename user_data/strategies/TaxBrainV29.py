@@ -1108,6 +1108,7 @@ class TaxBrainV29(IStrategy):
             "squad": candidate.squad,
             "sl_pct": candidate.sl_pct,
             "tp_pct": candidate.tp_pct,
+            "score": getattr(candidate, "expected_edge", 0.0),
             "exit_profile": candidate.exit_profile,
             "recipe": candidate.recipe,
             "plan_timeframe": getattr(candidate, "plan_timeframe", None),
@@ -1261,6 +1262,13 @@ class TaxBrainV29(IStrategy):
             )
             self._apply_entry_signal(df, last_idx, grouped)
         self._update_last_signal(pair, last_candidate, last_row)
+        try:
+            if last_candidate and getattr(self, "global_backend", None):
+                self.global_backend.record_signal_score(
+                    pair, float(getattr(last_candidate, "expected_edge", 0.0))
+                )
+        except Exception:
+            pass
         return df
 
     def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
@@ -1460,6 +1468,14 @@ class TaxBrainV29(IStrategy):
                 token = str(ptf).strip()
                 normalized['plan_timeframe'] = token or None
         atr_val = normalized.get('atr_pct')
+        score_val = normalized.get('score')
+        if score_val is None:
+            score_val = normalized.get('expected_edge', normalized.get('raw_score'))
+        try:
+            normalized['score'] = float(score_val) if score_val is not None else 0.0
+        except Exception:
+            normalized['score'] = 0.0
+
         if atr_val is not None:
             try:
                 normalized['atr_pct'] = float(atr_val)
@@ -1646,6 +1662,28 @@ class TaxBrainV29(IStrategy):
                     }, side)
         if meta is None:
             return 0.0
+        try:
+            score = float(meta.get("score", meta.get("expected_edge", meta.get("raw_score", 0.0))))
+        except Exception:
+            score = 0.0
+        gate_result: Dict[str, Any] = {}
+        try:
+            gate_result = self.treasury_agent.evaluate_signal_quality(pair, score)
+        except Exception:
+            gate_result = {}
+        if gate_result and gate_result.get("allowed") is False:
+            threshold = gate_result.get("threshold")
+            try:
+                self.logger.info(
+                    f"Global Gatekeeper: Rejected {pair} (score={score:.4f}"
+                    f"{' < ' + str(threshold) if threshold is not None else ''})"
+                )
+            except Exception:
+                print(f"[gatekeeper] reject {pair} score={score} threshold={threshold}")
+            return 0.0
+        gate_bucket = gate_result.get("bucket") if gate_result else None
+        if gate_bucket:
+            meta["bucket"] = gate_bucket
         sl = float(meta.get('sl_pct', 0.0))
         tp = float(meta.get('tp_pct', 0.0))
         direction = str(meta.get('dir'))
@@ -1665,6 +1703,22 @@ class TaxBrainV29(IStrategy):
         )
         if stake <= 0 or risk <= 0:
             return 0.0
+        backend_reserved = False
+        if not self._is_backtest_like_runmode() and getattr(self, "global_backend", None):
+            try:
+                equity_now = self.eq_provider.get_equity()
+                cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity_now)
+                cap_abs = cap_pct * equity_now
+                backend_reserved = bool(self.global_backend.add_risk_usage(risk, cap_abs))
+                if not backend_reserved:
+                    msg = f"Global Gatekeeper: CAP reached for {pair}, risk={risk:.4f}, cap_abs={cap_abs:.4f}"
+                    try:
+                        self.logger.info(msg)
+                    except Exception:
+                        print(msg)
+                    return 0.0
+            except Exception:
+                backend_reserved = False
         
         # In backtests/hyperopt there is no asynchronous order lifecycle, so skip
         # reservation bookkeeping to avoid leaking reserved_risk and starving sizing.
@@ -1685,7 +1739,7 @@ class TaxBrainV29(IStrategy):
             return float(stake)
 
         rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
-        self.reservation.reserve(pair, rid, risk, bucket)
+        self.reservation.reserve(pair, rid, risk, bucket, record_backend=not backend_reserved)
 
         meta.update({
             'sl_pct': sl,

@@ -47,7 +47,7 @@ class ReservationAgent:
         self.reserved_portfolio_risk: float = 0.0
         self._released_ids_since_cycle: set[str] = set()
 
-    def reserve(self, pair: str, rid: str, risk: float, bucket: str) -> None:
+    def reserve(self, pair: str, rid: str, risk: float, bucket: str, record_backend: bool = True) -> None:
         """为某交易对锁定风险额度。"""
 
         if rid in self.reservations:
@@ -58,7 +58,7 @@ class ReservationAgent:
         self.reserved_portfolio_risk += record.risk
         self.reserved_pair_risk[pair] = self.reserved_pair_risk.get(pair, 0.0) + record.risk
         self.reserved_bucket_risk[bucket] = self.reserved_bucket_risk.get(bucket, 0.0) + record.risk
-        if self.backend:
+        if self.backend and record_backend:
             self.backend.add_risk_usage(record.risk)
         if self.analytics:
             self.analytics.log_reservation("create", rid, pair, bucket, record.risk)

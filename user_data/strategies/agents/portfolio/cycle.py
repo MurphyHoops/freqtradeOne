@@ -10,13 +10,14 @@ CycleAgent 在每根 K 线完成时负责驱动以下流程：
 from __future__ import annotations
 
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from ...config.v29_config import V29Config
 from .analytics import AnalyticsAgent
 from .reservation import ReservationAgent
 from .risk import RiskAgent
 from .treasury import AllocationPlan, TreasuryAgent
+from .global_backend import GlobalRiskBackend
 
 
 class CycleAgent:
@@ -32,6 +33,7 @@ class CycleAgent:
         analytics: AnalyticsAgent,
         persist,
         tier_mgr,
+        backend: Optional[GlobalRiskBackend] = None,
     ) -> None:
         """构造周期代理并注入全局依赖。
 
@@ -54,6 +56,7 @@ class CycleAgent:
         self.analytics = analytics
         self.persist = persist
         self.tier_mgr = tier_mgr
+        self.backend = backend
 
     def finalize(self, eq_provider) -> AllocationPlan:
         """在所有交易对完成当前 bar 处理后执行一次完整 finalize。

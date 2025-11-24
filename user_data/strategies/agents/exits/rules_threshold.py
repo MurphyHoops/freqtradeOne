@@ -19,7 +19,13 @@ __all__ = [
 
 @sl_rule(name="hard_sl_from_entry", priority=50)
 def hard_sl_from_entry(ctx: SLContext) -> Optional[float]:
-    sl = _plan_pct_from_facade(ctx, "sl_pct")   # 直接用每次重新计算的 plan
+    """Use sl_pct from trade custom data/meta if present; otherwise fall back to plan."""
+
+    if ctx.trade is None:
+        return None
+    sl = _trade_pct(ctx.trade, "sl_pct")
+    if sl is None or sl <= 0:
+        sl = _plan_pct_from_facade(ctx, "sl_pct")
     return sl if (sl and sl > 0) else None
 
 # @sl_rule(name="hard_sl_from_entry", priority=50)
@@ -36,7 +42,13 @@ def hard_sl_from_entry(ctx: SLContext) -> Optional[float]:
 
 @tp_rule(name="hard_tp_from_entry", priority=50)
 def hard_tp_from_entry(ctx: TPContext) -> Optional[float]:
-    tp = _plan_pct_from_facade(ctx, "tp_pct")
+    """Return tp_pct from trade metadata or the resolved exit plan."""
+
+    if ctx.trade is None:
+        return None
+    tp = _trade_pct(ctx.trade, "tp_pct")
+    if tp is None or tp <= 0:
+        tp = _plan_pct_from_facade(ctx, "tp_pct")
     return tp if (tp and tp > 0) else None
 
 # @tp_rule(name="hard_tp_from_entry", priority=50)
@@ -51,50 +63,50 @@ def hard_tp_from_entry(ctx: TPContext) -> Optional[float]:
 #     return tp if (tp and tp > 0) else None
 
 
-# @sl_rule(name="atr_trail_from_profile", priority=60)
-# def atr_trail_from_profile(ctx: SLContext) -> Optional[float]:
-#     """Tighten SL based on profile trailing settings (percent/chandelier)."""
+@sl_rule(name="atr_trail_from_profile", priority=60)
+def atr_trail_from_profile(ctx: SLContext) -> Optional[float]:
+    """Tighten SL based on profile trailing settings (percent/chandelier)."""
 
-#     profile, plan, facade = _profile_plan_and_facade(ctx)
-#     if not profile or not plan:
-#         return None
+    profile, plan, facade = _profile_plan_and_facade(ctx)
+    if not profile or not plan:
+        return None
 
-#     mode = (getattr(profile, "trail_mode", None) or "").strip().lower()
-#     if not mode:
-#         return None
+    mode = (getattr(profile, "trail_mode", None) or "").strip().lower()
+    if not mode:
+        return None
 
-#     if mode == "percent":
-#         return _percent_trail(ctx, profile, plan)
-#     if mode == "chandelier":
-#         return _chandelier_trail(ctx, profile, plan, facade)
-#     return None
+    if mode == "percent":
+        return _percent_trail(ctx, profile, plan)
+    if mode == "chandelier":
+        return _chandelier_trail(ctx, profile, plan, facade)
+    return None
 
 
-# @sl_rule(name="breakeven_lock_from_profile", priority=70)
-# def breakeven_lock_from_profile(ctx: SLContext) -> Optional[float]:
-#     """Move SL toward break-even once a TP fraction has been achieved."""
+@sl_rule(name="breakeven_lock_from_profile", priority=70)
+def breakeven_lock_from_profile(ctx: SLContext) -> Optional[float]:
+    """Move SL toward break-even once a TP fraction has been achieved."""
 
-#     profile, plan, _ = _profile_plan_and_facade(ctx)
-#     if not profile or not plan:
-#         return None
+    profile, plan, _ = _profile_plan_and_facade(ctx)
+    if not profile or not plan:
+        return None
 
-#     frac = getattr(profile, "breakeven_lock_frac_of_tp", None)
-#     if frac is None:
-#         frac = getattr(ctx.cfg, "breakeven_lock_frac_of_tp", None)
-#     if frac is None or frac <= 0:
-#         return None
+    frac = getattr(profile, "breakeven_lock_frac_of_tp", None)
+    if frac is None:
+        frac = getattr(ctx.cfg, "breakeven_lock_frac_of_tp", None)
+    if frac is None or frac <= 0:
+        return None
 
-#     tp_pct = getattr(plan, "tp_pct", None)
-#     if tp_pct is None or tp_pct <= 0:
-#         return None
+    tp_pct = getattr(plan, "tp_pct", None)
+    if tp_pct is None or tp_pct <= 0:
+        return None
 
-#     profit = float(getattr(ctx, "profit", 0.0) or 0.0)
-#     if profit < float(tp_pct) * float(frac):
-#         return None
+    profit = float(getattr(ctx, "profit", 0.0) or 0.0)
+    if profit < float(tp_pct) * float(frac):
+        return None
 
-#     base_sl = _plan_pct(plan, "sl_pct")
-#     eps = _breakeven_eps(ctx, plan)
-#     return min(base_sl, eps) if base_sl is not None else eps
+    base_sl = _plan_pct(plan, "sl_pct")
+    eps = _breakeven_eps(ctx, plan)
+    return min(base_sl, eps) if base_sl is not None else eps
 
 
 def _trade_pct(trade, key: str) -> Optional[float]:

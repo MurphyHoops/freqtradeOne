@@ -150,6 +150,11 @@ from user_data.strategies.agents.exits.exit import ExitPolicyV29
 from user_data.strategies.agents.portfolio.execution import ExecutionAgent
 from user_data.strategies.agents.portfolio.cycle import CycleAgent
 from user_data.strategies.agents.portfolio.analytics import AnalyticsAgent
+from user_data.strategies.agents.portfolio.global_backend import (
+    GlobalRiskBackend,
+    LocalGlobalBackend,
+    RedisGlobalBackend,
+)
 
 # safe, optional import – file lives next to your strategy agents
 
@@ -272,12 +277,13 @@ class GlobalState:
     该容器为多个代理提供读写接口，并承担快照持久化与恢复的职责。
     """
 
-    def __init__(self, cfg: V29Config) -> None:
+    def __init__(self, cfg: V29Config, backend: Optional[GlobalRiskBackend] = None) -> None:
         """初始化全局状态容器。
         Args:
             cfg: 当前加载的 V29Config，用于读取 CAP、税率等参数。
         """
         self.cfg = cfg
+        self.backend = backend
         self.per_pair: Dict[str, PairState] = {}
         self.debt_pool: float = 0.0
         self.trade_risk_ledger: Dict[str, float] = {}
@@ -457,6 +463,9 @@ class GlobalState:
             tax = profit_abs * self.cfg.tax_rate_on_wins
             # 盈利用于偿还债务池
             self.debt_pool = max(0.0, self.debt_pool - tax)
+            pst.closs = 0
+            if self.backend and tax > 0:
+                self.backend.repay_loss(tax)
             # local_loss 也可以适度回收（避免永远挂着历史亏损）
             pst.local_loss = max(0.0, pst.local_loss - profit_abs)
             # if pst.local_loss<=0: # 债务为0的时候,回到原点
@@ -472,6 +481,8 @@ class GlobalState:
         loss = abs(profit_abs)
         pst.local_loss += loss
         self.debt_pool += loss
+        if self.backend and loss > 0:
+            self.backend.add_loss(loss)
 
         if prev_closs >= max_closs:
             # 处于“最后一级”（例如 ICU 最高级）时再亏一次：
@@ -692,11 +703,26 @@ class TaxBrainV29(IStrategy):
         initial_equity = float(config.get(
             "dry_run_wallet", self.cfg.dry_run_wallet_fallback))
         self.eq_provider = EquityProvider(initial_equity)
-        self.state = GlobalState(self.cfg)
+
+        backend_mode = str(getattr(self.cfg, "global_backend_mode", "local")).lower()
+        if backend_mode == "redis":
+            self.global_backend = RedisGlobalBackend(
+                host=self.cfg.redis_host,
+                port=self.cfg.redis_port,
+                db=self.cfg.redis_db,
+                password=None,
+                namespace=self.cfg.redis_namespace,
+            )
+        elif backend_mode == "local":
+            self.global_backend = LocalGlobalBackend()
+        else:
+            raise ValueError(f"Unknown global_backend_mode: {self.cfg.global_backend_mode}")
+
+        self.state = GlobalState(self.cfg, backend=self.global_backend)
         self.analytics = AnalyticsAgent(user_data_dir / "logs")
-        self.reservation = ReservationAgent(self.cfg, analytics=self.analytics)
-        self.treasury_agent = TreasuryAgent(self.cfg, self.tier_mgr)
-        self.risk_agent = RiskAgent(self.cfg, self.reservation, self.tier_mgr)
+        self.reservation = ReservationAgent(self.cfg, analytics=self.analytics, backend=self.global_backend)
+        self.treasury_agent = TreasuryAgent(self.cfg, self.tier_mgr, backend=self.global_backend)
+        self.risk_agent = RiskAgent(self.cfg, self.reservation, self.tier_mgr, backend=self.global_backend)
         self.exit_facade = ExitFacade(self.cfg, self.tier_mgr) if ExitFacade else None
         if self.exit_facade:
             self.exit_facade.attach_strategy(self)
@@ -731,9 +757,10 @@ class TaxBrainV29(IStrategy):
             analytics=self.analytics,
             persist=self.persist,
             tier_mgr=self.tier_mgr,
+            backend=self.global_backend,
         )
         self.sizer = SizerAgent(
-            self.state, self.reservation, self.eq_provider, self.cfg, self.tier_mgr)
+            self.state, self.reservation, self.eq_provider, self.cfg, self.tier_mgr, backend=self.global_backend)
         self.execution = ExecutionAgent(
             self.state, self.reservation, self.eq_provider, self.cfg)
         self._last_signal: Dict[str, Optional[schemas.Candidate]] = {}
@@ -833,18 +860,6 @@ class TaxBrainV29(IStrategy):
     def _prepare_informative_frame(self, frame: Optional[pd.DataFrame], timeframe: str) -> Optional[pd.DataFrame]:
         if frame is None or frame.empty:
             return frame
-        suffix = self._timeframe_suffix_token(timeframe)
-        if not suffix:
-            return frame
-        rename_map: dict[str, str] = {}
-        for col in list(frame.columns):
-            if col == "date":
-                continue
-            if col.endswith(f"_{suffix}"):
-                continue
-            rename_map[col] = f"{col}_{suffix}"
-        if rename_map:
-            frame = frame.rename(columns=rename_map)
         return frame
 
     def _register_informative_methods(self) -> None:
@@ -1857,13 +1872,12 @@ class TaxBrainV29(IStrategy):
         """
         # 1) 策略级风控 / flip / ICU / 债务风险 等
         tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-        # reason = self.exit_policy.decide(
-        #     pair,
-        #     tid,
-        #     float(current_profit) if current_profit is not None else None,
-        #     trade=trade,
-        # )
-        reason = None
+        reason = self.exit_policy.decide(
+            pair,
+            tid,
+            float(current_profit) if current_profit is not None else None,
+            trade=trade,
+        )
 
         # 2) 如果策略级没有给出退出，再用 ATR 价格逻辑
         if not reason:

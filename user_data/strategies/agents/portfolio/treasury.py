@@ -39,10 +39,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 from ...config.v29_config import V29Config
 from .tier import TierManager
+from .global_backend import GlobalRiskBackend
 import math
 
 
@@ -94,7 +95,7 @@ class TreasuryAgent:
     中的候选信号、冷却状态、预约与在市风险，计算出本周期允许的新名义风险额度。
     """
 
-    def __init__(self, cfg: V29Config, tier_mgr: TierManager) -> None:
+    def __init__(self, cfg: V29Config, tier_mgr: TierManager, backend: Optional[GlobalRiskBackend] = None) -> None:
         """构造财政代理。
 
         Args:
@@ -104,6 +105,7 @@ class TreasuryAgent:
 
         self.cfg = cfg
         self.tier_mgr = tier_mgr
+        self.backend = backend
 
     def plan(self, state_snapshot: Dict[str, any], equity: float) -> AllocationPlan:
         """根据最新状态快照与权益规模生成拨款计划。

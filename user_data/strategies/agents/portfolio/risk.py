@@ -8,11 +8,12 @@ RiskAgent 在每个 finalize 周期后检查组合/单票风险、预约 TTL 以
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ...config.v29_config import V29Config
 from .reservation import ReservationAgent
 from .tier import TierManager
+from .global_backend import GlobalRiskBackend
 
 
 @dataclass
@@ -46,7 +47,13 @@ class InvariantReport:
 class RiskAgent:
     """组合风险约束与预约一致性的检查器。"""
 
-    def __init__(self, cfg: V29Config, reservation: ReservationAgent, tier_mgr: TierManager) -> None:
+    def __init__(
+        self,
+        cfg: V29Config,
+        reservation: ReservationAgent,
+        tier_mgr: TierManager,
+        backend: Optional[GlobalRiskBackend] = None,
+    ) -> None:
         """初始化风险代理。
 
         Args:
@@ -58,6 +65,7 @@ class RiskAgent:
         self.cfg = cfg
         self.reservation = reservation
         self.tier_mgr = tier_mgr
+        self.backend = backend
         self._released_seen: set[str] = set()
         self._ttl_snapshot: Dict[str, int] = {}
 
@@ -121,6 +129,19 @@ class RiskAgent:
             if rid in self._released_seen:
                 add("RESERVATION_DUPLICATE_RELEASE", reservation_id=rid)
             self._released_seen.add(rid)
+
+        if self.backend:
+            snap = self.backend.get_snapshot()
+            backend_risk = getattr(snap, "risk_used", 0.0)
+            local_risk = total_open + total_reserved
+            tol = 0.01 * max(abs(local_risk), abs(backend_risk), 1e-6)
+            if abs(backend_risk - local_risk) > tol:
+                add(
+                    "GLOBAL_STATE_MISMATCH",
+                    backend_risk=backend_risk,
+                    local_risk=local_risk,
+                    tolerance=tol,
+                )
 
         report = InvariantReport(ok=not violations, violations=violations)
         return report

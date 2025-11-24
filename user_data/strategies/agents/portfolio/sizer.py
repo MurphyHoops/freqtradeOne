@@ -12,6 +12,7 @@ from ...schemas import SizingContext
 from .sizing_algos import ALGO_REGISTRY, Caps, SizingInputs
 from .reservation import ReservationAgent
 from .tier import TierManager, TierPolicy
+from .global_backend import GlobalRiskBackend
 
 
 class SizerAgent:
@@ -24,12 +25,14 @@ class SizerAgent:
         eq_provider,
         cfg: V29Config,
         tier_mgr: TierManager,
+        backend: Optional[GlobalRiskBackend] = None,
     ) -> None:
         self.state = state
         self.reservation = reservation
         self.eq = eq_provider
         self.cfg = cfg
         self.tier_mgr = tier_mgr
+        self.backend = backend
         self._debug_file = (
             Path(getattr(cfg, "user_data_dir", "user_data")) / "logs" / "sizer_debug.log"
         )

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple, TYPE_CHECKING
 
 from ...config.v29_config import V29Config
+from .global_backend import GlobalRiskBackend
 
 if TYPE_CHECKING:
     from .analytics import AnalyticsAgent
@@ -29,7 +30,7 @@ class ReservationRecord:
 class ReservationAgent:
     """管理预约、释放与 TTL 推进的风险代理。"""
 
-    def __init__(self, cfg: V29Config, analytics: Optional["AnalyticsAgent"] = None) -> None:
+    def __init__(self, cfg: V29Config, analytics: Optional["AnalyticsAgent"] = None, backend: Optional[GlobalRiskBackend] = None) -> None:
         """初始化预约代理。
 
         Args:
@@ -39,6 +40,7 @@ class ReservationAgent:
 
         self.cfg = cfg
         self.analytics = analytics
+        self.backend = backend
         self.reservations: Dict[str, ReservationRecord] = {}
         self.reserved_pair_risk: Dict[str, float] = {}
         self.reserved_bucket_risk: Dict[str, float] = {"fast": 0.0, "slow": 0.0}
@@ -56,6 +58,8 @@ class ReservationAgent:
         self.reserved_portfolio_risk += record.risk
         self.reserved_pair_risk[pair] = self.reserved_pair_risk.get(pair, 0.0) + record.risk
         self.reserved_bucket_risk[bucket] = self.reserved_bucket_risk.get(bucket, 0.0) + record.risk
+        if self.backend:
+            self.backend.add_risk_usage(record.risk)
         if self.analytics:
             self.analytics.log_reservation("create", rid, pair, bucket, record.risk)
 
@@ -71,6 +75,8 @@ class ReservationAgent:
         bucket_total = max(0.0, self.reserved_bucket_risk.get(record.bucket, 0.0) - record.risk)
         self.reserved_bucket_risk[record.bucket] = bucket_total
         self._released_ids_since_cycle.add(rid)
+        if self.backend:
+            self.backend.release_risk_usage(record.risk)
         if self.analytics:
             self.analytics.log_reservation(event, rid, record.pair, record.bucket, record.risk)
         return (record.pair, record.risk, record.bucket)

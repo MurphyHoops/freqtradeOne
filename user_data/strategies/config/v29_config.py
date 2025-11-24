@@ -294,6 +294,13 @@ class V29Config:
     sizing: SizingConfig = field(default_factory=SizingConfig)
     sizing_algos: SizingAlgoConfig = field(default_factory=SizingAlgoConfig)
 
+    # Global backend (local vs redis)
+    global_backend_mode: str = "local"
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_namespace: str = "TB_V29:"
+
     # Runtime
     dry_run_wallet_fallback: float = 1000.0
     enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)

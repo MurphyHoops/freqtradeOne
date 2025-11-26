@@ -459,19 +459,26 @@ class GlobalState:
         routing_map = getattr(tier_mgr, "_routing_map", None) or {}
         max_closs = max(routing_map.keys()) if routing_map else 3  # 没配置时退回旧行为 0–3
 
-        # 5) 盈利或打平：一律回到 T0，并使用 after_win 冷却
+        # 5) Profit: repay local first, then central if excess remains.
         if profit_abs >= 0:
             tax_rate = getattr(getattr(self.cfg, "risk", None), "tax_rate_on_wins", 0.0)
-            tax = profit_abs * tax_rate
-            # 盈利用于偿还债务池
-            self.debt_pool = max(0.0, self.debt_pool - tax)
+            recovered = min(profit_abs, pst.local_loss)
+            pst.local_loss = max(0.0, pst.local_loss - recovered)
+            self.debt_pool = max(0.0, self.debt_pool - recovered)
+            excess_profit = profit_abs - recovered
+            tax = 0.0
+            if excess_profit > 0 and self.backend:
+                try:
+                    backend_debt = float(getattr(self.backend.get_snapshot(), "debt_pool", 0.0) or 0.0)
+                except Exception:
+                    backend_debt = 0.0
+                if backend_debt > 0:
+                    tax = excess_profit * tax_rate
+                    if tax > 0:
+                        self.backend.repay_loss(tax)
+            if tax > 0:
+                self.debt_pool = max(0.0, self.debt_pool - tax)
             pst.closs = 0
-            if self.backend and tax > 0:
-                self.backend.repay_loss(tax)
-            # local_loss 也可以适度回收（避免永远挂着历史亏损）
-            pst.local_loss = max(0.0, pst.local_loss - profit_abs)
-            # if pst.local_loss<=0: # 债务为0的时候,回到原点
-            #     pst.closs = 0
             pol = tier_mgr.get(pst.closs)
             pst.cooldown_bars_left = max(
                 pst.cooldown_bars_left,
@@ -479,31 +486,29 @@ class GlobalState:
             )
             return
 
-        # 6) 亏损：先统一记账，再按 closs 规则路由
+        # 6) Loss: local-first; escalate only on max tier failure.
         loss = abs(profit_abs)
-        pst.local_loss += loss
-        self.debt_pool += loss
-        if self.backend and loss > 0:
-            self.backend.add_loss(loss)
-
         if prev_closs >= max_closs:
-            # 处于“最后一级”（例如 ICU 最高级）时再亏一次：
-            # 按你的要求，这一笔视为“最后一次”，打完必须回到 T0。
+            if self.backend and loss > 0:
+                self.backend.add_loss(loss)
+            self.debt_pool = max(0.0, self.debt_pool + loss)
+            pst.local_loss = 0.0
             pst.closs = 0
             pol = tier_mgr.get(pst.closs)
             pst.cooldown_bars_left = max(
                 pst.cooldown_bars_left,
                 pol.cooldown_bars,
             )
-        else:
-            # 尚未到达最高 closs：按连续亏损 +1 计数。
-            # 例如：0→1，1→2，2→3，3→4 ... 直到 max_closs。
-            pst.closs = prev_closs + 1
-            pol = tier_mgr.get(pst.closs)
-            pst.cooldown_bars_left = max(
-                pst.cooldown_bars_left,
-                pol.cooldown_bars,
-            )
+            return
+
+        pst.local_loss += loss
+        self.debt_pool += loss
+        pst.closs = prev_closs + 1
+        pol = tier_mgr.get(pst.closs)
+        pst.cooldown_bars_left = max(
+            pst.cooldown_bars_left,
+            pol.cooldown_bars,
+        )
 
 
     def to_snapshot(self) -> Dict[str, Any]:

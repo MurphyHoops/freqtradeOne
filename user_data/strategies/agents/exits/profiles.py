@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""DEPRECATED: This file is kept for class definition only. Default profiles are now defined in v29_config.py and can be overridden in config.json.
-
-Central catalogue of exit profile utilities.
-
-Deprecated: exit profile definitions should be supplied via config (strategy.exit_profiles).
-This module only retains dataclasses and helpers for backward compatibility.
-"""
+"""This module defines the configuration schema for Exit Profiles. Actual instances are defined in v29_config.py or loaded from config.json."""
 
 from __future__ import annotations
 

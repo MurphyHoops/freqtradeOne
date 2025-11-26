@@ -12,6 +12,7 @@ from .factors import (
     DEFAULT_BAG_FACTORS,
     FactorBank,
     apply_timeframe_to_factor,
+    calculate_regime_factor,
     factor_components_with_default,
     factor_dependencies,
     parse_factor_name,
@@ -195,6 +196,7 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
         )
         if name
     }
+    strategy_map = getattr(getattr(cfg, "strategy", None), "strategies", getattr(cfg, "strategies", {})) or {}
     risk = RiskEstimator(cfg)
     results: List[Candidate] = []
     for spec in REGISTRY.all():
@@ -221,10 +223,19 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
         raw = _safe(spec.raw_fn(bag, cfg))
         win = _safe(spec.win_prob_fn(bag, cfg, raw), default=0.5)
         rr = tp / max(sl, 1e-12)
-        edge = win * tp - (1.0 - win) * sl
         min_rr = plan.min_rr if plan.min_rr is not None else spec.min_rr
         min_edge = plan.min_edge if plan.min_edge is not None else spec.min_edge
-        if rr < min_rr or edge < min_edge:
+        if rr < min_rr:
+            continue
+
+        # === Regime-aware scoring ===
+        strat_name = plan.recipe or spec.name
+        strat_spec = strategy_map.get(strat_name)
+        base_wp = float(getattr(strat_spec, "base_win_prob", getattr(spec, "base_win_prob", 0.5)))
+        regime_factor = calculate_regime_factor(bag, strat_name)
+        final_score = max(0.0, min(1.0, base_wp * regime_factor))
+        score_for_use = final_score
+        if score_for_use < min_edge:
             continue
 
         results.append(
@@ -233,8 +244,8 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
                 kind=spec.name,
                 raw_score=raw,
                 rr_ratio=rr,
-                win_prob=win,
-                expected_edge=edge,
+                win_prob=score_for_use,
+                expected_edge=score_for_use,
                 squad=spec.squad,
                 sl_pct=sl,
                 tp_pct=tp,

@@ -176,6 +176,8 @@ class RedisGlobalBackend(GlobalRiskBackend):
         self._client.zadd(self._key_scores, {member: score_val})
         # keep a rolling 1h window
         self._client.expire(self._key_scores, 3600)
+        # trim to last N samples to cap memory
+        self._client.zremrangebyrank(self._key_scores, 0, -2001)
 
     def get_score_percentile_threshold(self, percentile: int) -> float:
         total = int(self._client.zcard(self._key_scores) or 0)

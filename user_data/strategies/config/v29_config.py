@@ -26,6 +26,7 @@ class StrategySpec:
     exit_profile: str  # Exit profile to use when this recipe is selected.
     min_rr: float = 0.0  # Minimum reward/risk threshold; raise to demand higher RR.
     min_edge: float = 0.0  # Minimum expected edge; raise to filter weaker signals.
+    base_win_prob: float = 0.5  # Baseline win probability for this strategy; tuned per regime.
 
 
 # Backwards compatibility alias for older imports
@@ -251,6 +252,7 @@ DEFAULT_STRATEGIES: Dict[str, StrategySpec] = {
         exit_profile="ATRtrail_v1",
         min_rr=0.00001,
         min_edge=0.0,
+        base_win_prob=0.40,  # breakout/trend bias
     ),
     "Recovery_mix": StrategySpec(
         name="Recovery_mix",
@@ -262,6 +264,7 @@ DEFAULT_STRATEGIES: Dict[str, StrategySpec] = {
         exit_profile="ATRtrail_v1",
         min_rr=0.2,
         min_edge=0.0,
+        base_win_prob=0.55,  # mixed bag; slightly above neutral
     ),
     "ICU_conservative": StrategySpec(
         name="ICU_conservative",
@@ -269,6 +272,7 @@ DEFAULT_STRATEGIES: Dict[str, StrategySpec] = {
         exit_profile="ATRtrail_v1",
         min_rr=0.2,
         min_edge=0.0,
+        base_win_prob=0.45,  # conservative trend/mean-rev blend
     ),
 }
 

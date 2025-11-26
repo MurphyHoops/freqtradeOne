@@ -77,6 +77,41 @@ DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {
 DEFAULT_BAG_FACTORS = ("ATR", "ATR_PCT", "CLOSE")
 
 
+def calculate_regime_factor(bag: Any, strategy_type: str | None) -> float:
+    """Return a regime multiplier (0.5-1.5) based on ADX/RSI and strategy bias."""
+
+    try:
+        adx = float(bag.get("ADX"))
+    except Exception:
+        adx = float("nan")
+    try:
+        rsi = float(bag.get("RSI"))
+    except Exception:
+        rsi = float("nan")
+
+    trend_strength = 0.0
+    if not math.isnan(adx):
+        trend_strength = max(0.0, min(1.0, (adx - 15.0) / 25.0))  # ADX>40 -> strong trend
+    rsi_dist = 0.0
+    if not math.isnan(rsi):
+        rsi_dist = min(1.0, abs(rsi - 50.0) / 50.0)  # distance from neutral
+    trend_signal = (trend_strength + rsi_dist) / 2.0
+
+    bias = (strategy_type or "").lower()
+    is_trend = any(token in bias for token in ("trend", "breakout"))
+    is_mean_rev = any(token in bias for token in ("mean_rev", "pullback"))
+
+    if is_trend and not is_mean_rev:
+        factor = 1.0 + 0.5 * trend_signal
+    elif is_mean_rev and not is_trend:
+        factor = 1.0 - 0.5 * trend_signal
+    else:
+        # neutral: slight tilt to trendiness but centered
+        factor = 1.0 + 0.25 * (trend_signal - 0.5)
+
+    return max(0.5, min(1.5, factor))
+
+
 def factor_dependencies(factor: str) -> Set[str]:
     """Return indicator names required for given factor base name."""
 
@@ -213,6 +248,7 @@ __all__ = [
     "BASE_FACTOR_SPECS",
     "DERIVED_FACTOR_SPECS",
     "DEFAULT_BAG_FACTORS",
+    "calculate_regime_factor",
     "factor_dependencies",
     "parse_factor_name",
     "apply_timeframe_to_factor",

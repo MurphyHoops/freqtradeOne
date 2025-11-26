@@ -1,30 +1,19 @@
 # -*- coding: utf-8 -*-
-"""This module defines the configuration schema for Exit Profiles. Actual instances are defined in v29_config.py or loaded from config.json."""
+"""Schema and helpers for exit profiles.
+
+This module is kept lightweight to avoid circular imports; profile instances live in
+v29_config.py or are supplied via config.json.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
-
-import pandas as pd
+from typing import Any, Dict, Optional, Tuple
 
 
 @dataclass(frozen=True)
 class ExitProfile:
-    """Unified parameters describing how exits should behave.
-
-    Attributes:
-        atr_mul_sl: Multiplier applied to ATR% for the base stoploss distance.
-        floor_sl_pct: Absolute stoploss floor used when ATR-derived SL is too tight.
-        atr_mul_tp: Multiplier applied to ATR% for the base take-profit distance.
-        breakeven_lock_frac_of_tp: Fraction of tp_pct that must be reached before locking at breakeven.
-        trail_mode: Trailing style, e.g. ``"percent"`` or ``"chandelier"``.
-        trail_atr_mul: ATR multiple used by chandelier trails to offset from recent highs/lows.
-        trail_pct: Amount of open profit to give back when ``trail_mode="percent"``.
-        activation_atr_mul: Optional ATR multiplier used to delay trail activation.
-        max_bars_in_trade: Optional time stop expressed in bars.
-        ladder: Optional tuple describing staged take-profit levels (ratio, weight) pairs.
-    """
+    """Unified parameters describing how exits should behave."""
 
     atr_timeframe: Optional[str] = None
     atr_mul_sl: float = 1.0
@@ -59,7 +48,6 @@ def compute_plan_from_atr(profile_name: str, profile: ExitProfile, atr_pct: floa
     floor = profile.floor_sl_pct or 0.0
     sl_pct = max(floor, atr_pct * k_sl)
 
-    tp_pct: float
     if profile.atr_mul_tp and profile.atr_mul_tp > 0:
         tp_pct = atr_pct * profile.atr_mul_tp
     else:
@@ -75,13 +63,13 @@ def compute_plan_from_atr(profile_name: str, profile: ExitProfile, atr_pct: floa
 
 
 def atr_pct_from_rows(
-    main_row: pd.Series,
-    informative_rows: Dict[str, pd.Series],
+    main_row: Any,
+    informative_rows: Dict[str, Any],
     *,
     target_timeframe: Optional[str],
     main_timeframe: str,
 ) -> Optional[float]:
-    """Fetch ATR% from current dataframe rows (main/informative)."""
+    """Fetch ATR% from current dataframe rows (main/informative) without pandas dependency."""
 
     tf_norm = _normalize_tf(target_timeframe)
     main_tf_norm = _normalize_tf(main_timeframe)
@@ -95,8 +83,8 @@ def atr_pct_from_rows(
     return _series_value(info_row, "atr_pct")
 
 
-def atr_pct_from_dp(dp, pair: str, timeframe: str, current_time) -> Optional[float]:
-    """Read ATR% from DataProvider for the requested timeframe."""
+def atr_pct_from_dp(dp: Any, pair: str, timeframe: str, current_time) -> Optional[float]:
+    """Read ATR% from DataProvider for the requested timeframe (duck-typed)."""
 
     if dp is None:
         return None
@@ -122,20 +110,19 @@ def atr_pct_from_dp(dp, pair: str, timeframe: str, current_time) -> Optional[flo
     if value is not None and value > 0:
         return value
 
-    # fallback: compute atr_pct from atr + close if available
     try:
-        atr = float(row.get("atr"))
-        close = float(row.get("close"))
-        if close and close > 0:
+        atr = float(row.get("atr", 0.0))
+        close = float(row.get("close", 0.0))
+        if close > 0:
             return atr / close
     except Exception:
         return None
     return None
 
 
-def _series_value(row, column: str) -> Optional[float]:
+def _series_value(row: Any, column: str) -> Optional[float]:
     try:
-        value = row.get(column) if isinstance(row, (pd.Series, dict)) else getattr(row, column, None)
+        value = row.get(column) if isinstance(row, (dict,)) else getattr(row, column, None)
     except Exception:
         value = None
     if value is None:

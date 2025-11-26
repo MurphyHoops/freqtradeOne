@@ -55,6 +55,7 @@ class SignalSpec:
     win_prob_fn: Callable[[Dict[str, float], Any, float], float]
     min_rr: float = 0.0
     min_edge: float = 0.0
+    base_win_prob: float = 0.5
     required_factors: tuple[str, ...] = ()
     timeframe: Optional[str] = None
 

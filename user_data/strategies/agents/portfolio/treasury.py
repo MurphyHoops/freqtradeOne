@@ -80,10 +80,11 @@ def _dynamic_portfolio_cap_pct(cfg: V29Config, debt_pool: float, equity: float) 
         float: 调整后的组合 VaR 占比上限（0~1 之间），不会返回负值。
     """
 
-    base = cfg.portfolio_cap_pct_base
+    risk_cfg = getattr(cfg, "risk", cfg)
+    base = risk_cfg.portfolio_cap_pct_base
     if equity <= 0:
         return base * 0.5
-    if (debt_pool / equity) > cfg.drawdown_threshold_pct:
+    if (debt_pool / equity) > risk_cfg.drawdown_threshold_pct:
         return base * 0.5
     return base
 
@@ -165,7 +166,7 @@ class TreasuryAgent:
         if available_budget <= 0:
             return AllocationPlan()
 
-        tcfg = self.cfg.treasury
+        tcfg = getattr(getattr(self.cfg, "trading", None), "treasury", None) or self.cfg.trading.treasury
         fast_budget = available_budget * tcfg.treasury_fast_split_pct
         slow_budget = available_budget - fast_budget
 
@@ -257,7 +258,7 @@ class TreasuryAgent:
 
     def evaluate_signal_quality(self, pair: str, score: float, closs: int) -> dict:
         """Gate incoming signals using tiered, state-aware thresholds."""
-        gcfg = getattr(self.cfg, "gatekeeping", None)
+        gcfg = getattr(getattr(self.cfg, "risk", None), "gatekeeping", None)
         if not gcfg or not getattr(gcfg, "enabled", True):
             return {"allowed": True, "bucket": "slow", "reason": "gatekeeping_disabled"}
         if not self.backend:
@@ -277,6 +278,16 @@ class TreasuryAgent:
                     "allowed": True,
                     "bucket": "fast",
                     "reason": "Debt: High Quality & Healthy",
+                    "thresholds": thresholds,
+                    "score": score,
+                    "closs": closs,
+                    "debt": debt,
+                }
+            if closs == 0 and score >= getattr(gcfg, "healthy_allow_score", 0.0):
+                return {
+                    "allowed": True,
+                    "bucket": "slow",
+                    "reason": "Debt: Healthy Privilege",
                     "thresholds": thresholds,
                     "score": score,
                     "closs": closs,

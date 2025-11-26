@@ -33,7 +33,7 @@ class ExitFacade:
     def atr_pct(self, pair: str, timeframe: Optional[str], current_time) -> Optional[float]:
         """Return ATR% for the requested timeframe preferring DP data."""
 
-        tf = timeframe or getattr(self.cfg, "timeframe", None)
+        tf = timeframe or getattr(getattr(self.cfg, "system", None), "timeframe", getattr(self.cfg, "timeframe", None))
         if not tf:
             return None
 
@@ -64,16 +64,17 @@ class ExitFacade:
 
         if not candidate:
             return None, None, None
+        profiles = self._profiles()
         profile_name = getattr(candidate, "exit_profile", None)
-        profile_def = self.cfg.exit_profiles.get(profile_name) if profile_name else None
+        profile_def = profiles.get(profile_name) if profile_name else None
         pair_state = self._pair_state(pair)
         if not profile_def and pair_state:
             fallback = self._tier_default_profile(pair_state)
-            profile_def = self.cfg.exit_profiles.get(fallback) if fallback else None
+            profile_def = profiles.get(fallback) if fallback else None
             profile_name = fallback
         if not profile_def:
-            fallback = getattr(self.cfg, "default_exit_profile", None)
-            profile_def = self.cfg.exit_profiles.get(fallback) if fallback else None
+            fallback = self._default_profile_name()
+            profile_def = profiles.get(fallback) if fallback else None
             profile_name = fallback
         if not profile_def:
             return profile_name, None, None
@@ -85,7 +86,7 @@ class ExitFacade:
                 main_row,
                 informative_rows or {},
                 target_timeframe=tf_hint or getattr(profile_def, "atr_timeframe", None),
-                main_timeframe=getattr(self.cfg, "timeframe", None),
+                main_timeframe=getattr(getattr(self.cfg, "system", None), "timeframe", getattr(self.cfg, "timeframe", None)),
             )
 
         current_time = getattr(main_row, "name", None) if main_row is not None else None
@@ -125,7 +126,8 @@ class ExitFacade:
     def plan_for_profile(
         self, profile_name: str, pair: str, current_time
     ) -> Optional[ProfilePlan]:
-        profile = self.cfg.exit_profiles.get(profile_name)
+        profiles = self._profiles()
+        profile = profiles.get(profile_name)
         if not profile:
             return None
         return self._plan_from_profile(profile_name, profile, pair, current_time)
@@ -172,7 +174,7 @@ class ExitFacade:
         atr_tf = (
             self._normalize_tf(plan_timeframe)
             or self._normalize_tf(getattr(profile, "atr_timeframe", None))
-            or self._normalize_tf(getattr(self.cfg, "timeframe", None))
+            or self._normalize_tf(getattr(getattr(self.cfg, "system", None), "timeframe", getattr(self.cfg, "timeframe", None)))
         )
         atr_pct = self._coerce_positive_float(atr_hint)
         if atr_pct is None or atr_pct <= 0:
@@ -199,9 +201,10 @@ class ExitFacade:
         if not profile and state:
             profile = self._tier_default_profile(state)
         if not profile:
-            profile = getattr(self.cfg, "default_exit_profile", None)
+            profile = self._default_profile_name()
         if profile:
-            return profile, self.cfg.exit_profiles.get(profile), meta
+            profiles = self._profiles()
+            return profile, profiles.get(profile), meta
         return None, None, meta
 
     def _plan_hints_from_sources(self, trade, meta, pair_state) -> Tuple[Optional[str], Optional[float]]:
@@ -244,6 +247,19 @@ class ExitFacade:
         if num <= 0:
             return None
         return num
+
+    def _profiles(self) -> Dict[str, Any]:
+        return (
+            getattr(getattr(self.cfg, "strategy", None), "exit_profiles", getattr(self.cfg, "exit_profiles", {}))
+            or {}
+        )
+
+    def _default_profile_name(self) -> Optional[str]:
+        return getattr(
+            getattr(self.cfg, "strategy", None),
+            "default_exit_profile",
+            getattr(self.cfg, "default_exit_profile", None),
+        )
 
     def _normalize_tf(self, timeframe: Optional[str]) -> Optional[str]:
         if timeframe is None:

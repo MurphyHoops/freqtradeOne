@@ -47,3 +47,4 @@ user_data/strategies/config/__pycache__/
 
 # Docker / compose leftovers
 *.tmp
+*__pycache__/

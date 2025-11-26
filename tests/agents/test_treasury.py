@@ -58,15 +58,18 @@ def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
     """Ensure per-squad selection feeds fast/slow allocations."""
 
     cfg = V29Config()
-    cfg.treasury = replace(
-        cfg.treasury,
-        treasury_fast_split_pct=0.5,
-        fast_topK_squads=3,
-        slow_universe_pct=1.0,
-        min_injection_nominal_fast=0.0,
-        min_injection_nominal_slow=0.0,
+    cfg.trading = replace(
+        cfg.trading,
+        treasury=replace(
+            cfg.trading.treasury,
+            treasury_fast_split_pct=0.5,
+            fast_topK_squads=3,
+            slow_universe_pct=1.0,
+            min_injection_nominal_fast=0.0,
+            min_injection_nominal_slow=0.0,
+        ),
     )
-    cfg.portfolio_cap_pct_base = 1.0
+    cfg.risk = replace(cfg.risk, portfolio_cap_pct_base=1.0)
     policy = make_policy()
     agent = TreasuryAgent(cfg, FixedTierManager(policy))
 
@@ -126,15 +129,18 @@ def test_treasury_honours_min_injection_and_cap_trim():
     """Min injection and per-pair caps should still hold."""
 
     cfg = V29Config()
-    cfg.treasury = replace(
-        cfg.treasury,
-        treasury_fast_split_pct=1.0,
-        fast_topK_squads=1,
-        slow_universe_pct=1.0,
-        min_injection_nominal_fast=10.0,
-        min_injection_nominal_slow=5.0,
+    cfg.trading = replace(
+        cfg.trading,
+        treasury=replace(
+            cfg.trading.treasury,
+            treasury_fast_split_pct=1.0,
+            fast_topK_squads=1,
+            slow_universe_pct=1.0,
+            min_injection_nominal_fast=10.0,
+            min_injection_nominal_slow=5.0,
+        ),
     )
-    cfg.portfolio_cap_pct_base = 1.0
+    cfg.risk = replace(cfg.risk, portfolio_cap_pct_base=1.0)
     policy = make_policy(per_pair_risk_cap_pct=0.01)
     agent = TreasuryAgent(cfg, FixedTierManager(policy))
 

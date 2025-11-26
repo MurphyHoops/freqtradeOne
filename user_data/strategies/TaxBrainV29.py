@@ -330,10 +330,11 @@ class GlobalState:
         Returns:
             float: 调整后的组合 CAP 百分比；债务率过高或 equity<=0 时会自动折减。
         """
-        base = self.cfg.portfolio_cap_pct_base
+        risk_cfg = getattr(self.cfg, "risk", self.cfg)
+        base = risk_cfg.portfolio_cap_pct_base
         if equity <= 0:
             return base * 0.5
-        if (self.debt_pool / equity) > self.cfg.drawdown_threshold_pct:
+        if (self.debt_pool / equity) > risk_cfg.drawdown_threshold_pct:
             return base * 0.5
         return base
 
@@ -460,7 +461,8 @@ class GlobalState:
 
         # 5) 盈利或打平：一律回到 T0，并使用 after_win 冷却
         if profit_abs >= 0:
-            tax = profit_abs * self.cfg.tax_rate_on_wins
+            tax_rate = getattr(getattr(self.cfg, "risk", None), "tax_rate_on_wins", 0.0)
+            tax = profit_abs * tax_rate
             # 盈利用于偿还债务池
             self.debt_pool = max(0.0, self.debt_pool - tax)
             pst.closs = 0
@@ -652,9 +654,9 @@ class TaxBrainV29(IStrategy):
     该类负责在 Freqtrade 各个 hook 中调度信号、财政、风险、预约、执行等子代理，
     并保持 V29.1 的五项修订（动态 ADX、盈利周期清债、timeframe/startup 覆盖、早锁盈兜底、仅释放预约）持续生效。
     """
-    timeframe = V29Config().timeframe
+    timeframe = V29Config().system.timeframe
     can_short = True
-    startup_candle_count = V29Config().startup_candle_count
+    startup_candle_count = V29Config().system.startup_candle_count
     # minimal_roi = {"0": 0.03}
     # stoploss = -0.2
     use_custom_roi = False
@@ -670,14 +672,14 @@ class TaxBrainV29(IStrategy):
         """Initialise strategy state, analytics, and persistence layer."""
         base_cfg = V29Config()
         self.cfg = apply_overrides(base_cfg, config.get("strategy_params", {}))
-        self.timeframe = self.cfg.timeframe
+        self.timeframe = self.cfg.system.timeframe
 
-        self.startup_candle_count = self.cfg.startup_candle_count
-        self.stoploss = self.cfg.sizing.enforce_leverage*-0.2
-        self.minimal_roi = {"0": 0.50*self.cfg.sizing.enforce_leverage}
+        self.startup_candle_count = self.cfg.system.startup_candle_count
+        self.stoploss = self.cfg.trading.sizing.enforce_leverage*-0.2
+        self.minimal_roi = {"0": 0.50*self.cfg.trading.sizing.enforce_leverage}
         try:
-            self.__class__.timeframe = self.cfg.timeframe
-            self.__class__.startup_candle_count = self.cfg.startup_candle_count
+            self.__class__.timeframe = self.cfg.system.timeframe
+            self.__class__.startup_candle_count = self.cfg.system.startup_candle_count
         except Exception:
             pass
         extra_signal_factors = getattr(self.cfg, "extra_signal_factors", None)
@@ -701,22 +703,24 @@ class TaxBrainV29(IStrategy):
         self.tier_agent = TierAgent()
         user_data_dir = Path(config.get("user_data_dir", "."))
         initial_equity = float(config.get(
-            "dry_run_wallet", self.cfg.dry_run_wallet_fallback))
+            "dry_run_wallet", self.cfg.system.dry_run_wallet_fallback))
         self.eq_provider = EquityProvider(initial_equity)
 
-        backend_mode = str(getattr(self.cfg, "global_backend_mode", "local")).lower()
+        backend_mode = str(
+            getattr(getattr(self.cfg, "system", None), "global_backend_mode", getattr(self.cfg, "global_backend_mode", "local"))
+        ).lower()
         if backend_mode == "redis":
             self.global_backend = RedisGlobalBackend(
-                host=self.cfg.redis_host,
-                port=self.cfg.redis_port,
-                db=self.cfg.redis_db,
+                host=self.cfg.system.redis_host,
+                port=self.cfg.system.redis_port,
+                db=self.cfg.system.redis_db,
                 password=None,
-                namespace=self.cfg.redis_namespace,
+                namespace=self.cfg.system.redis_namespace,
             )
         elif backend_mode == "local":
             self.global_backend = LocalGlobalBackend()
         else:
-            raise ValueError(f"Unknown global_backend_mode: {self.cfg.global_backend_mode}")
+            raise ValueError(f"Unknown global_backend_mode: {self.cfg.system.global_backend_mode}")
 
         self.state = GlobalState(self.cfg, backend=self.global_backend)
         self.analytics = AnalyticsAgent(user_data_dir / "logs")
@@ -765,7 +769,7 @@ class TaxBrainV29(IStrategy):
             self.state, self.reservation, self.eq_provider, self.cfg)
         self._last_signal: Dict[str, Optional[schemas.Candidate]] = {}
         self._pending_entry_meta: Dict[str, Dict[str, Any]] = {}
-        self._tf_sec = self._tf_to_sec(self.cfg.timeframe)
+        self._tf_sec = self._tf_to_sec(self.cfg.system.timeframe)
         self._candidate_pool_limit = int(
             max(1, getattr(self.cfg, "candidate_pool_max_per_side", 4))
         )
@@ -1781,7 +1785,7 @@ class TaxBrainV29(IStrategy):
 
     def leverage(self, *args, **kwargs) -> float:
         """返回配置中的强制杠杆倍数，供 Freqtrade 下单使用。"""
-        return self.cfg.sizing.enforce_leverage
+        return self.cfg.trading.sizing.enforce_leverage
 
     def order_filled(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
         """处理开仓或平仓成交事件，更新风险账本、预约状态并触发持久化。"""

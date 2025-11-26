@@ -8,7 +8,7 @@ via configuration. Besides the defaults, :func:`apply_overrides` helps align a
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field, fields, replace
+from dataclasses import InitVar, dataclass, field, fields, replace, is_dataclass
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 from ..agents.exits.profiles import DEFAULT_PROFILE_VERSION, ExitProfile, resolve_profiles
@@ -98,6 +98,7 @@ class GatekeepingConfig:
 
     # 无债务时的宽松模式
     no_debt_percentile: int = 30    # 无债时，前 70% 均可入场
+    healthy_allow_score: float = 0.6  # closs=0 的健康币在债务期的最低准入分
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,74 @@ class SizingAlgoConfig:
 
     default_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"
     target_recovery: TargetRecoveryConfig = field(default_factory=TargetRecoveryConfig)
+
+
+@dataclass(frozen=True)
+class SystemConfig:
+    """System-level knobs related to runtime and backend wiring."""
+
+    global_backend_mode: str = "local"
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_namespace: str = "TB_V29:"
+    timeframe: str = "5m"
+    startup_candle_count: int = 210
+    dry_run_wallet_fallback: float = 1000.0
+
+
+@dataclass(frozen=True)
+class RiskConfig:
+    """Risk-related knobs including gatekeeping and decay."""
+
+    portfolio_cap_pct_base: float = 0.20
+    drawdown_threshold_pct: float = 0.15
+    gatekeeping: GatekeepingConfig = field(default_factory=GatekeepingConfig)
+    tax_rate_on_wins: float = 0.20
+    pain_decay_per_bar: float = 0.999
+    clear_debt_on_profitable_cycle: bool = True
+
+
+@dataclass(frozen=True)
+class TradingConfig:
+    """Trading-related sizing and treasury wiring."""
+
+    sizing: SizingConfig = field(default_factory=SizingConfig)
+    treasury: TreasuryConfig = field(default_factory=TreasuryConfig)
+
+
+# Helper factories must be defined before StrategyConfig default_factory binding
+def _copy_exit_profiles() -> Dict[str, ExitProfile]:
+    return dict(DEFAULT_EXIT_PROFILES)
+
+
+def _copy_strategies() -> Dict[str, StrategySpec]:
+    return dict(DEFAULT_STRATEGIES)
+
+
+def _copy_tiers() -> Dict[str, TierSpec]:
+    return dict(DEFAULT_TIERS)
+
+
+def _default_enabled_signals() -> Tuple[str, ...]:
+    return tuple(DEFAULT_ENABLED_SIGNALS)
+
+
+def _default_tier_routing() -> TierRouting:
+    return TierRouting(loss_tier_map=dict(DEFAULT_TIER_ROUTING_MAP))
+
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    """Strategy-level components such as signals, tiers and exits."""
+
+    enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)
+    exit_profile_version: str = DEFAULT_PROFILE_VERSION
+    exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)
+    default_exit_profile: Optional[str] = "ATRtrail_v1"
+    strategies: Dict[str, StrategySpec] = field(default_factory=_copy_strategies)
+    tiers: Dict[str, TierSpec] = field(default_factory=_copy_tiers)
+    tier_routing: TierRouting = field(default_factory=_default_tier_routing)
 
 @dataclass(frozen=True)
 class TierRouting:
@@ -248,27 +317,6 @@ DEFAULT_TIER_ROUTING_MAP: Dict[int, str] = {
     6: "T3p_ICU",
 }
 
-
-def _copy_exit_profiles() -> Dict[str, ExitProfile]:
-    return dict(DEFAULT_EXIT_PROFILES)
-
-
-def _copy_strategies() -> Dict[str, StrategySpec]:
-    return dict(DEFAULT_STRATEGIES)
-
-
-def _copy_tiers() -> Dict[str, TierSpec]:
-    return dict(DEFAULT_TIERS)
-
-
-def _default_enabled_signals() -> Tuple[str, ...]:
-    return tuple(DEFAULT_ENABLED_SIGNALS)
-
-
-def _default_tier_routing() -> TierRouting:
-    return TierRouting(loss_tier_map=dict(DEFAULT_TIER_ROUTING_MAP))
-
-
 @dataclass
 class V29Config:
     """V29 strategy parameters (signals/strategy/tier binding).
@@ -278,20 +326,13 @@ class V29Config:
     - Freqtrade `stake_amount` / backtest "Total stake amount" represent margin = nominal / leverage.
     """
 
-    timeframe: str = "5m"
-    startup_candle_count: int = 210
+    system: SystemConfig = field(default_factory=SystemConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    trading: TradingConfig = field(default_factory=TradingConfig)
+    strategy: StrategyConfig = field(default_factory=StrategyConfig)
     informative_timeframes: tuple[str, ...] = ()
 
-    # Portfolio caps & stress adjustments
-    portfolio_cap_pct_base: float = 0.20
-    drawdown_threshold_pct: float = 0.15
-    treasury: TreasuryConfig = field(default_factory=TreasuryConfig)
-    # Debt / decay
-    tax_rate_on_wins: float = 0.20
-    pain_decay_per_bar: float = 0.999
-    clear_debt_on_profitable_cycle: bool = True
     cycle_len_bars: int = 288
-    gatekeeping: GatekeepingConfig = field(default_factory=GatekeepingConfig)
     # Early lock / breakeven guards
     breakeven_lock_frac_of_tp: float = 0.5
     breakeven_lock_eps_atr_pct: float = 0.1
@@ -310,25 +351,8 @@ class V29Config:
     suppress_baseline_when_stressed: bool = True
 
     # Sizing and algorithm configuration
-    sizing: SizingConfig = field(default_factory=SizingConfig)
     sizing_algos: SizingAlgoConfig = field(default_factory=SizingAlgoConfig)
 
-    # Global backend (local vs redis)
-    global_backend_mode: str = "local"
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_namespace: str = "TB_V29:"
-
-    # Runtime
-    dry_run_wallet_fallback: float = 1000.0
-    enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)
-    exit_profile_version: str = DEFAULT_PROFILE_VERSION
-    exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)
-    default_exit_profile: Optional[str] = "ATRtrail_v1"
-    strategies: Dict[str, StrategySpec] = field(default_factory=_copy_strategies)
-    tiers: Dict[str, TierSpec] = field(default_factory=_copy_tiers)
-    tier_routing: TierRouting = field(default_factory=_default_tier_routing)
     strategy_recipes_input: InitVar[Optional[Tuple[StrategySpec, ...]]] = None
     _strategy_recipes: Tuple[StrategySpec, ...] = field(init=False, repr=False, default_factory=tuple)
 
@@ -340,46 +364,64 @@ class V29Config:
                 return cls(**{k: v for k, v in value.items() if k in {f.name for f in fields(cls)}})
             return cls()
 
-        self.treasury = _coerce_dc(getattr(self, "treasury", None), TreasuryConfig)
-        self.gatekeeping = _coerce_dc(getattr(self, "gatekeeping", None), GatekeepingConfig)
-        self.sizing = _coerce_dc(getattr(self, "sizing", None), SizingConfig)
+        self.system = _coerce_dc(getattr(self, "system", None), SystemConfig)
+
+        risk_cfg = _coerce_dc(getattr(self, "risk", None), RiskConfig)
+        risk_gate = _coerce_dc(getattr(risk_cfg, "gatekeeping", None), GatekeepingConfig)
+        self.risk = replace(risk_cfg, gatekeeping=risk_gate)
+
+        trading_cfg = _coerce_dc(getattr(self, "trading", None), TradingConfig)
+        t_sizing = _coerce_dc(getattr(trading_cfg, "sizing", None), SizingConfig)
+        t_treasury = _coerce_dc(getattr(trading_cfg, "treasury", None), TreasuryConfig)
+        self.trading = replace(trading_cfg, sizing=t_sizing, treasury=t_treasury)
+
         algos = _coerce_dc(getattr(self, "sizing_algos", None), SizingAlgoConfig)
         algos_tr = _coerce_dc(getattr(algos, "target_recovery", None), TargetRecoveryConfig)
         self.sizing_algos = replace(algos, target_recovery=algos_tr)
 
-        version = getattr(self, "exit_profile_version", DEFAULT_PROFILE_VERSION)
-        if not self.exit_profiles:
-            self.exit_profiles = resolve_profiles(version)
-        else:
-            self.exit_profiles = dict(self.exit_profiles or {})
-        self.strategies = dict(self.strategies or {})
-        self.tiers = dict(self.tiers or {})
+        strat_cfg = _coerce_dc(getattr(self, "strategy", None), StrategyConfig)
+        version = getattr(strat_cfg, "exit_profile_version", DEFAULT_PROFILE_VERSION)
+        exit_profiles = strat_cfg.exit_profiles or {}
+        if not exit_profiles:
+            exit_profiles = resolve_profiles(version)
+        strategy_profiles = dict(exit_profiles or {})
+        strategies = dict(getattr(strat_cfg, "strategies", {}) or {})
+        tiers = dict(getattr(strat_cfg, "tiers", {}) or {})
+
         if strategy_recipes_input:
             specs = tuple(strategy_recipes_input)
             self._strategy_recipes = specs
-            self.strategies = {spec.name: spec for spec in specs}
+            strategies = {spec.name: spec for spec in specs}
         elif self._strategy_recipes:
             specs = tuple(self._strategy_recipes)
             self._strategy_recipes = specs
-            if not self.strategies:
-                self.strategies = {spec.name: spec for spec in specs}
+            if not strategies:
+                strategies = {spec.name: spec for spec in specs}
         else:
-            specs = tuple(self.strategies.values())
+            specs = tuple(strategies.values())
             self._strategy_recipes = specs
 
-        routing = getattr(self, "tier_routing", None)
-        referenced_tiers = set(routing.loss_tier_map.values()) if (routing and routing.loss_tier_map) else set()
+        tier_routing = _coerce_dc(getattr(strat_cfg, "tier_routing", None), TierRouting)
+        referenced_tiers = set(tier_routing.loss_tier_map.values()) if (tier_routing and tier_routing.loss_tier_map) else set()
         for tier_name in referenced_tiers:
-            if tier_name not in self.tiers:
+            if tier_name not in tiers:
                 raise ValueError(f"TierRouting references unknown tier '{tier_name}'")
         for tier_name in referenced_tiers:
-            spec = self.tiers[tier_name]
+            spec = tiers[tier_name]
             if not spec.default_exit_profile:
                 raise ValueError(f"Tier '{tier_name}' must declare default_exit_profile for routing")
-            if spec.default_exit_profile not in self.exit_profiles:
+            if spec.default_exit_profile not in strategy_profiles:
                 raise ValueError(
                     f"Tier '{tier_name}' references unknown exit profile '{spec.default_exit_profile}'"
                 )
+
+        self.strategy = replace(
+            strat_cfg,
+            exit_profiles=strategy_profiles,
+            strategies=strategies,
+            tiers=tiers,
+            tier_routing=tier_routing,
+        )
 
     @property
     def strategy_recipes(self) -> Tuple[StrategySpec, ...]:
@@ -389,7 +431,12 @@ class V29Config:
     def strategy_recipes(self, recipes: Optional[Tuple[StrategySpec, ...]]) -> None:
         specs = tuple(recipes or ())
         self._strategy_recipes = specs
-        self.strategies = {spec.name: spec for spec in specs}
+        strategies = {spec.name: spec for spec in specs}
+        strat_cfg = getattr(self, "strategy", None)
+        if strat_cfg:
+            self.strategy = replace(strat_cfg, strategies=strategies)
+        else:  # pragma: no cover - defensive
+            self.strategy = StrategyConfig(strategies=strategies)
 
 
 def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]) -> V29Config:
@@ -405,29 +452,32 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         if isinstance(updates, Mapping):
             for k, v in updates.items():
                 if k in base:
-                    base[k] = v
+                    if is_dataclass(base[k]) and isinstance(v, Mapping):
+                        base[k] = _merge_dataclass(base[k], type(base[k]), v)
+                    else:
+                        base[k] = v
         return cls(**base)
 
-    legacy_map: Dict[str, tuple[str, str]] = {
+    legacy_map: Dict[str, tuple[str, str, str]] = {
         # sizing
-        "initial_size_mode": ("sizing", "initial_size_mode"),
-        "static_initial_nominal": ("sizing", "static_initial_nominal"),
-        "initial_size_equity_pct": ("sizing", "initial_size_equity_pct"),
-        "initial_max_nominal_per_trade": ("sizing", "initial_max_nominal_per_trade"),
-        "per_pair_max_nominal_static": ("sizing", "per_pair_max_nominal_static"),
-        "enforce_leverage": ("sizing", "enforce_leverage"),
+        "initial_size_mode": ("trading", "sizing", "initial_size_mode"),
+        "static_initial_nominal": ("trading", "sizing", "static_initial_nominal"),
+        "initial_size_equity_pct": ("trading", "sizing", "initial_size_equity_pct"),
+        "initial_max_nominal_per_trade": ("trading", "sizing", "initial_max_nominal_per_trade"),
+        "per_pair_max_nominal_static": ("trading", "sizing", "per_pair_max_nominal_static"),
+        "enforce_leverage": ("trading", "sizing", "enforce_leverage"),
         # treasury
-        "treasury_fast_split_pct": ("treasury", "treasury_fast_split_pct"),
-        "fast_topK_squads": ("treasury", "fast_topK_squads"),
-        "slow_universe_pct": ("treasury", "slow_universe_pct"),
-        "enable_fast_bucket": ("treasury", "enable_fast_bucket"),
-        "enable_slow_bucket": ("treasury", "enable_slow_bucket"),
-        "min_injection_nominal_fast": ("treasury", "min_injection_nominal_fast"),
-        "min_injection_nominal_slow": ("treasury", "min_injection_nominal_slow"),
-        "fast_mode": ("treasury", "fast_mode"),
-        "debt_pool_cap_pct": ("treasury", "debt_pool_cap_pct"),
-        "bucket_as_cap": ("treasury", "bucket_as_cap"),
-        "bucket_sum_mode": ("treasury", "bucket_sum_mode"),
+        "treasury_fast_split_pct": ("trading", "treasury", "treasury_fast_split_pct"),
+        "fast_topK_squads": ("trading", "treasury", "fast_topK_squads"),
+        "slow_universe_pct": ("trading", "treasury", "slow_universe_pct"),
+        "enable_fast_bucket": ("trading", "treasury", "enable_fast_bucket"),
+        "enable_slow_bucket": ("trading", "treasury", "enable_slow_bucket"),
+        "min_injection_nominal_fast": ("trading", "treasury", "min_injection_nominal_fast"),
+        "min_injection_nominal_slow": ("trading", "treasury", "min_injection_nominal_slow"),
+        "fast_mode": ("trading", "treasury", "fast_mode"),
+        "debt_pool_cap_pct": ("trading", "treasury", "debt_pool_cap_pct"),
+        "bucket_as_cap": ("trading", "treasury", "bucket_as_cap"),
+        "bucket_sum_mode": ("trading", "treasury", "bucket_sum_mode"),
     }
 
     target_recovery_map: Dict[str, str] = {
@@ -437,15 +487,48 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         "max_recovery_multiple": "max_recovery_multiple",
     }
 
+    # Normalize dotted keys into nested dicts
+    normalized: Dict[str, Any] = {}
     for key, value in strategy_params.items():
-        if key == "sizing":
-            cfg.sizing = _merge_dataclass(cfg.sizing, SizingConfig, value)
+        if "." not in key:
+            existing = normalized.get(key)
+            if isinstance(existing, Mapping) and isinstance(value, Mapping):
+                merged = dict(existing)
+                merged.update(value)
+                normalized[key] = merged
+            else:
+                normalized[key] = value
             continue
-        if key == "treasury":
-            cfg.treasury = _merge_dataclass(cfg.treasury, TreasuryConfig, value)
-            continue
-        if key == "gatekeeping":
-            cfg.gatekeeping = _merge_dataclass(cfg.gatekeeping, GatekeepingConfig, value)
+        root, *rest = key.split(".")
+        target = normalized.setdefault(root, {})
+        if not isinstance(target, dict):
+            target = {}
+            normalized[root] = target
+        cursor = target
+        for token in rest[:-1]:
+            nxt = cursor.get(token)
+            if not isinstance(nxt, dict):
+                nxt = {}
+            cursor[token] = nxt
+            cursor = nxt
+        cursor[rest[-1]] = value
+
+    system_fields = {f.name for f in fields(SystemConfig)}
+    risk_fields = {f.name for f in fields(RiskConfig)}
+    trading_fields = {f.name for f in fields(TradingConfig)}
+    strategy_fields = {f.name for f in fields(StrategyConfig)}
+
+    if "system" in normalized:
+        cfg.system = _merge_dataclass(cfg.system, SystemConfig, normalized["system"])
+    if "risk" in normalized:
+        cfg.risk = _merge_dataclass(cfg.risk, RiskConfig, normalized["risk"])
+    if "trading" in normalized:
+        cfg.trading = _merge_dataclass(cfg.trading, TradingConfig, normalized["trading"])
+    if "strategy" in normalized:
+        cfg.strategy = _merge_dataclass(cfg.strategy, StrategyConfig, normalized["strategy"])
+
+    for key, value in normalized.items():
+        if key in {"system", "risk", "trading", "strategy"}:
             continue
         if key == "sizing_algos":
             current = cfg.sizing_algos
@@ -463,11 +546,12 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
             cfg.sizing_algos = replace(cfg.sizing_algos, target_recovery=tr)
             continue
         if key in legacy_map:
-            container_name, field_name = legacy_map[key]
-            container = getattr(cfg, container_name)
+            group, container_name, field_name = legacy_map[key]
+            target_obj = getattr(cfg, group)
+            container_val = getattr(target_obj, container_name)
             cls = SizingConfig if container_name == "sizing" else TreasuryConfig
-            updated = _merge_dataclass(container, cls, {field_name: value})
-            setattr(cfg, container_name, updated)
+            updated = _merge_dataclass(container_val, cls, {field_name: value})
+            setattr(cfg, group, replace(target_obj, **{container_name: updated}))
             continue
         if key in target_recovery_map:
             tr = _merge_dataclass(
@@ -476,6 +560,19 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
                 {target_recovery_map[key]: value},
             )
             cfg.sizing_algos = replace(cfg.sizing_algos, target_recovery=tr)
+            continue
+        # Backward compat: allow flat risk/trading/strategy field overrides
+        if key in system_fields:
+            cfg.system = _merge_dataclass(cfg.system, SystemConfig, {key: value})
+            continue
+        if key in risk_fields:
+            cfg.risk = _merge_dataclass(cfg.risk, RiskConfig, {key: value})
+            continue
+        if key in trading_fields:
+            cfg.trading = _merge_dataclass(cfg.trading, TradingConfig, {key: value})
+            continue
+        if key in strategy_fields:
+            cfg.strategy = _merge_dataclass(cfg.strategy, StrategyConfig, {key: value})
             continue
         if hasattr(cfg, key):
             setattr(cfg, key, value)
@@ -486,7 +583,8 @@ def get_exit_profile(cfg: V29Config, name: str) -> ExitProfile:
     """Fetch a named exit profile, raising for unknown profiles."""
 
     try:
-        return cfg.exit_profiles[name]
+        profiles = getattr(getattr(cfg, "strategy", None), "exit_profiles", None) or {}
+        return profiles[name]
     except KeyError as exc:  # pragma: no cover - defensive
         raise ValueError(f"Unknown exit profile '{name}'") from exc
 
@@ -522,7 +620,8 @@ def get_tier_spec(cfg: V29Config, name: str) -> TierSpec:
     """Return a tier specification by name."""
 
     try:
-        return cfg.tiers[name]
+        tiers = getattr(getattr(cfg, "strategy", None), "tiers", None) or {}
+        return tiers[name]
     except KeyError as exc:
         raise ValueError(f"Unknown tier '{name}'") from exc
 
@@ -530,7 +629,8 @@ def get_tier_spec(cfg: V29Config, name: str) -> TierSpec:
 def get_tier_for_closs(cfg: V29Config, closs: int) -> TierSpec:
     """Resolve the tier spec that should serve a given closs value."""
 
-    tier_name = cfg.tier_routing.resolve(closs) if cfg.tier_routing else None
+    tier_routing = getattr(getattr(cfg, "strategy", None), "tier_routing", None)
+    tier_name = tier_routing.resolve(closs) if tier_routing else None
     if not tier_name:
         raise ValueError("Tier routing map is empty; cannot resolve tier for closs.")
     return get_tier_spec(cfg, tier_name)
@@ -544,6 +644,10 @@ __all__ = [
     "TierRouting",
     "SizingConfig",
     "TreasuryConfig",
+    "SystemConfig",
+    "RiskConfig",
+    "TradingConfig",
+    "StrategyConfig",
     "GatekeepingConfig",
     "TargetRecoveryConfig",
     "SizingAlgoConfig",

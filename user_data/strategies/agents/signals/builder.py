@@ -69,7 +69,13 @@ def collect_factor_requirements(
             ``cfg.enabled_signals`` are considered.
     """
 
-    enabled = {name for name in getattr(cfg, "enabled_signals", ()) or () if name}
+    enabled = {
+        name
+        for name in (
+            getattr(getattr(cfg, "strategy", None), "enabled_signals", getattr(cfg, "enabled_signals", ())) or ()
+        )
+        if name
+    }
 
     mapping: Dict[Optional[str], Set[str]] = defaultdict(set)
     mapping[None].update(DEFAULT_BAG_FACTORS)
@@ -182,7 +188,13 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
     if any(math.isnan(v) for v in base_cache[None].values()):
         return []
 
-    enabled = {name for name in getattr(cfg, "enabled_signals", ()) or () if name}
+    enabled = {
+        name
+        for name in (
+            getattr(getattr(cfg, "strategy", None), "enabled_signals", getattr(cfg, "enabled_signals", ())) or ()
+        )
+        if name
+    }
     risk = RiskEstimator(cfg)
     results: List[Candidate] = []
     for spec in REGISTRY.all():

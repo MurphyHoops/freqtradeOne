@@ -165,7 +165,7 @@ class SizerAgent:
     def _determine_bucket(self, ctx: SizingContext) -> Tuple[str, float]:
         """Resolve bucket selection and available bucket risk."""
 
-        treasury_cfg = self.cfg.treasury
+        treasury_cfg = getattr(getattr(self.cfg, "trading", None), "treasury", getattr(self.cfg, "treasury", None))
         fast = self.state.treasury.fast_alloc_risk.get(ctx.pair, 0.0) if treasury_cfg.enable_fast_bucket else 0.0
         slow = self.state.treasury.slow_alloc_risk.get(ctx.pair, 0.0) if treasury_cfg.enable_slow_bucket else 0.0
 
@@ -186,7 +186,8 @@ class SizerAgent:
     ) -> Tuple[float, float, float, Optional[float], float]:
         """Return leverage, price-space SL pct, ROI-space SL pct, atr_pct and atr_mult used."""
 
-        lev_cfg = float(self.cfg.sizing.enforce_leverage or 0.0)
+        sizing_cfg = getattr(getattr(self.cfg, "trading", None), "sizing", getattr(self.cfg, "sizing", None))
+        lev_cfg = float(sizing_cfg.enforce_leverage or 0.0) if sizing_cfg else 0.0
         lev_ctx = float(getattr(ctx, "leverage", 0.0) or 0.0)
         lev = lev_cfg or lev_ctx or 1.0
 
@@ -205,7 +206,7 @@ class SizerAgent:
         exit_profile_name = (
             ctx.exit_profile
             or getattr(tier_pol, "default_exit_profile", None)
-            or getattr(self.cfg, "default_exit_profile", None)
+            or getattr(getattr(self.cfg, "strategy", None), "default_exit_profile", getattr(self.cfg, "default_exit_profile", None))
         )
         atr_mul_sl = 1.0
         try:
@@ -227,7 +228,7 @@ class SizerAgent:
     ) -> Tuple[float, float, float, float]:
         """Compute base nominal size ignoring recovery/buckets/caps."""
 
-        sizing_cfg = self.cfg.sizing
+        sizing_cfg = getattr(getattr(self.cfg, "trading", None), "sizing", getattr(self.cfg, "sizing", None))
         static_nominal = max(0.0, float(sizing_cfg.static_initial_nominal or 0.0))
         dynamic_nominal = max(0.0, equity * float(sizing_cfg.initial_size_equity_pct or 0.0))
         mode = str(getattr(sizing_cfg, "initial_size_mode", "hybrid")).lower()
@@ -280,7 +281,8 @@ class SizerAgent:
         risk_room = self._available_risk_room(ctx.pair, equity, tier_pol)
         risk_room_nominal = risk_room / sl_price_pct if (risk_room > 0 and sl_price_pct > 0) else 0.0
 
-        per_pair_cap_static = float(self.cfg.sizing.per_pair_max_nominal_static or 0.0)
+        sizing_cfg = getattr(getattr(self.cfg, "trading", None), "sizing", getattr(self.cfg, "sizing", None))
+        per_pair_cap_static = float(sizing_cfg.per_pair_max_nominal_static or 0.0) if sizing_cfg else 0.0
         used_stake = self.state.pair_stake_open.get(ctx.pair, 0.0)
         per_pair_nominal_room = float("inf")
         if per_pair_cap_static > 0:
@@ -291,7 +293,8 @@ class SizerAgent:
         portfolio_nominal_room = max(0.0, portfolio_cap_total - total_open_nominal)
 
         bucket_cap_nominal = float("inf")
-        if self.cfg.treasury.bucket_as_cap and bucket_risk > 0 and sl_price_pct > 0:
+        treasury_cfg = getattr(getattr(self.cfg, "trading", None), "treasury", getattr(self.cfg, "treasury", None))
+        if treasury_cfg and treasury_cfg.bucket_as_cap and bucket_risk > 0 and sl_price_pct > 0:
             bucket_cap_nominal = bucket_risk / sl_price_pct
 
         proposed_nominal_cap = float("inf")
@@ -352,10 +355,11 @@ class SizerAgent:
 
     def _baseline_risk(self, equity: float, tier_pol: TierPolicy) -> float:
         base = tier_pol.k_mult_base_pct * equity
+        risk_cfg = getattr(self.cfg, "risk", self.cfg)
         if not self.cfg.suppress_baseline_when_stressed or equity <= 0:
             return base
         drawdown = self.state.debt_pool / equity
-        if drawdown > self.cfg.drawdown_threshold_pct:
+        if drawdown > risk_cfg.drawdown_threshold_pct:
             return 0.0
         return base
 

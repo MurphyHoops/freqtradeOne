@@ -107,9 +107,14 @@ def test_sizer_suppresses_baseline_when_stressed():
     """Baseline risk suppressed under stress should skip sizing."""
 
     cfg = V29Config()
-    cfg.sizing = replace(cfg.sizing, enforce_leverage=1.0)
+    cfg.trading = replace(cfg.trading, sizing=replace(cfg.trading.sizing, enforce_leverage=1.0))
     pair_state = DummyPairState()
-    state = DummyState(debt_pool=500.0, cap_pct=cfg.portfolio_cap_pct_base, total_open=0.0, pair_state=pair_state)
+    state = DummyState(
+        debt_pool=500.0,
+        cap_pct=cfg.risk.portfolio_cap_pct_base,
+        total_open=0.0,
+        pair_state=pair_state,
+    )
     reservation = DummyReservation()
     equity = DummyEquity(1000.0)
     policy = build_policy()
@@ -127,13 +132,16 @@ def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
     """BASE_ONLY should honor base nominal even if baseline risk is suppressed."""
 
     cfg = V29Config()
-    cfg.sizing = replace(
-        cfg.sizing,
-        enforce_leverage=1.0,
-        static_initial_nominal=6.0,
-        initial_size_equity_pct=0.0,
-        initial_max_nominal_per_trade=1_000_000.0,
-        per_pair_max_nominal_static=1_000_000.0,
+    cfg.trading = replace(
+        cfg.trading,
+        sizing=replace(
+            cfg.trading.sizing,
+            enforce_leverage=1.0,
+            static_initial_nominal=6.0,
+            initial_size_equity_pct=0.0,
+            initial_max_nominal_per_trade=1_000_000.0,
+            per_pair_max_nominal_static=1_000_000.0,
+        ),
     )
     pair_state = DummyPairState()
     state = DummyState(debt_pool=500.0, cap_pct=1.0, total_open=0.0, pair_state=pair_state)
@@ -162,13 +170,16 @@ def test_sizer_target_recovery_uses_local_loss():
 
     cfg = V29Config()
     cfg.suppress_baseline_when_stressed = False
-    cfg.sizing = replace(
-        cfg.sizing,
-        enforce_leverage=1.0,
-        static_initial_nominal=50.0,
-        initial_size_equity_pct=0.0,
-        initial_max_nominal_per_trade=1_000_000.0,
-        per_pair_max_nominal_static=1_000_000.0,
+    cfg.trading = replace(
+        cfg.trading,
+        sizing=replace(
+            cfg.trading.sizing,
+            enforce_leverage=1.0,
+            static_initial_nominal=50.0,
+            initial_size_equity_pct=0.0,
+            initial_max_nominal_per_trade=1_000_000.0,
+            per_pair_max_nominal_static=1_000_000.0,
+        ),
     )
     cfg.sizing_algos = replace(
         cfg.sizing_algos,
@@ -194,13 +205,16 @@ def test_sizer_respects_caps_and_minmax():
     """Caps and exchange constraints should clamp the nominal target."""
 
     cfg = V29Config()
-    cfg.sizing = replace(
-        cfg.sizing,
-        enforce_leverage=1.0,
-        static_initial_nominal=50.0,
-        initial_size_equity_pct=0.0,
-        initial_max_nominal_per_trade=1000.0,
-        per_pair_max_nominal_static=800.0,
+    cfg.trading = replace(
+        cfg.trading,
+        sizing=replace(
+            cfg.trading.sizing,
+            enforce_leverage=1.0,
+            static_initial_nominal=50.0,
+            initial_size_equity_pct=0.0,
+            initial_max_nominal_per_trade=1000.0,
+            per_pair_max_nominal_static=800.0,
+        ),
     )
     cfg.sizing_algos = replace(
         cfg.sizing_algos,
@@ -232,12 +246,15 @@ def test_sizer_caps_with_proposed_stake():
     """Freqtrade proposed stake should act as a hard cap."""
 
     cfg = V29Config()
-    cfg.sizing = replace(
-        cfg.sizing,
-        enforce_leverage=1.0,
-        initial_size_equity_pct=0.0,
-        initial_max_nominal_per_trade=1_000_000.0,
-        per_pair_max_nominal_static=1_000_000.0,
+    cfg.trading = replace(
+        cfg.trading,
+        sizing=replace(
+            cfg.trading.sizing,
+            enforce_leverage=1.0,
+            initial_size_equity_pct=0.0,
+            initial_max_nominal_per_trade=1_000_000.0,
+            per_pair_max_nominal_static=1_000_000.0,
+        ),
     )
     cfg.sizing_algos = replace(
         cfg.sizing_algos,

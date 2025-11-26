@@ -93,7 +93,7 @@ class CycleAgent:
         ) >= int(self.cfg.cycle_len_bars)
         cycle_cleared = False
         if cycle_completed:
-            if pnl_since_cycle_start >= 0 and bool(self.cfg.clear_debt_on_profitable_cycle):
+            if pnl_since_cycle_start >= 0 and bool(getattr(getattr(self.cfg, "risk", None), "clear_debt_on_profitable_cycle", getattr(self.cfg, "clear_debt_on_profitable_cycle", False))):
                 cycle_cleared = True
                 self.state.debt_pool = 0.0
                 for pst in self.state.per_pair.values():
@@ -201,7 +201,8 @@ class CycleAgent:
             for meta in pst.active_trades.values():
                 if meta.icu_bars_left is not None and meta.icu_bars_left > 0:
                     meta.icu_bars_left -= 1
-        self.state.debt_pool *= self.cfg.pain_decay_per_bar
+        risk_cfg = getattr(self.cfg, "risk", self.cfg)
+        self.state.debt_pool *= risk_cfg.pain_decay_per_bar
         self.reservation.tick_ttl()
 
     def _build_snapshot(self) -> dict:

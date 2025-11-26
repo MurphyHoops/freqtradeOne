@@ -113,6 +113,9 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     """
 
     tr_cfg = cfg.sizing_algos.target_recovery
+    trading_cfg = getattr(cfg, "trading", cfg)
+    treasury_cfg = getattr(trading_cfg, "treasury", getattr(cfg, "treasury", None))
+    sizing_cfg = getattr(trading_cfg, "sizing", getattr(cfg, "sizing", None))
     sl_price_pct = inputs.sl_price_pct
     tier = inputs.tier
     pst = inputs.pst
@@ -123,13 +126,13 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     base_risk = inputs.base_risk
     bucket_for_recovery = inputs.bucket_risk if tr_cfg.include_bucket_in_recovery else 0.0
     debt_pool_component = 0.0
-    if tr_cfg.include_debt_pool:
-        if cfg.treasury.debt_pool_cap_pct > 0:
-            debt_pool_component = min(inputs.state.debt_pool, cfg.treasury.debt_pool_cap_pct * inputs.equity)
+    if tr_cfg.include_debt_pool and treasury_cfg:
+        if treasury_cfg.debt_pool_cap_pct > 0:
+            debt_pool_component = min(inputs.state.debt_pool, treasury_cfg.debt_pool_cap_pct * inputs.equity)
         else:
             debt_pool_component = inputs.state.debt_pool
 
-    B0 = max(cfg.sizing.static_initial_nominal, 0.0)
+    B0 = max(sizing_cfg.static_initial_nominal, 0.0) if sizing_cfg else 0.0
     L_total = pst.local_loss * tier.recovery_factor
     rec_bucket = bucket_for_recovery + debt_pool_component
 
@@ -139,7 +142,8 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     if tr_cfg.use_atr_based and inputs.atr_pct_used is not None and inputs.atr_pct_used > 0:
         # Anchor recovery sizing to the TP ATR distance when ATR-based; risk remains SL-anchored.
         exit_profile_name = ctx.exit_profile or getattr(tier, "default_exit_profile", None)
-        profile = cfg.exit_profiles.get(exit_profile_name) if exit_profile_name else None
+        profiles = getattr(getattr(cfg, "strategy", None), "exit_profiles", getattr(cfg, "exit_profiles", {})) or {}
+        profile = profiles.get(exit_profile_name) if exit_profile_name else None
         atr_mul_tp = getattr(profile, "atr_mul_tp", None) if profile else None
         if atr_mul_tp is not None and atr_mul_tp > 0:
             tp_price_pct = inputs.atr_pct_used * atr_mul_tp

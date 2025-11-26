@@ -4,6 +4,7 @@
 """
 
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -176,8 +177,7 @@ def test_cycle_finalize_clears_debt_on_profitable_cycle():
 
     cfg = V29Config()
     cfg.cycle_len_bars = 3
-    cfg.clear_debt_on_profitable_cycle = True
-    cfg.pain_decay_per_bar = 1.0
+    cfg.risk = replace(cfg.risk, clear_debt_on_profitable_cycle=True, pain_decay_per_bar=1.0)
     state = DummyState(debt_pool=100.0, cap_pct=0.5, total_open=0.0, pair_state=DummyPairState(local_loss=50.0))
     reservation = ReservationStub()
     treasury = TreasuryStub({"PAIR/USDT": 20.0}, {"PAIR/USDT": 10.0})

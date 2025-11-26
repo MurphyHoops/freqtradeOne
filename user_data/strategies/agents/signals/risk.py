@@ -31,14 +31,16 @@ class RiskEstimator:
 
     def __init__(self, cfg: V29Config) -> None:
         self._cfg = cfg
-        self._profiles: Dict[str, ExitProfile] = dict(getattr(cfg, "exit_profiles", {}) or {})
+        self._profiles: Dict[str, ExitProfile] = dict(
+            getattr(getattr(cfg, "strategy", None), "exit_profiles", getattr(cfg, "exit_profiles", {})) or {}
+        )
         self._entry_to_recipe: Dict[str, StrategyRecipe] = {}
         for recipe in getattr(cfg, "strategy_recipes", ()) or ():
             if not isinstance(recipe, StrategyRecipe):
                 continue
             for entry in recipe.entries:
                 self._entry_to_recipe[entry] = recipe
-        default_name = getattr(cfg, "default_exit_profile", None)
+        default_name = getattr(getattr(cfg, "strategy", None), "default_exit_profile", getattr(cfg, "default_exit_profile", None))
         if not default_name or default_name not in self._profiles:
             default_name = next(iter(self._profiles.keys()), None)
         self._default_exit_profile = default_name

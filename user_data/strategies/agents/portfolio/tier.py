@@ -73,8 +73,9 @@ class TierManager:
 
     def __init__(self, cfg: V29Config) -> None:
         self._cfg = cfg
-        self._routing = getattr(cfg, "tier_routing", None)
-        tiers = getattr(cfg, "tiers", {}) or {}
+        strat_cfg = getattr(cfg, "strategy", cfg)
+        self._routing = getattr(strat_cfg, "tier_routing", getattr(cfg, "tier_routing", None))
+        tiers = getattr(strat_cfg, "tiers", getattr(cfg, "tiers", {})) or {}
         if not tiers:
             raise ValueError("Tier configuration is empty; supply at least one TierSpec.")
         self._policies: dict[str, TierPolicy] = {name: self._from_spec(spec) for name, spec in tiers.items()}

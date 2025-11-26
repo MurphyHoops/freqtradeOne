@@ -69,7 +69,7 @@ def test_exit_facade_resolve_trade_plan_default_profile():
     profile_name, profile_def, plan = facade.resolve_trade_plan("BTC/USDT", trade, None)
 
     assert profile_name == tier_mgr.default_profile_for_closs(0)
-    assert profile_def is cfg.exit_profiles[profile_name]
+    assert profile_def is cfg.strategy.exit_profiles[profile_name]
     assert plan is not None
     assert plan.sl_pct > 0
     assert pytest.approx(plan.atr_pct) == plan.atr_pct  # sanity: float convertible
@@ -77,8 +77,17 @@ def test_exit_facade_resolve_trade_plan_default_profile():
 
 def test_exit_facade_respects_tier_default_profile(tmp_path):
     cfg = V29Config()
-    cfg.exit_profiles["ALT_PROFILE"] = replace(cfg.exit_profiles["ATRtrail_v1"])
-    cfg.tiers["T12_recovery"] = replace(cfg.tiers["T12_recovery"], default_exit_profile="ALT_PROFILE")
+    cfg.strategy = replace(
+        cfg.strategy,
+        exit_profiles={
+            **cfg.strategy.exit_profiles,
+            "ALT_PROFILE": replace(cfg.strategy.exit_profiles["ATRtrail_v1"]),
+        },
+        tiers={
+            **cfg.strategy.tiers,
+            "T12_recovery": replace(cfg.strategy.tiers["T12_recovery"], default_exit_profile="ALT_PROFILE"),
+        },
+    )
     tier_mgr = TierManager(cfg)
     facade = ExitFacade(cfg, tier_mgr)
 
@@ -91,7 +100,7 @@ def test_exit_facade_respects_tier_default_profile(tmp_path):
     profile_name, profile_def, plan = facade.resolve_trade_plan("BTC/USDT", trade, None)
 
     assert profile_name == "ALT_PROFILE"
-    assert profile_def is cfg.exit_profiles["ALT_PROFILE"]
+    assert profile_def is cfg.strategy.exit_profiles["ALT_PROFILE"]
     assert plan is not None and plan.profile_name == profile_name
 
 

@@ -1684,7 +1684,7 @@ class TaxBrainV29(IStrategy):
             reason = gate_result.get("reason", "rejected")
             debt_val = gate_result.get("debt")
             closs_val = gate_result.get("closs", pst.closs)
-            gcfg = getattr(self.cfg, "gatekeeping", None)
+            gcfg = getattr(getattr(self.cfg, "risk", None), "gatekeeping", None)
             detail_parts: list[str] = []
             if th_slow is not None:
                 detail_parts.append(f"score {score:.4f} < {th_slow:.4f}")

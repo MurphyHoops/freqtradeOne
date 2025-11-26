@@ -220,6 +220,27 @@ pytest tests/agents -q
 - [Freqtrade Strategy Documentation](https://www.freqtrade.io/en/latest/strategy-customization/)
 - AGENT.MD：原始多代理架构设计说明（本仓库中的 docstring 与 README 以此为准绳）。
 
+## Cluster Deployment
+
+- **Build image with Redis client**: ensure your Dockerfile installs `redis` (e.g., `pip install redis`), then `docker build -t taxbrain:v29 .`.
+- **Enable Redis backend**: set in `config.json` → `system.global_backend_mode: "redis"` and configure `redis_host/redis_port/redis_db/redis_namespace`.
+- **docker-compose example**:
+  ```yaml
+  version: "3.8"
+  services:
+    redis:
+      image: redis:7
+      ports: ["6379:6379"]
+    taxbrain:
+      image: taxbrain:v29
+      depends_on: [redis]
+      volumes: ["./user_data:/freqtrade/user_data"]
+      environment:
+        - FT_STRATEGY=TaxBrainV29
+        - FT_STRATEGY_PARAMS_FILE=/freqtrade/user_data/config.json
+  ```
+- **Launch**: `docker-compose up -d`. All workers share debt/risk state via Redis keys for consistent gatekeeping and caps across instances.
+
 
 ## License & Commercial Use
 

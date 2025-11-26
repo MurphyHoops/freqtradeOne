@@ -1,0 +1,111 @@
+{
+  "_comment": "Template for TaxBrain V29 nested configuration. Values shown are defaults; adjust per environment.",
+  "system": {
+    "_comment": "Runtime/backend wiring",
+    "global_backend_mode": "local",
+    "redis_host": "localhost",
+    "redis_port": 6379,
+    "redis_db": 0,
+    "redis_namespace": "TB_V29:",
+    "timeframe": "5m",
+    "startup_candle_count": 210,
+    "dry_run_wallet_fallback": 1000.0
+  },
+  "risk": {
+    "_comment": "Global risk controls",
+    "portfolio_cap_pct_base": 0.20,
+    "drawdown_threshold_pct": 0.15,
+    "tax_rate_on_wins": 0.20,
+    "pain_decay_per_bar": 0.999,
+    "clear_debt_on_profitable_cycle": true,
+    "gatekeeping": {
+      "_comment": "Tiered debt gatekeeping thresholds",
+      "enabled": true,
+      "fast_percentile": 90,
+      "fast_max_closs": 0,
+      "slow_percentile": 60,
+      "slow_max_closs": 1,
+      "no_debt_percentile": 30,
+      "healthy_allow_score": 0.6
+    }
+  },
+  "trading": {
+    "_comment": "Sizing defaults and treasury splits",
+    "sizing": {
+      "initial_size_mode": "static",
+      "static_initial_nominal": 6.0,
+      "initial_size_equity_pct": 0.0,
+      "initial_max_nominal_per_trade": 3000.0,
+      "per_pair_max_nominal_static": 3000.0,
+      "enforce_leverage": 10.0
+    },
+    "treasury": {
+      "enable_fast_bucket": true,
+      "enable_slow_bucket": true,
+      "treasury_fast_split_pct": 0.4,
+      "fast_topK_squads": 10,
+      "slow_universe_pct": 1.0,
+      "min_injection_nominal_fast": 30.0,
+      "min_injection_nominal_slow": 7.0,
+      "fast_mode": "per_squad",
+      "debt_pool_cap_pct": 0.15,
+      "bucket_as_cap": true,
+      "bucket_sum_mode": "sum"
+    }
+  },
+  "strategy": {
+    "_comment": "Signals, tiers, exits",
+    "enabled_signals": [
+      "newbars_breakout_long_5m",
+      "newbars_breakdown_short_5m",
+      "newbars_breakout_long_30m",
+      "newbars_breakdown_short_30m",
+      "pullback_long",
+      "trend_short",
+      "mean_rev_long"
+    ],
+    "exit_profile_version": "inline_v1",
+    "default_exit_profile": "ATRtrail_v1",
+    "exit_profiles": {
+      "_comment": "Define or override ExitProfiles dynamically",
+      "ATRtrail_v1": {
+        "atr_mul_sl": 8.0,
+        "atr_mul_tp": 2.0,
+        "floor_sl_pct": 1e-12
+      },
+      "MyDynamicProfile": {
+        "_comment": "Example custom profile supplied via config",
+        "atr_mul_sl": 2.5,
+        "atr_mul_tp": 4.0,
+        "breakeven_lock_frac_of_tp": 0.25,
+        "trail_mode": "percent",
+        "trail_pct": 0.3
+      }
+    },
+    "strategies": {},
+    "tiers": {},
+    "tier_routing": {}
+  },
+  "informative_timeframes": [],
+  "cycle_len_bars": 288,
+  "breakeven_lock_frac_of_tp": 0.5,
+  "breakeven_lock_eps_atr_pct": 0.1,
+  "force_finalize_mult": 1.5,
+  "reservation_ttl_bars": 6,
+  "ema_fast": 50,
+  "ema_slow": 200,
+  "rsi_len": 14,
+  "atr_len": 20,
+  "adx_len": 20,
+  "suppress_baseline_when_stressed": true,
+  "sizing_algos": {
+    "_comment": "Shared sizing algo parameters",
+    "default_algo": "BASELINE",
+    "target_recovery": {
+      "use_atr_based": true,
+      "include_bucket_in_recovery": true,
+      "include_debt_pool": false,
+      "max_recovery_multiple": 10900.0
+    }
+  }
+}

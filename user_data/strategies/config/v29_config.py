@@ -11,18 +11,21 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass, field, fields, replace, is_dataclass
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
-from ..agents.exits.profiles import DEFAULT_PROFILE_VERSION, ExitProfile, resolve_profiles
+from ..agents.exits.profiles import ExitProfile
+
+# Inline default profile version tag (metadata only for inline defaults).
+DEFAULT_PROFILE_VERSION = "inline_v1"
 
 
 @dataclass(frozen=True)
 class StrategySpec:
     """Bind a set of entry signals to an exit profile + policy thresholds."""
 
-    name: str
-    entries: Tuple[str, ...]
-    exit_profile: str
-    min_rr: float = 0.0
-    min_edge: float = 0.0
+    name: str  # Recipe name; used for routing to tiers.
+    entries: Tuple[str, ...]  # Signal names grouped under this recipe.
+    exit_profile: str  # Exit profile to use when this recipe is selected.
+    min_rr: float = 0.0  # Minimum reward/risk threshold; raise to demand higher RR.
+    min_edge: float = 0.0  # Minimum expected edge; raise to filter weaker signals.
 
 
 # Backwards compatibility alias for older imports
@@ -33,129 +36,129 @@ StrategyRecipe = StrategySpec
 class TierSpec:
     """Declarative definition of a tier and its guard-rails."""
 
-    name: str
-    allowed_recipes: Tuple[str, ...]
-    allowed_entries: Tuple[str, ...] = tuple()
-    allowed_squads: Tuple[str, ...] = tuple()
-    min_raw_score: float = 0.0
-    min_rr_ratio: float = 1.0
-    min_edge: float = 0.0
-    sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"
-    k_mult_base_pct: float = 1.0
-    recovery_factor: float = 1.0
-    cooldown_bars: int = 0
-    cooldown_bars_after_win: int = 0
-    per_pair_risk_cap_pct: float = 0.02
-    max_stake_notional_pct: float = 0.10
-    icu_force_exit_bars: int = 0
-    priority: int = 100
-    default_exit_profile: Optional[str] = None
-    single_position_only: bool = False  # 新增：有仓位时是否禁止该 tier 再开新仓
+    name: str  # Tier identifier; referenced by routing map.
+    allowed_recipes: Tuple[str, ...]  # Whitelisted strategy recipes.
+    allowed_entries: Tuple[str, ...] = tuple()  # Optional whitelist of entry signals.
+    allowed_squads: Tuple[str, ...] = tuple()  # Optional whitelist of squads/teams.
+    min_raw_score: float = 0.0  # Minimum raw signal score; raise to be pickier.
+    min_rr_ratio: float = 1.0  # Minimum reward/risk ratio; >1 enforces positive skew.
+    min_edge: float = 0.0  # Minimum expected edge; raise to reject thin edges.
+    sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"  # Sizing policy used for the tier.
+    k_mult_base_pct: float = 1.0  # Baseline stake multiplier vs equity; larger = bigger base size.
+    recovery_factor: float = 1.0  # Multiplier applied to local_loss for recovery sizing; larger = more aggressive recovery.
+    cooldown_bars: int = 0  # Bars to pause after any trade in this tier; raise to slow entries.
+    cooldown_bars_after_win: int = 0  # Bars to pause after a win; raise to cool off.
+    per_pair_risk_cap_pct: float = 0.02  # Max risk per pair as fraction of equity; lower = safer.
+    max_stake_notional_pct: float = 0.10  # Max nominal exposure per pair; lower caps position size.
+    icu_force_exit_bars: int = 0  # Force-exit timer in bars; >0 triggers timed exits.
+    priority: int = 100  # Higher priority tiers are considered first when resolving.
+    default_exit_profile: Optional[str] = None  # Default exit profile for this tier when none provided.
+    single_position_only: bool = False  # If True, disallow multiple concurrent positions in this tier.
 
 
 @dataclass(frozen=True)
 class SizingConfig:
     """Aggregate all sizing knobs related to initial position sizing."""
 
-    initial_size_mode: Literal["static", "dynamic", "hybrid"] = "static"
-    static_initial_nominal: float = 6.0
-    initial_size_equity_pct: float = 0.0
-    initial_max_nominal_per_trade: float = 3000.0  # hard cap per trade, not a default stake size
-    per_pair_max_nominal_static: float = 3000.0
-    enforce_leverage: float = 10.0
+    initial_size_mode: Literal["static", "dynamic", "hybrid"] = "static"  # How base nominal is computed; hybrid = max(static, dynamic).
+    static_initial_nominal: float = 6.0  # Static nominal seed per trade; raise for larger starting size.
+    initial_size_equity_pct: float = 0.0  # Dynamic seed as % of equity; raise to scale with account size.
+    initial_max_nominal_per_trade: float = 3000.0  # Hard ceiling per trade nominal; lower to clamp single-trade exposure.
+    per_pair_max_nominal_static: float = 3000.0  # Static cap of open nominal per pair; lower to limit pair concentration.
+    enforce_leverage: float = 10.0  # Fixed leverage applied; lower to reduce margin, higher increases exposure.
 
 
 @dataclass(frozen=True)
 class TreasuryConfig:
     """Fast/slow bucket controls and caps for treasury allocations."""
 
-    enable_fast_bucket: bool = True
-    enable_slow_bucket: bool = True
-    treasury_fast_split_pct: float = 0.4
-    fast_topK_squads: int = 10
-    slow_universe_pct: float = 1.0
-    min_injection_nominal_fast: float = 30.0
-    min_injection_nominal_slow: float = 7.0
-    fast_mode: Literal["per_squad", "top_pairs"] = "per_squad"
-    debt_pool_cap_pct: float = 0.15
-    bucket_as_cap: bool = True
-    bucket_sum_mode: Literal["sum", "max"] = "sum"
+    enable_fast_bucket: bool = True  # Master switch for fast bucket; disable to route all to slow.
+    enable_slow_bucket: bool = True  # Master switch for slow bucket; disable to force fast-only.
+    treasury_fast_split_pct: float = 0.4  # Fraction of debt budget allocated to fast; raise for aggressive recovery.
+    fast_topK_squads: int = 10  # Max squads/pairs admitted to fast; lower to focus only best.
+    slow_universe_pct: float = 1.0  # Fraction of ranked list admitted to slow; lower to be selective.
+    min_injection_nominal_fast: float = 30.0  # Minimum nominal per fast injection; raise to avoid dust.
+    min_injection_nominal_slow: float = 7.0  # Minimum nominal per slow injection; raise to avoid tiny entries.
+    fast_mode: Literal["per_squad", "top_pairs"] = "per_squad"  # Selection mode for fast bucket.
+    debt_pool_cap_pct: float = 0.15  # Max portion of equity that can be used to repay debt; lower to cap recovery aggression.
+    bucket_as_cap: bool = True  # If True, bucket allocation acts as a hard cap on sizing.
+    bucket_sum_mode: Literal["sum", "max"] = "sum"  # Combine fast/slow budgets by sum or max when both present.
 
 
 @dataclass(frozen=True)
 class GatekeepingConfig:
     """Global debt gatekeeping parameters."""
 
-    enabled: bool = True
+    enabled: bool = True  # Master toggle for gatekeeping; disable to bypass checks.
 
     # Fast Bucket 准入条件 (激进回血)
-    fast_percentile: int = 90       # 必须达到前 10% 高分
-    fast_max_closs: int = 0         # 仅允许 closs=0 (健康币种)
+    fast_percentile: int = 90       # Percentile threshold for fast admission; higher = stricter (top 10% by default).
+    fast_max_closs: int = 0         # Max closs allowed into fast; lower blocks damaged pairs.
 
     # Slow Bucket 准入条件 (稳健积累)
-    slow_percentile: int = 60       # 必须达到前 40% 高分
-    slow_max_closs: int = 1         # 允许 closs 0 或 1
+    slow_percentile: int = 60       # Percentile threshold for slow admission; higher = stricter (top 40% by default).
+    slow_max_closs: int = 1         # Max closs allowed into slow; raise to admit more impaired pairs.
 
     # 无债务时的宽松模式
-    no_debt_percentile: int = 30    # 无债时，前 70% 均可入场
-    healthy_allow_score: float = 0.6  # closs=0 的健康币在债务期的最低准入分
+    no_debt_percentile: int = 30    # Percentile threshold when no debt; lower = more permissive.
+    healthy_allow_score: float = 0.6  # Healthy coin privilege score; closs=0 above this can enter slow during debt. Lower -> more entries.
 
 
 @dataclass(frozen=True)
 class TargetRecoveryConfig:
     """Parameters for ATR-based TARGET_RECOVERY sizing."""
 
-    use_atr_based: bool = True
-    include_bucket_in_recovery: bool = True
-    include_debt_pool: bool = False
-    max_recovery_multiple: float = 10900.0
+    use_atr_based: bool = True  # If True, recovery sizing uses ATR-based TP distance; False falls back to SL distance.
+    include_bucket_in_recovery: bool = True  # Include bucket debt in recovery sizing; raise/lower to control aggression.
+    include_debt_pool: bool = False  # Include global debt pool in recovery sizing; True increases recovery pressure.
+    max_recovery_multiple: float = 10900.0  # Cap on recovery multiplier vs base size; lower to avoid runaway recovery.
 
 
 @dataclass(frozen=True)
 class SizingAlgoConfig:
     """Algorithm selection and parameters for sizing."""
 
-    default_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"
-    target_recovery: TargetRecoveryConfig = field(default_factory=TargetRecoveryConfig)
+    default_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"  # Default sizing algorithm.
+    target_recovery: TargetRecoveryConfig = field(default_factory=TargetRecoveryConfig)  # Tunables for TARGET_RECOVERY.
 
 
 @dataclass(frozen=True)
 class SystemConfig:
     """System-level knobs related to runtime and backend wiring."""
 
-    global_backend_mode: str = "local"
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_namespace: str = "TB_V29:"
-    timeframe: str = "5m"
-    startup_candle_count: int = 210
-    dry_run_wallet_fallback: float = 1000.0
+    global_backend_mode: str = "local"  # Backend type for shared state: "local" or "redis"; redis enables cross-worker sharing.
+    redis_host: str = "localhost"  # Redis host when using redis backend.
+    redis_port: int = 6379  # Redis port; change if your redis listens elsewhere.
+    redis_db: int = 0  # Redis DB index; isolates namespaces.
+    redis_namespace: str = "TB_V29:"  # Redis key prefix; change to avoid collisions.
+    timeframe: str = "5m"  # Primary strategy timeframe; higher values slow trading cadence.
+    startup_candle_count: int = 210  # Warmup candles required; raise if indicators need longer history.
+    dry_run_wallet_fallback: float = 1000.0  # Equity seed for backtests/dry-run when exchange balance unavailable.
 
 
 @dataclass(frozen=True)
 class RiskConfig:
     """Risk-related knobs including gatekeeping and decay."""
 
-    portfolio_cap_pct_base: float = 0.20
-    drawdown_threshold_pct: float = 0.15
-    gatekeeping: GatekeepingConfig = field(default_factory=GatekeepingConfig)
-    tax_rate_on_wins: float = 0.20
-    pain_decay_per_bar: float = 0.999
-    clear_debt_on_profitable_cycle: bool = True
+    portfolio_cap_pct_base: float = 0.20  # Base portfolio VaR cap (% of equity); raise to allow more open risk.
+    drawdown_threshold_pct: float = 0.15  # Debt/equity ratio that halves CAP; lower to throttle sooner.
+    gatekeeping: GatekeepingConfig = field(default_factory=GatekeepingConfig)  # Tiered gatekeeping parameters.
+    tax_rate_on_wins: float = 0.20  # Fraction of profit siphoned to repay debt; higher repays faster but reduces compounding.
+    pain_decay_per_bar: float = 0.999  # Debt decay per bar (0-1); smaller = faster natural debt forgiveness.
+    clear_debt_on_profitable_cycle: bool = True  # If True, profitable cycles wipe remaining debt; disable to keep debt sticky.
 
 
 @dataclass(frozen=True)
 class TradingConfig:
     """Trading-related sizing and treasury wiring."""
 
-    sizing: SizingConfig = field(default_factory=SizingConfig)
-    treasury: TreasuryConfig = field(default_factory=TreasuryConfig)
+    sizing: SizingConfig = field(default_factory=SizingConfig)  # Initial sizing and leverage defaults.
+    treasury: TreasuryConfig = field(default_factory=TreasuryConfig)  # Debt-repayment treasury allocations.
 
 
 # Helper factories must be defined before StrategyConfig default_factory binding
 def _copy_exit_profiles() -> Dict[str, ExitProfile]:
-    return dict(DEFAULT_EXIT_PROFILES)
+    return default_profiles_factory()
 
 
 def _copy_strategies() -> Dict[str, StrategySpec]:
@@ -174,17 +177,34 @@ def _default_tier_routing() -> TierRouting:
     return TierRouting(loss_tier_map=dict(DEFAULT_TIER_ROUTING_MAP))
 
 
+def _coerce_exit_profiles(raw: Mapping[str, Any] | Dict[str, ExitProfile]) -> Dict[str, ExitProfile]:
+    """Hydrate ExitProfile mappings from raw dicts."""
+
+    if not raw:
+        return {}
+    out: Dict[str, ExitProfile] = {}
+    valid_fields = {f.name for f in fields(ExitProfile)}
+    for name, value in raw.items():
+        if isinstance(value, ExitProfile):
+            out[name] = value
+            continue
+        if isinstance(value, Mapping):
+            filtered = {k: v for k, v in value.items() if k in valid_fields}
+            out[name] = ExitProfile(**filtered)
+    return out
+
+
 @dataclass(frozen=True)
 class StrategyConfig:
     """Strategy-level components such as signals, tiers and exits."""
 
-    enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)
-    exit_profile_version: str = DEFAULT_PROFILE_VERSION
-    exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)
-    default_exit_profile: Optional[str] = "ATRtrail_v1"
-    strategies: Dict[str, StrategySpec] = field(default_factory=_copy_strategies)
-    tiers: Dict[str, TierSpec] = field(default_factory=_copy_tiers)
-    tier_routing: TierRouting = field(default_factory=_default_tier_routing)
+    enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)  # Which signals are active; drop entries to disable.
+    exit_profile_version: str = DEFAULT_PROFILE_VERSION  # Semantic version tag for exit profiles; metadata only when using inline defaults.
+    exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)  # Exit profile definitions; can be fully overridden in config.
+    default_exit_profile: Optional[str] = "ATRtrail_v1"  # Default profile name used when candidate/tiers provide none.
+    strategies: Dict[str, StrategySpec] = field(default_factory=_copy_strategies)  # Strategy recipes mapping.
+    tiers: Dict[str, TierSpec] = field(default_factory=_copy_tiers)  # Tier definitions.
+    tier_routing: TierRouting = field(default_factory=_default_tier_routing)  # Mapping from closs to tier names.
 
 @dataclass(frozen=True)
 class TierRouting:
@@ -204,7 +224,25 @@ class TierRouting:
         return ordered[-1][1]
 
 
-DEFAULT_EXIT_PROFILES: Dict[str, ExitProfile] = resolve_profiles()
+def default_profiles_factory() -> Dict[str, ExitProfile]:
+    """Provide a minimal inline exit profile library used when config omits profiles."""
+
+    return {
+        "ATRtrail_v1": ExitProfile(
+            atr_timeframe=None,  # Use primary timeframe ATR
+            atr_mul_sl=8.0,  # Stop at 8x ATR; raise to widen stops
+            floor_sl_pct=1e-12,  # Absolute SL floor to avoid zero
+            atr_mul_tp=2.0,  # TP at 2x ATR; raise to target farther profits
+            breakeven_lock_frac_of_tp=0.0,  # Fraction of TP before breakeven lock; >0 adds protection
+            trail_mode=None,
+            trail_atr_mul=0.0,
+            activation_atr_mul=0.0,
+            max_bars_in_trade=0,
+        )
+    }
+
+
+DEFAULT_EXIT_PROFILES: Dict[str, ExitProfile] = default_profiles_factory()
 
 DEFAULT_STRATEGIES: Dict[str, StrategySpec] = {
     "NBX_fast_default": StrategySpec(
@@ -326,32 +364,32 @@ class V29Config:
     - Freqtrade `stake_amount` / backtest "Total stake amount" represent margin = nominal / leverage.
     """
 
-    system: SystemConfig = field(default_factory=SystemConfig)
-    risk: RiskConfig = field(default_factory=RiskConfig)
-    trading: TradingConfig = field(default_factory=TradingConfig)
-    strategy: StrategyConfig = field(default_factory=StrategyConfig)
-    informative_timeframes: tuple[str, ...] = ()
+    system: SystemConfig = field(default_factory=SystemConfig)  # Runtime/backend configuration.
+    risk: RiskConfig = field(default_factory=RiskConfig)  # Global risk controls.
+    trading: TradingConfig = field(default_factory=TradingConfig)  # Sizing and treasury controls.
+    strategy: StrategyConfig = field(default_factory=StrategyConfig)  # Signal/tier/exit wiring.
+    informative_timeframes: tuple[str, ...] = ()  # Extra informative timeframes; add e.g. ("1h","4h") to enable multi-tf signals.
 
-    cycle_len_bars: int = 288
+    cycle_len_bars: int = 288  # Bars per cycle for debt reset checks; lower = more frequent cycle accounting.
     # Early lock / breakeven guards
-    breakeven_lock_frac_of_tp: float = 0.5
-    breakeven_lock_eps_atr_pct: float = 0.1
+    breakeven_lock_frac_of_tp: float = 0.5  # Fraction of TP to reach before breakeven lock; raise to wait longer.
+    breakeven_lock_eps_atr_pct: float = 0.1  # ATR% cushion around breakeven lock; raise to add slack.
 
     # Finalize cadence
-    force_finalize_mult: float = 1.5
-    reservation_ttl_bars: int = 6
+    force_finalize_mult: float = 1.5  # Multiplier on finalize cadence; lower forces more frequent finalize passes.
+    reservation_ttl_bars: int = 6  # TTL for reservations in bars; lower frees capacity sooner on stale reservations.
     # Indicators
-    ema_fast: int = 50
-    ema_slow: int = 200
-    rsi_len: int = 14
-    atr_len: int = 20
-    adx_len: int = 20
+    ema_fast: int = 50  # Fast EMA length; lower = more reactive.
+    ema_slow: int = 200  # Slow EMA length; higher = smoother trend filter.
+    rsi_len: int = 14  # RSI lookback; lower = more jittery.
+    atr_len: int = 20  # ATR length; lower responds quicker to volatility shifts.
+    adx_len: int = 20  # ADX length; lower = more responsive trend strength.
 
     # Behaviour toggles
-    suppress_baseline_when_stressed: bool = True
+    suppress_baseline_when_stressed: bool = True  # If True, baseline sizing is suppressed under drawdown stress.
 
     # Sizing and algorithm configuration
-    sizing_algos: SizingAlgoConfig = field(default_factory=SizingAlgoConfig)
+    sizing_algos: SizingAlgoConfig = field(default_factory=SizingAlgoConfig)  # Shared sizing algorithm parameters.
 
     strategy_recipes_input: InitVar[Optional[Tuple[StrategySpec, ...]]] = None
     _strategy_recipes: Tuple[StrategySpec, ...] = field(init=False, repr=False, default_factory=tuple)
@@ -380,11 +418,10 @@ class V29Config:
         self.sizing_algos = replace(algos, target_recovery=algos_tr)
 
         strat_cfg = _coerce_dc(getattr(self, "strategy", None), StrategyConfig)
-        version = getattr(strat_cfg, "exit_profile_version", DEFAULT_PROFILE_VERSION)
-        exit_profiles = strat_cfg.exit_profiles or {}
-        if not exit_profiles:
-            exit_profiles = resolve_profiles(version)
-        strategy_profiles = dict(exit_profiles or {})
+        exit_profiles_raw = strat_cfg.exit_profiles or {}
+        strategy_profiles = _coerce_exit_profiles(exit_profiles_raw)
+        if not strategy_profiles:
+            strategy_profiles = default_profiles_factory()
         strategies = dict(getattr(strat_cfg, "strategies", {}) or {})
         tiers = dict(getattr(strat_cfg, "tiers", {}) or {})
 
@@ -525,7 +562,14 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
     if "trading" in normalized:
         cfg.trading = _merge_dataclass(cfg.trading, TradingConfig, normalized["trading"])
     if "strategy" in normalized:
-        cfg.strategy = _merge_dataclass(cfg.strategy, StrategyConfig, normalized["strategy"])
+        strat_updates = dict(normalized["strategy"])
+        if "exit_profiles" in strat_updates:
+            new_profiles = _coerce_exit_profiles(strat_updates.pop("exit_profiles"))
+            if new_profiles:
+                merged_profiles = dict(cfg.strategy.exit_profiles or {})
+                merged_profiles.update(new_profiles)
+                strat_updates["exit_profiles"] = merged_profiles
+        cfg.strategy = _merge_dataclass(cfg.strategy, StrategyConfig, strat_updates)
 
     for key, value in normalized.items():
         if key in {"system", "risk", "trading", "strategy"}:

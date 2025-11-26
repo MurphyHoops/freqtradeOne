@@ -103,29 +103,29 @@ class ExitPolicyV29:
         if pair_state and getattr(pair_state, "active_trades", None):
             meta = pair_state.active_trades.get(str(trade_id))
 
-        if meta:
-            if (
-                meta.tp_pct
-                and current_profit_pct is not None
-                and current_profit_pct >= float(meta.tp_pct)
-            ):
-                return ExitTags.TP_HIT
-            if meta.icu_bars_left is not None and meta.icu_bars_left <= 0:
-                return ExitTags.ICU_TIMEOUT
-            if (
-                pair_state
-                and pair_state.last_dir
-                and pair_state.last_dir != meta.direction
-                and getattr(pair_state, "last_score", 0.0) > 0.0
-            ):
-                return ExitTags.flip(pair_state.last_dir)
+        # if meta:
+        #     if (
+        #         meta.tp_pct
+        #         and current_profit_pct is not None
+        #         and current_profit_pct >= float(meta.tp_pct)
+        #     ):
+        #         return ExitTags.TP_HIT
+        #     if meta.icu_bars_left is not None and meta.icu_bars_left <= 0:
+        #         return ExitTags.ICU_TIMEOUT
+        #     if (
+        #         pair_state
+        #         and pair_state.last_dir
+        #         and pair_state.last_dir != meta.direction
+        #         and getattr(pair_state, "last_score", 0.0) > 0.0
+        #     ):
+        #         return ExitTags.flip(pair_state.last_dir)
 
-        if (
-            current_profit_pct is not None
-            and current_profit_pct < 0
-            and getattr(self.state, "debt_pool", 0.0) > 0.0
-        ):
-            return ExitTags.RISK_OFF
+        # if (
+        #     current_profit_pct is not None
+        #     and current_profit_pct < 0
+        #     and getattr(self.state, "debt_pool", 0.0) > 0.0
+        # ):
+        #     return ExitTags.RISK_OFF
 
         #  ????
         return None

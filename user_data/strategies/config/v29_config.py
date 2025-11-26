@@ -83,6 +83,24 @@ class TreasuryConfig:
 
 
 @dataclass(frozen=True)
+class GatekeepingConfig:
+    """Global debt gatekeeping parameters."""
+
+    enabled: bool = True
+
+    # Fast Bucket 准入条件 (激进回血)
+    fast_percentile: int = 90       # 必须达到前 10% 高分
+    fast_max_closs: int = 0         # 仅允许 closs=0 (健康币种)
+
+    # Slow Bucket 准入条件 (稳健积累)
+    slow_percentile: int = 60       # 必须达到前 40% 高分
+    slow_max_closs: int = 1         # 允许 closs 0 或 1
+
+    # 无债务时的宽松模式
+    no_debt_percentile: int = 30    # 无债时，前 70% 均可入场
+
+
+@dataclass(frozen=True)
 class TargetRecoveryConfig:
     """Parameters for ATR-based TARGET_RECOVERY sizing."""
 
@@ -273,6 +291,7 @@ class V29Config:
     pain_decay_per_bar: float = 0.999
     clear_debt_on_profitable_cycle: bool = True
     cycle_len_bars: int = 288
+    gatekeeping: GatekeepingConfig = field(default_factory=GatekeepingConfig)
     # Early lock / breakeven guards
     breakeven_lock_frac_of_tp: float = 0.5
     breakeven_lock_eps_atr_pct: float = 0.1
@@ -322,6 +341,7 @@ class V29Config:
             return cls()
 
         self.treasury = _coerce_dc(getattr(self, "treasury", None), TreasuryConfig)
+        self.gatekeeping = _coerce_dc(getattr(self, "gatekeeping", None), GatekeepingConfig)
         self.sizing = _coerce_dc(getattr(self, "sizing", None), SizingConfig)
         algos = _coerce_dc(getattr(self, "sizing_algos", None), SizingAlgoConfig)
         algos_tr = _coerce_dc(getattr(algos, "target_recovery", None), TargetRecoveryConfig)
@@ -424,6 +444,9 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         if key == "treasury":
             cfg.treasury = _merge_dataclass(cfg.treasury, TreasuryConfig, value)
             continue
+        if key == "gatekeeping":
+            cfg.gatekeeping = _merge_dataclass(cfg.gatekeeping, GatekeepingConfig, value)
+            continue
         if key == "sizing_algos":
             current = cfg.sizing_algos
             merged = _merge_dataclass(current, SizingAlgoConfig, value)
@@ -521,6 +544,7 @@ __all__ = [
     "TierRouting",
     "SizingConfig",
     "TreasuryConfig",
+    "GatekeepingConfig",
     "TargetRecoveryConfig",
     "SizingAlgoConfig",
     "V29Config",

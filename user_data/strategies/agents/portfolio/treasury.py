@@ -255,20 +255,77 @@ class TreasuryAgent:
         return AllocationPlan(fast_alloc_risk=fast_alloc, slow_alloc_risk=slow_alloc)
 
 
-    def evaluate_signal_quality(self, pair: str, score: float) -> dict:
-        """Gate incoming signals using global debt and percentile thresholds."""
+    def evaluate_signal_quality(self, pair: str, score: float, closs: int) -> dict:
+        """Gate incoming signals using tiered, state-aware thresholds."""
+        gcfg = getattr(self.cfg, "gatekeeping", None)
+        if not gcfg or not getattr(gcfg, "enabled", True):
+            return {"allowed": True, "bucket": "slow", "reason": "gatekeeping_disabled"}
         if not self.backend:
             return {"allowed": True, "bucket": "slow", "reason": "no_backend"}
 
         snap = self.backend.get_snapshot()
-        debt = float(getattr(snap, 'debt_pool', 0.0) or 0.0)
-        threshold_high = float(self.backend.get_score_percentile_threshold(80))
-        is_high_quality = bool(score >= threshold_high)
+        debt = float(getattr(snap, "debt_pool", 0.0) or 0.0)
+
+        th_fast = float(self.backend.get_score_percentile_threshold(gcfg.fast_percentile))
+        th_slow = float(self.backend.get_score_percentile_threshold(gcfg.slow_percentile))
+        th_loose = float(self.backend.get_score_percentile_threshold(gcfg.no_debt_percentile))
+        thresholds = {"fast": th_fast, "slow": th_slow, "loose": th_loose}
 
         if debt > 0:
-            if is_high_quality:
-                return {"allowed": True, "bucket": "fast", "reason": "high_quality_with_debt", "threshold": threshold_high}
-            return {"allowed": False, "bucket": "slow", "reason": "Debt protection", "threshold": threshold_high}
+            if score >= th_fast and closs <= gcfg.fast_max_closs:
+                return {
+                    "allowed": True,
+                    "bucket": "fast",
+                    "reason": "Debt: High Quality & Healthy",
+                    "thresholds": thresholds,
+                    "score": score,
+                    "closs": closs,
+                    "debt": debt,
+                }
+            if score >= th_slow and closs <= gcfg.slow_max_closs:
+                return {
+                    "allowed": True,
+                    "bucket": "slow",
+                    "reason": "Debt: Mid Quality",
+                    "thresholds": thresholds,
+                    "score": score,
+                    "closs": closs,
+                    "debt": debt,
+                }
+            return {
+                "allowed": False,
+                "reason": f"Debt Reject: Score<{th_slow:.2f} or Closs>{gcfg.slow_max_closs}",
+                "thresholds": thresholds,
+                "score": score,
+                "closs": closs,
+                "debt": debt,
+            }
 
-        bucket = "fast" if is_high_quality else "slow"
-        return {"allowed": True, "bucket": bucket, "reason": "no_debt", "threshold": threshold_high}
+        if score >= th_fast:
+            return {
+                "allowed": True,
+                "bucket": "fast",
+                "reason": "No Debt: High Score",
+                "thresholds": thresholds,
+                "score": score,
+                "closs": closs,
+                "debt": debt,
+            }
+        if score >= th_loose:
+            return {
+                "allowed": True,
+                "bucket": "slow",
+                "reason": "No Debt: Loose Pass",
+                "thresholds": thresholds,
+                "score": score,
+                "closs": closs,
+                "debt": debt,
+            }
+        return {
+            "allowed": False,
+            "reason": "Low Score",
+            "thresholds": thresholds,
+            "score": score,
+            "closs": closs,
+            "debt": debt,
+        }

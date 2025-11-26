@@ -1629,6 +1629,7 @@ class TaxBrainV29(IStrategy):
         When recording trades via state.record_trade_open(), always use nominal position sizes;
         do not confuse stake_margin with any *_nominal field.
         """
+        pst = self.state.get_pair_state(pair)
         meta: Optional[Dict[str, Any]] = None
         if entry_tag:
             try:
@@ -1668,18 +1669,42 @@ class TaxBrainV29(IStrategy):
             score = 0.0
         gate_result: Dict[str, Any] = {}
         try:
-            gate_result = self.treasury_agent.evaluate_signal_quality(pair, score)
+            gate_result = self.treasury_agent.evaluate_signal_quality(pair, score, closs=pst.closs)
         except Exception:
             gate_result = {}
         if gate_result and gate_result.get("allowed") is False:
-            threshold = gate_result.get("threshold")
+            thresholds = gate_result.get("thresholds", {}) or {}
+            th_fast = thresholds.get("fast")
+            th_slow = thresholds.get("slow")
+            th_loose = thresholds.get("loose")
+            reason = gate_result.get("reason", "rejected")
+            debt_val = gate_result.get("debt")
+            closs_val = gate_result.get("closs", pst.closs)
+            gcfg = getattr(self.cfg, "gatekeeping", None)
+            detail_parts: list[str] = []
+            if th_slow is not None:
+                detail_parts.append(f"score {score:.4f} < {th_slow:.4f}")
+            elif th_fast is not None:
+                detail_parts.append(f"score {score:.4f} < {th_fast:.4f}")
+            elif th_loose is not None:
+                detail_parts.append(f"score {score:.4f} < {th_loose:.4f}")
+            slow_cap = getattr(gcfg, "slow_max_closs", None) if gcfg else None
+            fast_cap = getattr(gcfg, "fast_max_closs", None) if gcfg else None
+            if closs_val is not None:
+                if debt_val and slow_cap is not None and closs_val > slow_cap:
+                    detail_parts.append(f"closs {closs_val} > {slow_cap}")
+                elif fast_cap is not None and closs_val > fast_cap:
+                    detail_parts.append(f"closs {closs_val} > {fast_cap}")
+            if debt_val is not None:
+                detail_parts.append(f"debt={float(debt_val):.4f}")
+            detail = ", ".join(part for part in detail_parts if part)
             try:
                 self.logger.info(
-                    f"Global Gatekeeper: Rejected {pair} (score={score:.4f}"
-                    f"{' < ' + str(threshold) if threshold is not None else ''})"
+                    f"Global Gatekeeper: Rejected {pair} - {reason}"
+                    f"{f' ({detail})' if detail else ''}"
                 )
             except Exception:
-                print(f"[gatekeeper] reject {pair} score={score} threshold={threshold}")
+                print(f"[gatekeeper] reject {pair} reason={reason} detail={detail}")
             return 0.0
         gate_bucket = gate_result.get("bucket") if gate_result else None
         if gate_bucket:
@@ -1739,7 +1764,7 @@ class TaxBrainV29(IStrategy):
             return float(stake)
 
         rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
-        self.reservation.reserve(pair, rid, risk, bucket, record_backend=not backend_reserved)
+        self.reservation.reserve(pair, rid, risk, bucket)
 
         meta.update({
             'sl_pct': sl,

@@ -37,6 +37,18 @@ def test_local_backend_risk_usage_tracks_and_clamps():
     assert backend.get_snapshot().risk_used == 0.0
 
 
+def test_local_backend_percentile_and_window_bound():
+    backend = LocalGlobalBackend()
+    for i in range(1, 6):
+        backend.record_signal_score("ETH/USDT", float(i) / 10.0)
+    assert backend.get_score_percentile_threshold(50) == pytest.approx(0.3)
+
+    for i in range(2000):
+        backend.record_signal_score("BTC/USDT", float(i))
+    assert len(getattr(backend, "_scores")) == 1000
+    assert backend.get_score_percentile_threshold(90) == pytest.approx(1900.0)
+
+
 @pytest.mark.skipif(redis is None, reason="redis package not installed")
 def test_redis_backend_repay_clamps_to_zero_and_tracks_risk():
     client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)

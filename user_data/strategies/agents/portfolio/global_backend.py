@@ -46,7 +46,7 @@ class LocalGlobalBackend(GlobalRiskBackend):
     def __init__(self) -> None:
         self._debt_pool: float = 0.0
         self._risk_used: float = 0.0
-        self._scores: List[Tuple[float, float]] = []  # (ts, score)
+        self._scores: List[float] = []  # sliding window of recent scores
 
     def get_snapshot(self) -> GlobalSnapshot:
         return GlobalSnapshot(debt_pool=self._debt_pool, risk_used=self._risk_used)
@@ -68,22 +68,21 @@ class LocalGlobalBackend(GlobalRiskBackend):
         self._risk_used = max(0.0, self._risk_used - float(amount))
 
     def record_signal_score(self, pair: str, score: float) -> None:
-        now = time.time()
-        self._scores.append((now, float(score)))
-        # prune entries older than 1h to mirror Redis TTL
-        cutoff = now - 3600
-        self._scores = [(ts, sc) for ts, sc in self._scores if ts >= cutoff]
+        self._scores.append(float(score))
+        # keep the window bounded to avoid unbounded growth during backtests
+        if len(self._scores) > 1000:
+            overflow = len(self._scores) - 1000
+            if overflow > 0:
+                self._scores = self._scores[overflow:]
 
     def get_score_percentile_threshold(self, percentile: int) -> float:
-        now = time.time()
-        cutoff = now - 3600
-        filtered = [sc for ts, sc in self._scores if ts >= cutoff]
-        if len(filtered) < 10:
+        if not self._scores:
             return 0.0
-        filtered.sort()
-        idx = min(len(filtered) - 1, math.floor(len(filtered) * (percentile / 100.0)))
+        scores = sorted(self._scores)
+        pct = max(0.0, min(100.0, float(percentile)))
+        idx = min(len(scores) - 1, math.floor(len(scores) * (pct / 100.0)))
         try:
-            return float(filtered[idx])
+            return float(scores[idx])
         except Exception:
             return 0.0
 

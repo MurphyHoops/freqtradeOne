@@ -91,6 +91,8 @@ class GatekeepingConfig:
     """Global debt gatekeeping parameters."""
 
     enabled: bool = True  # Master toggle for gatekeeping; disable to bypass checks.
+    min_score_fast: float = 0.8  # Minimum score required for fast bucket admission.
+    min_score_slow: float = 0.6  # Minimum score required for slow bucket admission.
 
     # Fast Bucket 准入条件 (激进回血)
     fast_percentile: int = 90       # Percentile threshold for fast admission; higher = stricter (top 10% by default).
@@ -102,7 +104,7 @@ class GatekeepingConfig:
 
     # 无债务时的宽松模式
     no_debt_percentile: int = 30    # Percentile threshold when no debt; lower = more permissive.
-    healthy_allow_score: float = 0.6  # Healthy coin privilege score; closs=0 above this can enter slow during debt. Lower -> more entries.
+    healthy_allow_score: float = 0.2  # Healthy coin privilege score; closs=0 above this can enter slow during debt. Lower -> more entries.
 
 
 @dataclass(frozen=True)
@@ -592,6 +594,14 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         if key == "target_recovery":
             tr = _merge_dataclass(cfg.sizing_algos.target_recovery, TargetRecoveryConfig, value)
             cfg.sizing_algos = replace(cfg.sizing_algos, target_recovery=tr)
+            continue
+        if key == "gatekeeping":
+            gate_cfg = _merge_dataclass(
+                getattr(cfg.risk, "gatekeeping", GatekeepingConfig()),
+                GatekeepingConfig,
+                value,
+            )
+            cfg.risk = replace(cfg.risk, gatekeeping=gate_cfg)
             continue
         if key in legacy_map:
             group, container_name, field_name = legacy_map[key]

@@ -267,9 +267,10 @@ class TreasuryAgent:
         snap = self.backend.get_snapshot()
         debt = float(getattr(snap, "debt_pool", 0.0) or 0.0)
 
-        th_fast = 0.8  # rescue requires very high predicted win rate
-        th_slow = 0.6  # day-to-day admission
-        th_loose = 0.5
+        th_fast = float(getattr(gcfg, "min_score_fast", 0.8))
+        th_slow = float(getattr(gcfg, "min_score_slow", 0.6))
+        th_loose = th_slow * 0.8
+        healthy_allow = float(getattr(gcfg, "healthy_allow_score", 0.0))
         thresholds = {"fast": th_fast, "slow": th_slow, "loose": th_loose}
 
         if debt > 0:
@@ -283,7 +284,7 @@ class TreasuryAgent:
                     "closs": closs,
                     "debt": debt,
                 }
-            if closs == 0 and score >= getattr(gcfg, "healthy_allow_score", 0.0):
+            if closs == 0 and score >= healthy_allow:
                 return {
                     "allowed": True,
                     "bucket": "slow",

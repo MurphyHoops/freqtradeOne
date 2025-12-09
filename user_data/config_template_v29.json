@@ -21,12 +21,14 @@
     "gatekeeping": {
       "_comment": "Tiered debt gatekeeping thresholds",
       "enabled": true,
+      "min_score_fast": 0.8,
+      "min_score_slow": 0.6,
       "fast_percentile": 90,
       "fast_max_closs": 0,
       "slow_percentile": 60,
       "slow_max_closs": 1,
       "no_debt_percentile": 30,
-      "healthy_allow_score": 0.6
+      "healthy_allow_score": 0.2
     }
   },
   "trading": {

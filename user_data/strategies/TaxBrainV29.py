@@ -702,6 +702,8 @@ class TaxBrainV29(IStrategy):
         )
         self._informative_last: Dict[str, Dict[str, pd.Series]] = {}
         self._informative_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
+        self._informative_gc_last_ts: float = 0.0
+        self._informative_gc_interval_sec: int = 900  # sweep every 15 minutes to curb memory growth
         self._register_informative_methods()
         super().__init__(config)
         self.tier_mgr = TierManager(self.cfg)
@@ -711,9 +713,24 @@ class TaxBrainV29(IStrategy):
             "dry_run_wallet", self.cfg.system.dry_run_wallet_fallback))
         self.eq_provider = EquityProvider(initial_equity)
 
+        runmode_cfg = config.get("runmode") if isinstance(config, dict) else None
+        runmode_token = str(getattr(runmode_cfg, "value", runmode_cfg or "")).lower()
+        force_local_backend = False
+        if RunMode is not None and runmode_cfg in (getattr(RunMode, "HYPEROPT", None), getattr(RunMode, "BACKTEST", None)):
+            force_local_backend = True
+        elif runmode_token:
+            force_local_backend = any(key in runmode_token for key in ("hyperopt", "backtest"))
+
         backend_mode = str(
             getattr(getattr(self.cfg, "system", None), "global_backend_mode", getattr(self.cfg, "global_backend_mode", "local"))
         ).lower()
+        if force_local_backend:
+            if backend_mode != "local":
+                try:
+                    self.logger.info("Forcing LocalGlobalBackend for safety in Backtest/Hyperopt mode")
+                except Exception:
+                    print("Forcing LocalGlobalBackend for safety in Backtest/Hyperopt mode")
+            backend_mode = "local"
         if backend_mode == "redis":
             self.global_backend = RedisGlobalBackend(
                 host=self.cfg.system.redis_host,
@@ -877,6 +894,18 @@ class TaxBrainV29(IStrategy):
         for tf in self._informative_timeframes:
             self.__class__._ensure_informative_method(tf)
 
+    def _gc_informative_cache(self, current_whitelist: List[str]) -> None:
+        """Drop cached informative frames for pairs no longer in the active whitelist."""
+        if not current_whitelist:
+            return
+        allowed = {str(pair) for pair in current_whitelist if pair}
+        if not allowed:
+            return
+        stale_pairs = [pair for pair in list(self._informative_cache.keys()) if pair not in allowed]
+        for pair in stale_pairs:
+            self._informative_cache.pop(pair, None)
+            self._informative_last.pop(pair, None)
+
     @classmethod
     def _ensure_informative_method(cls, timeframe: str) -> None:
         func_name = f"populate_indicators_{timeframe.replace('/', '_')}"
@@ -1007,6 +1036,12 @@ class TaxBrainV29(IStrategy):
             timeframe_sec=self._tf_sec,
             eq_provider=self.eq_provider,
         )
+        now_ts = time.time()
+        if (now_ts - getattr(self, "_informative_gc_last_ts", 0.0)) >= getattr(self, "_informative_gc_interval_sec", 900):
+            try:
+                self._gc_informative_cache(whitelist)
+            finally:
+                self._informative_gc_last_ts = now_ts
         return df
 
     def get_informative_row(self, pair: str, timeframe: str) -> Optional[pd.Series]:

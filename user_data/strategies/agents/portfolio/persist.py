@@ -11,6 +11,12 @@ import json
 import os
 from typing import Optional
 
+try:
+    from freqtrade.exceptions import OperationalException  # type: ignore
+except Exception:  # pragma: no cover - fallback when freqtrade is absent
+    class OperationalException(RuntimeError):
+        ...
+
 
 class StateStore:
     """封装状态序列化与反序列化逻辑的持久化工具。"""
@@ -41,7 +47,7 @@ class StateStore:
             }
             tmp = self.filepath + ".tmp"
             with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(snapshot, handle)
+                json.dump(snapshot, handle, default=str)
             os.replace(tmp, self.filepath)
         except Exception as exc:
             print(f"[CRITICAL] State save failed: {exc}")
@@ -58,5 +64,13 @@ class StateStore:
             self.eq.restore_snapshot(snapshot.get("equity_provider", {}))
             self.reservation.restore_snapshot(snapshot.get("reservations", {}))
             self.state.reset_cycle_after_restore()
+        except FileNotFoundError:
+            return
+        except (json.JSONDecodeError, IOError, PermissionError) as exc:
+            raise OperationalException(
+                "State file corrupted or unreadable. Manual intervention required to prevent debt reset."
+            ) from exc
         except Exception as exc:
-            print(f"[WARN] State restore failed: {exc}")
+            raise OperationalException(
+                "State file corrupted or unreadable. Manual intervention required to prevent debt reset."
+            ) from exc

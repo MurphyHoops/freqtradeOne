@@ -139,6 +139,9 @@ class RedisGlobalBackend(GlobalRiskBackend):
             return 1
             """
         )
+        self._local_cache_snapshot: Optional[GlobalSnapshot] = None
+        self._last_snapshot_time: float = 0.0
+        self._cache_ttl: float = 1.0
 
     def _to_float(self, value) -> float:
         try:
@@ -146,29 +149,48 @@ class RedisGlobalBackend(GlobalRiskBackend):
         except Exception:
             return 0.0
 
+    def _invalidate_snapshot_cache(self) -> None:
+        self._local_cache_snapshot = None
+        self._last_snapshot_time = 0.0
+
     def get_snapshot(self) -> GlobalSnapshot:
+        now = time.time()
+        if (
+            self._local_cache_snapshot is not None
+            and (now - self._last_snapshot_time) < self._cache_ttl
+        ):
+            return self._local_cache_snapshot
+
         debt_val, risk_val = self._client.mget([self._key_debt, self._key_risk_used])
-        return GlobalSnapshot(
+        snapshot = GlobalSnapshot(
             debt_pool=self._to_float(debt_val),
             risk_used=self._to_float(risk_val),
         )
+        self._local_cache_snapshot = snapshot
+        self._last_snapshot_time = now
+        return snapshot
 
     def add_loss(self, amount: float) -> None:
         self._client.incrbyfloat(self._key_debt, float(amount))
+        self._invalidate_snapshot_cache()
 
     def repay_loss(self, amount: float) -> None:
         self._repay_script(keys=[self._key_debt], args=[float(amount)])
+        self._invalidate_snapshot_cache()
 
     def add_risk_usage(self, amount: float, cap_limit: Optional[float] = None) -> bool:
         amount = float(amount)
         if cap_limit is None:
             self._client.incrbyfloat(self._key_risk_used, amount)
+            self._invalidate_snapshot_cache()
             return True
         result = self._risk_cap_script(keys=[self._key_risk_used], args=[amount, float(cap_limit)])
+        self._invalidate_snapshot_cache()
         return bool(result)
 
     def release_risk_usage(self, amount: float) -> None:
         self._client.incrbyfloat(self._key_risk_used, -float(amount))
+        self._invalidate_snapshot_cache()
 
     def record_signal_score(self, pair: str, score: float) -> None:
         member = f"{pair}:{int(time.time())}"

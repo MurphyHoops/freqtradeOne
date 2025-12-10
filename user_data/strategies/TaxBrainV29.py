@@ -234,6 +234,30 @@ class PairState:
     last_recipe: Optional[str] = None
     active_trades: Dict[str, ActiveTradeMeta] = field(default_factory=dict)
 
+
+@dataclass(frozen=True)
+class GateResult:
+    """Normalized gatekeeping outcome used by custom_stake_amount."""
+
+    allowed: bool
+    bucket: Optional[str] = None
+    thresholds: Dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+    debt: Optional[float] = None
+    closs: Optional[int] = None
+
+    @classmethod
+    def from_mapping(cls, payload: Dict[str, Any], default_closs: Optional[int]) -> "GateResult":
+        thresholds = payload.get("thresholds") if isinstance(payload, dict) else {}
+        return cls(
+            allowed=bool(payload.get("allowed", True)) if isinstance(payload, dict) else True,
+            bucket=payload.get("bucket") if isinstance(payload, dict) else None,
+            thresholds=thresholds if isinstance(thresholds, dict) else {},
+            reason=str(payload.get("reason", "")) if isinstance(payload, dict) else "",
+            debt=payload.get("debt") if isinstance(payload, dict) else None,
+            closs=payload.get("closs", default_closs) if isinstance(payload, dict) else default_closs,
+        )
+
 @dataclass
 class TreasuryState:
     """TreasuryState 持久化 fast/slow 拨款结果以及财政周期起点，保证跨周期及崩溃恢复后的拨款连续性。
@@ -1651,6 +1675,166 @@ class TaxBrainV29(IStrategy):
                 processed.add(trade_id)
         return True
 
+    def _extract_entry_meta(
+        self, pair: str, entry_tag: Optional[str], side: str
+    ) -> Optional[Dict[str, Any]]:
+        meta: Optional[Dict[str, Any]] = None
+        parsed = None
+        if entry_tag:
+            try:
+                parsed = json.loads(entry_tag)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict) and "candidates" in parsed:
+                selected = self._resolve_candidate_from_tag(pair, parsed, side)
+                if selected:
+                    meta = self._normalize_entry_meta(self._candidate_meta_from_candidate(selected), side)
+            elif parsed is not None:
+                meta = self._normalize_entry_meta(parsed, side)
+
+        if meta is None:
+            cached = self._pending_entry_meta.get(pair)
+            if cached is not None:
+                meta = self._normalize_entry_meta(cached, side)
+
+        if meta is None:
+            sig = self._last_signal.get(pair)
+            if sig:
+                meta = self._normalize_entry_meta(
+                    {
+                        "sl_pct": float(sig.sl_pct),
+                        "tp_pct": float(sig.tp_pct),
+                        "dir": sig.direction,
+                        "exit_profile": sig.exit_profile,
+                        "recipe": sig.recipe,
+                        "plan_timeframe": getattr(sig, "plan_timeframe", None),
+                        "atr_pct": getattr(sig, "plan_atr_pct", None),
+                        "score": getattr(sig, "raw_score", getattr(sig, "expected_edge", None)),
+                    },
+                    side,
+                )
+        return meta
+
+    def _format_gatekeeper_detail(self, result: GateResult, score: float) -> str:
+        thresholds = result.thresholds or {}
+        th_fast = thresholds.get("fast")
+        th_slow = thresholds.get("slow")
+        th_loose = thresholds.get("loose")
+        detail_parts: list[str] = []
+        if th_slow is not None:
+            detail_parts.append(f"score {score:.4f} < {float(th_slow):.4f}")
+        elif th_fast is not None:
+            detail_parts.append(f"score {score:.4f} < {float(th_fast):.4f}")
+        elif th_loose is not None:
+            detail_parts.append(f"score {score:.4f} < {float(th_loose):.4f}")
+
+        gcfg = getattr(getattr(self.cfg, "risk", None), "gatekeeping", None)
+        if gcfg and result.closs is not None:
+            slow_cap = getattr(gcfg, "slow_max_closs", None)
+            fast_cap = getattr(gcfg, "fast_max_closs", None)
+            if slow_cap is not None and result.debt and result.closs > slow_cap:
+                detail_parts.append(f"closs {result.closs} > {slow_cap}")
+            elif fast_cap is not None and result.closs > fast_cap:
+                detail_parts.append(f"closs {result.closs} > {fast_cap}")
+
+        if result.debt is not None:
+            try:
+                detail_parts.append(f"debt={float(result.debt):.4f}")
+            except Exception:
+                pass
+        return ", ".join(part for part in detail_parts if part)
+
+    def _check_gatekeeping(self, pair: str, meta: Dict[str, Any]) -> GateResult:
+        pst = self.state.get_pair_state(pair)
+        try:
+            score = float(meta.get("score", meta.get("expected_edge", meta.get("raw_score", 0.0))))
+        except Exception:
+            score = 0.0
+        try:
+            raw = self.treasury_agent.evaluate_signal_quality(pair, score, closs=pst.closs)
+        except Exception:
+            raw = {}
+
+        result = GateResult.from_mapping(raw, default_closs=pst.closs) if raw else GateResult(
+            allowed=True, bucket=None, thresholds={}, reason="", debt=None, closs=pst.closs
+        )
+        if not result.allowed:
+            detail = self._format_gatekeeper_detail(result, score)
+            msg = f"Global Gatekeeper: Rejected {pair} - {result.reason or 'rejected'}"
+            if detail:
+                msg = f"{msg} ({detail})"
+            try:
+                self.logger.info(msg)
+            except Exception:
+                print(msg)
+        return result
+
+    def _reserve_backend_risk(self, pair: str, risk: float) -> bool:
+        cap_abs = 0.0
+        try:
+            equity_now = self.eq_provider.get_equity()
+            cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity_now)
+            cap_abs = cap_pct * equity_now
+            reserved = bool(self.global_backend.add_risk_usage(risk, cap_abs))
+        except Exception as exc:
+            reserved = False
+            try:
+                self.logger.error(
+                    f"Global backend reservation failed for {pair}, risk={risk:.4f}, cap_abs={cap_abs:.4f}",
+                    exc_info=exc,
+                )
+            except Exception:
+                print(f"[backend] failed to reserve {pair}: {exc}")
+
+        if not reserved:
+            msg = f"Global Gatekeeper: CAP reached for {pair}, risk={risk:.4f}, cap_abs={cap_abs:.4f}"
+            try:
+                self.logger.info(msg)
+            except Exception:
+                print(msg)
+            return False
+        return True
+
+    def _reserve_risk_resources(
+        self,
+        pair: str,
+        stake: float,
+        risk: float,
+        bucket: str,
+        sl: float,
+        tp: float,
+        direction: str,
+        current_rate: float,
+        meta: Dict[str, Any],
+    ) -> bool:
+        meta_payload = dict(meta or {})
+        meta_payload.update(
+            {
+                "sl_pct": sl,
+                "tp_pct": tp,
+                "stake_final": stake,
+                "risk_final": risk,
+                "bucket": bucket,
+                "entry_price": current_rate,
+                "dir": direction,
+            }
+        )
+
+        if self._is_backtest_like_runmode():
+            self._pending_entry_meta[pair] = meta_payload
+            return True
+
+        if getattr(self, "global_backend", None):
+            backend_reserved = self._reserve_backend_risk(pair, risk)
+            if not backend_reserved:
+                return False
+
+        rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
+        self.reservation.reserve(pair, rid, risk, bucket)
+        meta_payload["reservation_id"] = rid
+        self._pending_entry_meta[pair] = meta_payload
+        return True
+
     def custom_stake_amount(
         self,
         pair: str,
@@ -1673,89 +1857,19 @@ class TaxBrainV29(IStrategy):
         When recording trades via state.record_trade_open(), always use nominal position sizes;
         do not confuse stake_margin with any *_nominal field.
         """
-        pst = self.state.get_pair_state(pair)
-        meta: Optional[Dict[str, Any]] = None
-        if entry_tag:
-            try:
-                parsed = json.loads(entry_tag)
-            except Exception:
-                parsed = None
-            if isinstance(parsed, dict) and "candidates" in parsed:
-                selected = self._resolve_candidate_from_tag(pair, parsed, side)
-                if selected:
-                    meta = self._normalize_entry_meta(
-                        self._candidate_meta_from_candidate(selected), side
-                    )
-            elif parsed is not None:
-                meta = self._normalize_entry_meta(parsed, side)
+        meta = self._extract_entry_meta(pair, entry_tag, side)
+        if not meta:
+            return 0.0
 
-        if meta is None:
-            cached = self._pending_entry_meta.get(pair)
-            if cached is not None:
-                meta = self._normalize_entry_meta(cached, side)
-            else:
-                sig = self._last_signal.get(pair)
-                if sig:
-                    meta = self._normalize_entry_meta({
-                        'sl_pct': float(sig.sl_pct),
-                        'tp_pct': float(sig.tp_pct),
-                        'dir': sig.direction,
-                        'exit_profile': sig.exit_profile,
-                        'recipe': sig.recipe,
-                        'plan_timeframe': getattr(sig, "plan_timeframe", None),
-                        'atr_pct': getattr(sig, "plan_atr_pct", None),
-                    }, side)
-        if meta is None:
+        gate_result = self._check_gatekeeping(pair, meta)
+        if not gate_result.allowed:
             return 0.0
-        try:
-            score = float(meta.get("score", meta.get("expected_edge", meta.get("raw_score", 0.0))))
-        except Exception:
-            score = 0.0
-        gate_result: Dict[str, Any] = {}
-        try:
-            gate_result = self.treasury_agent.evaluate_signal_quality(pair, score, closs=pst.closs)
-        except Exception:
-            gate_result = {}
-        if gate_result and gate_result.get("allowed") is False:
-            thresholds = gate_result.get("thresholds", {}) or {}
-            th_fast = thresholds.get("fast")
-            th_slow = thresholds.get("slow")
-            th_loose = thresholds.get("loose")
-            reason = gate_result.get("reason", "rejected")
-            debt_val = gate_result.get("debt")
-            closs_val = gate_result.get("closs", pst.closs)
-            gcfg = getattr(getattr(self.cfg, "risk", None), "gatekeeping", None)
-            detail_parts: list[str] = []
-            if th_slow is not None:
-                detail_parts.append(f"score {score:.4f} < {th_slow:.4f}")
-            elif th_fast is not None:
-                detail_parts.append(f"score {score:.4f} < {th_fast:.4f}")
-            elif th_loose is not None:
-                detail_parts.append(f"score {score:.4f} < {th_loose:.4f}")
-            slow_cap = getattr(gcfg, "slow_max_closs", None) if gcfg else None
-            fast_cap = getattr(gcfg, "fast_max_closs", None) if gcfg else None
-            if closs_val is not None:
-                if debt_val and slow_cap is not None and closs_val > slow_cap:
-                    detail_parts.append(f"closs {closs_val} > {slow_cap}")
-                elif fast_cap is not None and closs_val > fast_cap:
-                    detail_parts.append(f"closs {closs_val} > {fast_cap}")
-            if debt_val is not None:
-                detail_parts.append(f"debt={float(debt_val):.4f}")
-            detail = ", ".join(part for part in detail_parts if part)
-            try:
-                self.logger.info(
-                    f"Global Gatekeeper: Rejected {pair} - {reason}"
-                    f"{f' ({detail})' if detail else ''}"
-                )
-            except Exception:
-                print(f"[gatekeeper] reject {pair} reason={reason} detail={detail}")
-            return 0.0
-        gate_bucket = gate_result.get("bucket") if gate_result else None
-        if gate_bucket:
-            meta["bucket"] = gate_bucket
-        sl = float(meta.get('sl_pct', 0.0))
-        tp = float(meta.get('tp_pct', 0.0))
-        direction = str(meta.get('dir'))
+        if gate_result.bucket:
+            meta["bucket"] = gate_result.bucket
+
+        sl = float(meta.get("sl_pct", 0.0))
+        tp = float(meta.get("tp_pct", 0.0))
+        direction = str(meta.get("dir"))
 
         stake, risk, bucket = self.sizer.compute(
             pair=pair,
@@ -1772,55 +1886,20 @@ class TaxBrainV29(IStrategy):
         )
         if stake <= 0 or risk <= 0:
             return 0.0
-        backend_reserved = False
-        if not self._is_backtest_like_runmode() and getattr(self, "global_backend", None):
-            try:
-                equity_now = self.eq_provider.get_equity()
-                cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity_now)
-                cap_abs = cap_pct * equity_now
-                backend_reserved = bool(self.global_backend.add_risk_usage(risk, cap_abs))
-                if not backend_reserved:
-                    msg = f"Global Gatekeeper: CAP reached for {pair}, risk={risk:.4f}, cap_abs={cap_abs:.4f}"
-                    try:
-                        self.logger.info(msg)
-                    except Exception:
-                        print(msg)
-                    return 0.0
-            except Exception:
-                backend_reserved = False
-        
-        # In backtests/hyperopt there is no asynchronous order lifecycle, so skip
-        # reservation bookkeeping to avoid leaking reserved_risk and starving sizing.
-        if self._is_backtest_like_runmode():
-            meta = meta or {}
-            meta.update(
-                {
-                    "sl_pct": sl,
-                    "tp_pct": tp,
-                    "stake_final": stake,
-                    "risk_final": risk,
-                    "bucket": bucket,
-                    "entry_price": current_rate,
-                    "dir": direction,
-                }
-            )
-            self._pending_entry_meta[pair] = meta
-            return float(stake)
 
-        rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
-        self.reservation.reserve(pair, rid, risk, bucket)
-
-        meta.update({
-            'sl_pct': sl,
-            'tp_pct': tp,
-            'stake_final': stake,
-            'risk_final': risk,
-            'reservation_id': rid,
-            'bucket': bucket,
-            'entry_price': current_rate,
-            'dir': direction,
-        })
-        self._pending_entry_meta[pair] = meta
+        reserved = self._reserve_risk_resources(
+            pair=pair,
+            stake=stake,
+            risk=risk,
+            bucket=bucket,
+            sl=sl,
+            tp=tp,
+            direction=direction,
+            current_rate=current_rate,
+            meta=meta,
+        )
+        if not reserved:
+            return 0.0
         return float(stake)
 
     def leverage(self, *args, **kwargs) -> float:

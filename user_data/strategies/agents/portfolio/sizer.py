@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -27,6 +28,7 @@ class SizerAgent:
         tier_mgr: TierManager,
         backend: Optional[GlobalRiskBackend] = None,
     ) -> None:
+        self._log = logging.getLogger(__name__)
         self.state = state
         self.reservation = reservation
         self.eq = eq_provider
@@ -36,6 +38,7 @@ class SizerAgent:
         self._debug_file = (
             Path(getattr(cfg, "user_data_dir", "user_data")) / "logs" / "sizer_debug.log"
         )
+        self._validate_sizing_algos()
 
     def _log_debug(self, msg: str) -> None:
         try:
@@ -45,6 +48,32 @@ class SizerAgent:
                 handle.write(f"{ts} {msg}\n")
         except Exception:
             pass
+
+    def _validate_sizing_algos(self) -> None:
+        """Fail fast when tiers reference deprecated/unknown algos."""
+
+        valid_algos = set(ALGO_REGISTRY.keys())
+        requested = set()
+        try:
+            requested.add(str(self.cfg.sizing_algos.default_algo))
+        except Exception:
+            pass
+
+        try:
+            tiers = getattr(getattr(self.cfg, "strategy", None), "tiers", getattr(self.cfg, "tiers", {})) or {}
+            for tier in tiers.values():
+                algo_name = getattr(tier, "sizing_algo", None)
+                if algo_name:
+                    requested.add(str(algo_name))
+        except Exception:
+            # Fall back to default only; nothing else to validate
+            pass
+
+        unknown = [algo for algo in requested if algo not in valid_algos]
+        if unknown:
+            raise ValueError(
+                f"Unsupported sizing_algos configured: {unknown}; supported options: {sorted(valid_algos)}"
+            )
 
     def compute(
         self,
@@ -149,6 +178,12 @@ class SizerAgent:
         stake_margin = stake_nominal / lev
         risk_final = stake_margin * sl_roi_pct
         recovery_risk = getattr(result, "recovery_risk", 0.0)
+
+        if self.backend:
+            backend_room = self._backend_risk_room(equity)
+            if risk_final > (backend_room + 1e-9):
+                self._warn_backend_race(ctx.pair, risk_final, backend_room)
+                return (0.0, 0.0, bucket)
 
         self._log_debug(
             f"pair={ctx.pair} closs={pst.closs} local_loss={pst.local_loss:.4f} "
@@ -362,6 +397,27 @@ class SizerAgent:
         if drawdown > risk_cfg.drawdown_threshold_pct:
             return 0.0
         return base
+
+    def _backend_risk_room(self, equity: float) -> float:
+        """Re-read backend snapshot to surface potential race conditions."""
+
+        try:
+            cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
+            snapshot = self.backend.get_snapshot() if self.backend else None
+            used = float(getattr(snapshot, "risk_used", 0.0)) if snapshot else 0.0
+            return max(0.0, cap_pct * equity - used)
+        except Exception:
+            return 0.0
+
+    def _warn_backend_race(self, pair: str, desired_risk: float, room: float) -> None:
+        msg = (
+            f"Risk room stale for {pair}: requested={desired_risk:.6f} "
+            f"backend_room={room:.6f}; rejecting sizing to avoid over-allocation"
+        )
+        try:
+            self._log.warning(msg)
+        except Exception:
+            self._log_debug(msg)
 
     def _available_risk_room(self, pair: str, equity: float, tier_pol: TierPolicy) -> float:
         cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)

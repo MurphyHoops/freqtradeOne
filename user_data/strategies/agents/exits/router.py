@@ -183,10 +183,9 @@ class ExitRouter:
           * return a dict with 'exit_long'/'exit_short'/'exit_tag' columns/arrays.
 
         Aggregation:
-          * exit_long/exit_short: take max(0/1) across rules（OR 语义）
-          * exit_tag: 如果多条规则同时触发，优先级低的先写，高的可覆盖（按 priority 排序）
+          * exit_long/exit_short: take max(0/1) across rules?OR ????)
+          * exit_tag: ?????????????????????????? priority ????)
         """
-        # Ensure required columns exist but don't destroy existing signals
         if "exit_long" not in df.columns:
             df["exit_long"] = 0
         if "exit_short" not in df.columns:
@@ -195,7 +194,6 @@ class ExitRouter:
             try:
                 df["exit_tag"] = None
             except Exception:
-                # some DataFrame-likes may not support None -> use empty string
                 df["exit_tag"] = ""
 
         def _series_from(value):
@@ -208,10 +206,13 @@ class ExitRouter:
                     series = pd.Series([value] * len(df.index), index=df.index)
             return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
 
-        def _merge_or(col_name: str, incoming) -> None:
-            base = pd.to_numeric(df[col_name], errors="coerce").fillna(0).astype(int)
-            merged = pd.concat([base, _series_from(incoming)], axis=1).max(axis=1)
-            df[col_name] = merged.astype(int)
+        def _align_tag(value):
+            if isinstance(value, pd.Series):
+                return value.reindex(df.index)
+            try:
+                return pd.Series(value, index=df.index)
+            except Exception:
+                return pd.Series([value] * len(df.index), index=df.index)
 
         pair = metadata.get("pair", "")
         timeframe = metadata.get("timeframe", getattr(cfg, "timeframe", ""))
@@ -226,6 +227,13 @@ class ExitRouter:
             strategy=strategy,
         )
 
+        base_exit_long = pd.to_numeric(df["exit_long"], errors="coerce").fillna(0).astype(int)
+        base_exit_short = pd.to_numeric(df["exit_short"], errors="coerce").fillna(0).astype(int)
+        exit_long_signals = [base_exit_long]
+        exit_short_signals = [base_exit_short]
+        last_tag_out = None
+        exit_tag_result = df.get("exit_tag")
+
         for _, name, fn in self._vector_rules:
             try:
                 out = fn(df, vctx)
@@ -235,32 +243,49 @@ class ExitRouter:
             if out is None:
                 continue
 
-            # If a dict of columns returned, merge columns
             if isinstance(out, dict):
                 if "exit_long" in out:
-                    _merge_or("exit_long", out["exit_long"])
+                    exit_long_signals.append(_series_from(out["exit_long"]))
                 if "exit_short" in out:
-                    _merge_or("exit_short", out["exit_short"])
+                    exit_short_signals.append(_series_from(out["exit_short"]))
                 if "exit_tag" in out:
-                    # Higher-priority rules come later – allow overwrite
-                    try:
-                        df["exit_tag"] = out["exit_tag"]
-                    except Exception:
-                        pass
+                    last_tag_out = out["exit_tag"]
                 continue
 
-            # If a df-like returned, assume it already wrote columns
             try:
-                # sanity: ensure columns exist
                 for c in ("exit_long", "exit_short"):
                     if c not in df.columns:
                         df[c] = 0
                 if "exit_tag" not in df.columns:
                     df["exit_tag"] = None
+                updated_long = pd.to_numeric(df["exit_long"], errors="coerce").fillna(0).astype(int)
+                updated_short = pd.to_numeric(df["exit_short"], errors="coerce").fillna(0).astype(int)
+                exit_long_signals.append(updated_long)
+                exit_short_signals.append(updated_short)
+                exit_tag_result = df.get("exit_tag", exit_tag_result)
             except Exception:
                 pass
 
+        df["exit_long"] = pd.concat(exit_long_signals, axis=1).max(axis=1).astype(int)
+        df["exit_short"] = pd.concat(exit_short_signals, axis=1).max(axis=1).astype(int)
+
+        if last_tag_out is not None:
+            try:
+                df["exit_tag"] = _align_tag(last_tag_out)
+            except Exception:
+                pass
+        elif exit_tag_result is not None:
+            try:
+                df["exit_tag"] = exit_tag_result
+            except Exception:
+                try:
+                    df["exit_tag"] = _align_tag(exit_tag_result)
+                except Exception:
+                    pass
+
         return df
+
+
 
 
 # Global singleton + decorators

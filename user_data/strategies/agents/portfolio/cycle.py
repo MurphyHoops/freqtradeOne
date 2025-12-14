@@ -98,6 +98,7 @@ class CycleAgent:
                 self.state.debt_pool = 0.0
                 for pst in self.state.per_pair.values():
                     pst.local_loss = 0.0
+                    pst.closs = 0  
             self.state.treasury.cycle_start_tick = self.state.bar_tick
             self.state.treasury.cycle_start_equity = equity
 

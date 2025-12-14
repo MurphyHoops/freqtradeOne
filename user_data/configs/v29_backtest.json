@@ -11,6 +11,7 @@
     "startup_candle_count": 210,
     "datadir": "user_data/data",
     "enable_protections": false,
+    "global_backend_mode": "local",
     "fee": 0.0004,
     "exchange": {
         "name": "binanceusdm",

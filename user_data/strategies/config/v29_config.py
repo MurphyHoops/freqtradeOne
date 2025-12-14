@@ -91,8 +91,8 @@ class GatekeepingConfig:
     """Global debt gatekeeping parameters."""
 
     enabled: bool = True  # Master toggle for gatekeeping; disable to bypass checks.
-    min_score_fast: float = 0.8  # Minimum score required for fast bucket admission.
-    min_score_slow: float = 0.6  # Minimum score required for slow bucket admission.
+    min_score_fast: float = 0.0  # Minimum score required for fast bucket admission.
+    min_score_slow: float = 0.0  # Minimum score required for slow bucket admission.
 
     # Fast Bucket 准入条件 (激进回血)
     fast_percentile: int = 90       # Percentile threshold for fast admission; higher = stricter (top 10% by default).
@@ -104,7 +104,7 @@ class GatekeepingConfig:
 
     # 无债务时的宽松模式
     no_debt_percentile: int = 30    # Percentile threshold when no debt; lower = more permissive.
-    healthy_allow_score: float = 0.2  # Healthy coin privilege score; closs=0 above this can enter slow during debt. Lower -> more entries.
+    healthy_allow_score: float = 0.0  # Healthy coin privilege score; closs=0 above this can enter slow during debt. Lower -> more entries.
 
 
 @dataclass(frozen=True)
@@ -143,14 +143,14 @@ class SystemConfig:
 class RiskConfig:
     """Risk-related knobs including gatekeeping and decay."""
 
-    portfolio_cap_pct_base: float = 0.20  # Base portfolio VaR cap (% of equity); raise to allow more open risk.
+    portfolio_cap_pct_base: float = 2  # Base portfolio VaR cap (% of equity); raise to allow more open risk.
     drawdown_threshold_pct: float = 0.15  # Debt/equity ratio that halves CAP; lower to throttle sooner.
     gatekeeping: GatekeepingConfig = field(default_factory=GatekeepingConfig)  # Tiered gatekeeping parameters.
     tax_rate_on_wins: float = 0.20  # Fraction of profit siphoned to repay debt; higher repays faster but reduces compounding.
     pain_decay_per_bar: float = 0.999  # Debt decay per bar (0-1); smaller = faster natural debt forgiveness.
-    clear_debt_on_profitable_cycle: bool = True  # If True, profitable cycles wipe remaining debt; disable to keep debt sticky.
+    clear_debt_on_profitable_cycle: bool = True  # （周期性清空债务和closs）If True, profitable cycles wipe remaining debt; disable to keep debt sticky.
 
-
+    
 @dataclass(frozen=True)
 class TradingConfig:
     """Trading-related sizing and treasury wiring."""
@@ -299,10 +299,10 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_edge=0.002,
         sizing_algo="BASE_ONLY",
         k_mult_base_pct=0.0,
-        recovery_factor=1.0,
+        recovery_factor=2.0,
         cooldown_bars=0,
         cooldown_bars_after_win=0,
-        per_pair_risk_cap_pct=0.02,
+        per_pair_risk_cap_pct=1,
         max_stake_notional_pct=0.5,
         icu_force_exit_bars=0,
         default_exit_profile="ATRtrail_v1",

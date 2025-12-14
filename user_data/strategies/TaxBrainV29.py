@@ -487,7 +487,7 @@ class GlobalState:
         if profit_abs >= 0:
             tax_rate = getattr(getattr(self.cfg, "risk", None), "tax_rate_on_wins", 0.0)
             recovered = min(profit_abs, pst.local_loss)
-            pst.local_loss = max(0.0, pst.local_loss - recovered)
+            pst.local_loss = 0 #max(0.0, pst.local_loss - recovered)
             self.debt_pool = max(0.0, self.debt_pool - recovered)
             excess_profit = profit_abs - recovered
             tax = 0.0
@@ -1503,6 +1503,8 @@ class TaxBrainV29(IStrategy):
             "recipe": candidate.recipe,
             "plan_timeframe": getattr(candidate, "plan_timeframe", None),
             "atr_pct": getattr(candidate, "plan_atr_pct", None),
+            "expected_edge":candidate.expected_edge,
+            "raw_score":candidate.raw_score,
         }
 
     def _normalize_entry_meta(self, meta: Optional[Dict[str, Any]], side: str) -> Optional[Dict[str, Any]]:
@@ -1857,6 +1859,9 @@ class TaxBrainV29(IStrategy):
         When recording trades via state.record_trade_open(), always use nominal position sizes;
         do not confuse stake_margin with any *_nominal field.
         """
+        # === 1. 先补录强平/漏掉的单子 (Fix: Liquidation Reset Bug) ===
+        self._reconcile_missed_exits(pair)
+
         meta = self._extract_entry_meta(pair, entry_tag, side)
         if not meta:
             return 0.0
@@ -1868,6 +1873,7 @@ class TaxBrainV29(IStrategy):
             meta["bucket"] = gate_result.bucket
 
         sl = float(meta.get("sl_pct", 0.0))
+
         tp = float(meta.get("tp_pct", 0.0))
         direction = str(meta.get("dir"))
 
@@ -2358,3 +2364,52 @@ class TaxBrainV29(IStrategy):
                     return "atr_entry_tp"
 
         return None
+
+    def _reconcile_missed_exits(self, pair: str) -> None:
+            """
+            [回测专用] 对账补录：主动扫描那些没有触发 confirm_trade_exit 的已结交易（主要是强平）。
+            如果不补录，系统会不知道发生了强平，导致 Tier 不升级，马丁不加仓。
+            """
+            if not self._is_backtest_like_runmode() or not self.tier_mgr:
+                return
+
+            # 1. 确保已处理集合存在
+            processed = getattr(self, "_bt_closed_trades", None)
+            if processed is None:
+                processed = set()
+                self._bt_closed_trades = processed
+
+            # 2. 从 Freqtrade 获取该币种所有已平仓订单
+            # 注意：这会获取历史所有已平仓单，为了性能，我们只检查最后几个
+            trades = Trade.get_trades_proxy(pair=pair, is_open=False)
+            if not trades:
+                return
+
+            # 3. 倒序检查（只检查最近的，提高效率）
+            for trade in reversed(trades):
+                trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
+                
+                # 如果这个单子我们已经处理过了，就停止检查（假设更早的也处理了）
+                if trade_id in processed:
+                    break
+                
+                # 4. 发现漏网之鱼！补录状态！
+                # 因为 Trade 对象在数据库里是 Close 状态，close_profit_abs 应该是准的
+                profit_abs = getattr(trade, "close_profit_abs", None)
+                if profit_abs is None:
+                    # 兜底计算
+                    rate = getattr(trade, "close_rate", 0.0)
+                    profit_abs = self._compute_profit_abs(trade, rate)
+                
+                # 执行核心状态更新：增加 closs，增加 local_loss，增加 debt_pool
+                self.state.record_trade_close(pair, trade_id, float(profit_abs), self.tier_mgr)
+                processed.add(trade_id)
+                
+                # 记录补录日志
+                try:
+                    self._tier_debug(f"RECONCILE: Found missed exit (Liquidation?) for {pair} {trade_id}, pnl={profit_abs}")
+                    # 如果你加了 _log_full_exit_state 辅助函数，这里也可以调用它记录到 jsonl
+                    if hasattr(self, "_log_full_exit_state"):
+                        self._log_full_exit_state(pair, trade, "liquidation_reconcile", float(profit_abs))
+                except Exception:
+                    pass

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from ...config.v29_config import SizingAlgoConfig, V29Config, get_exit_profile
-from ...schemas import SizingContext
+from .schemas import SizingContext
 from .sizing_algos import ALGO_REGISTRY, Caps, SizingInputs
 from .reservation import ReservationAgent
 from .tier import TierManager, TierPolicy

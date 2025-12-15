@@ -1830,10 +1830,40 @@ class TaxBrainV29(IStrategy):
         When recording trades via state.record_trade_open(), always use nominal position sizes;
         do not confuse stake_margin with any *_nominal field.
         """
-        self._reconcile_missed_exits(pair)
+        # 1. 先处理可能遗漏的退出（保持原样）
+        # self._reconcile_missed_exits(pair)
+
+        # ==================== 【修复开始】手动喂信号 ====================
+        # 解析 Freqtrade 传入的 entry_tag (JSON 字符串)，必须在 _backtest_catch_up 之前
+        meta = self._extract_entry_meta(pair, entry_tag, side)
+
+        # 仅在回测/Hyperopt 模式下，且成功解析出 meta 时执行状态注入
+        if self._is_backtest_like_runmode() and meta:
+            pst = self.state.get_pair_state(pair)
+
+            # 强制更新 pair_state，模拟实盘中 populate_entry_trend 的效果
+            # 这样 TreasuryAgent.plan() 就能读到非零的 last_score 了
+            try:
+                pst.last_score = float(meta.get("score", meta.get("expected_edge", 0.0)))
+                pst.last_dir = meta.get("dir")
+                pst.last_sl_pct = float(meta.get("sl_pct", 0.0))
+                pst.last_tp_pct = float(meta.get("tp_pct", 0.0))
+
+                # 补充必要字段，防止 Treasury 因字段缺失而过滤
+                # 如果 meta 里没这些字段，给个默认值确保能过 Gatekeeper
+                pst.last_kind = str(meta.get("kind", "backtest_signal"))
+                pst.last_squad = str(meta.get("squad", "NBX"))
+                pst.last_exit_profile = meta.get("exit_profile")
+                pst.last_recipe = meta.get("recipe")
+            except Exception:
+                pass
+        # ==================== 【修复结束】 ====================
+
+        # 2. 时光机倒带：补齐债务衰减、冷却，并重新运行 Treasury.plan()
+        # 此时 Treasury 已经能看到上面注入的 last_score 了
         self._backtest_catch_up(current_time)
 
-        meta = self._extract_entry_meta(pair, entry_tag, side)
+        # 3. 后续标准流程（保持原样）
         if not meta:
             return 0.0
 

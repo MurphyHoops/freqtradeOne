@@ -133,9 +133,7 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
             debt_pool_component = inputs.state.debt_pool
 
     B0 = inputs.base_nominal
-    # if inputs.bucket_label == "fast":
-    #     L_total = 0.0
-    # else:
+
     L_total = pst.local_loss * tier.recovery_factor
     rec_bucket = bucket_for_recovery + debt_pool_component
 

@@ -102,7 +102,7 @@ class GatekeepingConfig:
 
     # Slow Bucket 准入条件 (稳健积累)
     slow_percentile: int = 60       # Percentile threshold for slow admission; higher = stricter (top 40% by default).
-    slow_max_closs: int = 3         # Max closs allowed into slow; raise to admit more impaired pairs.
+    slow_max_closs: int = 3         # 中央有债务的时候就会启动，closs一旦超过这个值就不会再开仓
 
     # 无债务时的宽松模式
     no_debt_percentile: int = 30    # Percentile threshold when no debt; lower = more permissive.

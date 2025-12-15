@@ -39,6 +39,11 @@ class SizerAgent:
             Path(getattr(cfg, "user_data_dir", "user_data")) / "logs" / "sizer_debug.log"
         )
         self._validate_sizing_algos()
+        self.dp = None
+
+    def set_dataprovider(self, dp) -> None:
+        """Inject DataProvider for dynamic min_notional lookups."""
+        self.dp = dp
 
     def _log_debug(self, msg: str) -> None:
         try:
@@ -88,6 +93,7 @@ class SizerAgent:
         plan_atr_pct: Optional[float] = None,
         exit_profile: Optional[str] = None,
         bucket: Optional[str] = None,
+        current_rate: float = 0.0,
     ) -> Tuple[float, float, str]:
         ctx = SizingContext(
             pair=pair,
@@ -101,6 +107,7 @@ class SizerAgent:
             plan_atr_pct=plan_atr_pct,
             exit_profile=exit_profile,
             bucket=bucket,
+            current_rate=current_rate,
         )
         return self._compute_internal(ctx)
 
@@ -121,8 +128,13 @@ class SizerAgent:
             return (0.0, 0.0, bucket)
 
         base_nominal, min_entry_nominal, per_trade_cap_nominal, exchange_cap_nominal = self._compute_base_nominal(
-            ctx, tier_pol, equity, lev
+            ctx, tier_pol, equity, lev, ctx.current_rate
         )
+        if base_nominal <= 0 or min_entry_nominal <= 0:
+            self._log_debug(
+                f"skip sizing base_nominal={base_nominal:.6f} min_entry_nominal={min_entry_nominal:.6f} pair={ctx.pair}"
+            )
+            return (0.0, 0.0, bucket)
         base_risk = base_nominal * sl_price_pct
         baseline_risk = self._baseline_risk(equity, tier_pol)
 
@@ -259,47 +271,77 @@ class SizerAgent:
         return lev, sl_price_pct, sl_roi_pct, plan_atr_pct, atr_mul_sl
 
     def _compute_base_nominal(
-        self, ctx: SizingContext, tier_pol: TierPolicy, equity: float, lev: float
+        self, ctx: SizingContext, tier_pol: TierPolicy, equity: float, lev: float, current_rate: float
     ) -> Tuple[float, float, float, float]:
         """Compute base nominal size ignoring recovery/buckets/caps."""
 
         sizing_cfg = getattr(getattr(self.cfg, "trading", None), "sizing", getattr(self.cfg, "sizing", None))
-        static_nominal = max(0.0, float(sizing_cfg.static_initial_nominal or 0.0))
-        dynamic_nominal = max(0.0, equity * float(sizing_cfg.initial_size_equity_pct or 0.0))
-        mode = str(getattr(sizing_cfg, "initial_size_mode", "hybrid")).lower()
-        if mode == "static":
-            base_nominal = static_nominal
-        elif mode == "dynamic":
-            base_nominal = dynamic_nominal
-            if static_nominal > 0:
-                base_nominal = max(base_nominal, static_nominal)
-        else:
-            base_nominal = max(static_nominal, dynamic_nominal)
+        mult = float(getattr(sizing_cfg, "min_stake_multiplier", 1.0) or 1.0) if sizing_cfg else 1.0
+        max_seed_cap = float(getattr(sizing_cfg, "initial_max_nominal_cap", 0.0) or 0.0) if sizing_cfg else 0.0
 
-        min_notional = max(0.0, float(ctx.min_stake or 0.0) * lev) if ctx.min_stake else 0.0
-        max_notional_exchange = max(0.0, float(ctx.max_stake or 0.0) * lev) if ctx.max_stake else 0.0
-        min_entry_nominal = max(min_notional, static_nominal) if (min_notional > 0 or static_nominal > 0) else 0.0
+        exchange_min = 5.0
+        rate = float(current_rate or getattr(ctx, "current_rate", 0.0) or 0.0)
+        if self.dp and rate > 0:
+            try:
+                market = None
+                if hasattr(self.dp, "market"):
+                    market = self.dp.market(ctx.pair)
+                elif hasattr(self.dp, "get_market"):
+                    market = self.dp.get_market(ctx.pair)
+                limits = market.get("limits", {}) if isinstance(market, dict) else {}
+                min_cost = (limits.get("cost") or {}).get("min") if limits else None
+                min_amount = (limits.get("amount") or {}).get("min") if limits else None
+                candidates = []
+                if min_cost is not None:
+                    try:
+                        mc = float(min_cost)
+                        if mc > 0:
+                            candidates.append(mc)
+                    except Exception:
+                        pass
+                if min_amount is not None:
+                    try:
+                        ma = float(min_amount)
+                        if ma > 0:
+                            candidates.append(ma * rate)
+                    except Exception:
+                        pass
+                if candidates:
+                    exchange_min = max(exchange_min, max(candidates))
+            except Exception:
+                pass
 
-        per_trade_cap_nominal = float(sizing_cfg.initial_max_nominal_per_trade or 0.0)
+        if ctx.min_stake:
+            try:
+                exchange_min = max(exchange_min, float(ctx.min_stake) * lev)
+            except Exception:
+                pass
+
+        base_nominal = max(exchange_min * mult, 0.0)
+        if max_seed_cap > 0 and base_nominal > max_seed_cap:
+            self._log_debug(
+                f"FILTERED: {ctx.pair} min_req {base_nominal:.6f} > cap {max_seed_cap}"
+            )
+            return (0.0, 0.0, 0.0, 0.0)
+
+        per_trade_cap_nominal = float(sizing_cfg.initial_max_nominal_per_trade or 0.0) if sizing_cfg else 0.0
         if per_trade_cap_nominal <= 0:
             per_trade_cap_nominal = float("inf")
 
-        per_pair_cap_static = float(sizing_cfg.per_pair_max_nominal_static or 0.0)
+        per_pair_cap_static = float(sizing_cfg.per_pair_max_nominal_static or 0.0) if sizing_cfg else 0.0
         if per_pair_cap_static <= 0:
             per_pair_cap_static = float("inf")
 
-        if min_entry_nominal > 0:
-            base_nominal = max(base_nominal, min_entry_nominal)
-
+        min_entry_nominal = base_nominal if base_nominal > 0 else exchange_min
         base_nominal = min(base_nominal, per_trade_cap_nominal, per_pair_cap_static)
-        if max_notional_exchange > 0:
-            base_nominal = min(base_nominal, max_notional_exchange)
+
+        max_notional_exchange = 0.0
 
         return (
             max(base_nominal, 0.0),
-            min_entry_nominal,
+            max(min_entry_nominal, 0.0),
             per_trade_cap_nominal,
-            max_notional_exchange if max_notional_exchange > 0 else float("inf"),
+            float("inf") if max_notional_exchange <= 0 else max_notional_exchange,
         )
 
     def _compute_caps(

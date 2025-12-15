@@ -62,8 +62,10 @@ class SizingConfig:
     """Aggregate all sizing knobs related to initial position sizing."""
 
     initial_size_mode: Literal["static", "dynamic", "hybrid"] = "static"  # How base nominal is computed; hybrid = max(static, dynamic).
-    static_initial_nominal: float = 6.0  # Static nominal seed per trade; raise for larger starting size.
+    static_initial_nominal: float = 6.0  # Deprecated: legacy static seed; kept for backward compatibility.
     initial_size_equity_pct: float = 0.0  # Dynamic seed as % of equity; raise to scale with account size.
+    min_stake_multiplier: float = 1.0  # Multiplier on exchange min_notional to seed positions.
+    initial_max_nominal_cap: float = 20.0  # Skip entries whose min_notional exceeds this cap (filters expensive pairs).
     initial_max_nominal_per_trade: float = 3000.0  # Hard ceiling per trade nominal; lower to clamp single-trade exposure.
     per_pair_max_nominal_static: float = 3000.0  # Static cap of open nominal per pair; lower to limit pair concentration.
     enforce_leverage: float = 10.0  # Fixed leverage applied; lower to reduce margin, higher increases exposure.
@@ -235,7 +237,7 @@ def default_profiles_factory() -> Dict[str, ExitProfile]:
             atr_timeframe=None,  # Use primary timeframe ATR
             atr_mul_sl=8.0,  # Stop at 8x ATR; raise to widen stops
             floor_sl_pct=1e-12,  # Absolute SL floor to avoid zero
-            atr_mul_tp=2.0,  # TP at 2x ATR; raise to target farther profits
+            atr_mul_tp=4.0,  # TP at 2x ATR; raise to target farther profits
             breakeven_lock_frac_of_tp=0.0,  # Fraction of TP before breakeven lock; >0 adds protection
             trail_mode=None,
             trail_atr_mul=0.0,
@@ -299,7 +301,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_edge=0.002,
         sizing_algo="BASE_ONLY",
         k_mult_base_pct=0.0,
-        recovery_factor=2.0,
+        recovery_factor=1.0,
         cooldown_bars=0,
         cooldown_bars_after_win=0,
         per_pair_risk_cap_pct=1,
@@ -320,7 +322,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_edge=0.000,
         sizing_algo="TARGET_RECOVERY",
         k_mult_base_pct=1.0,
-        recovery_factor=2,
+        recovery_factor=1,
         cooldown_bars=0,
         cooldown_bars_after_win=0,
         per_pair_risk_cap_pct=1,
@@ -340,7 +342,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_edge=0.000,
         sizing_algo="TARGET_RECOVERY",
         k_mult_base_pct=1.0,
-        recovery_factor=2,
+        recovery_factor=1,
         cooldown_bars=0,
         cooldown_bars_after_win=0,
         per_pair_risk_cap_pct=1,
@@ -506,6 +508,8 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         "initial_size_mode": ("trading", "sizing", "initial_size_mode"),
         "static_initial_nominal": ("trading", "sizing", "static_initial_nominal"),
         "initial_size_equity_pct": ("trading", "sizing", "initial_size_equity_pct"),
+        "min_stake_multiplier": ("trading", "sizing", "min_stake_multiplier"),
+        "initial_max_nominal_cap": ("trading", "sizing", "initial_max_nominal_cap"),
         "initial_max_nominal_per_trade": ("trading", "sizing", "initial_max_nominal_per_trade"),
         "per_pair_max_nominal_static": ("trading", "sizing", "per_pair_max_nominal_static"),
         "enforce_leverage": ("trading", "sizing", "enforce_leverage"),

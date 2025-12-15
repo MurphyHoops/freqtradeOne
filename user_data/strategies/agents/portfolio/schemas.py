@@ -19,3 +19,4 @@ class SizingContext:
     plan_atr_pct: Optional[float] = None
     exit_profile: Optional[str] = None
     bucket: Optional[str] = None
+    current_rate: float = 0.0

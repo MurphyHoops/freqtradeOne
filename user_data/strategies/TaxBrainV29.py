@@ -455,7 +455,7 @@ class GlobalState:
         pst = self.get_pair_state(pair)
         pair_key = self._canonical_pair(pair)
 
-        # 1) 回收风险账本
+        # 1) 回收风险 账本
         was_risk = self.trade_risk_ledger.pop(trade_id, 0.0)
         self.pair_risk_open[pair_key] = max(
             0.0,
@@ -836,6 +836,8 @@ class TaxBrainV29(IStrategy):
         self.dp = dp
         if hasattr(self, "exit_policy") and self.exit_policy is not None:
             self.exit_policy.dp = dp
+        if hasattr(self, "sizer"):
+            self.sizer.set_dataprovider(dp)
         if self.exit_facade:
             self.exit_facade.set_dataprovider(dp)
 
@@ -1640,41 +1642,6 @@ class TaxBrainV29(IStrategy):
         current_time: datetime | None = None,
         **kwargs,
     ) -> bool:
-        """Ensure backtests/hyperopts update tier state on exits."""
-
-        backtest_like = self._is_backtest_like_runmode()
-        if backtest_like and self.tier_mgr:
-            trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-            processed = getattr(self, "_bt_closed_trades", None)
-            if processed is None:
-                processed = set()
-                self._bt_closed_trades = processed
-            if trade_id not in processed:
-                profit_abs = self._compute_profit_abs(trade, rate)
-                try:
-                    self._tier_debug(
-                        f"ctx called pair={pair} id={trade_id} pnl={profit_abs}"
-                    )
-                    before = self.state.get_pair_state(pair).closs
-                    self.state.record_trade_close(pair, trade_id, profit_abs, self.tier_mgr)
-                    after = self.state.get_pair_state(pair).closs
-                    try:
-                        self.logger.info(
-                            f"[tier] bt-exit {pair} id={trade_id} pnl={profit_abs:.4f} closs {before}->{after}"
-                        )
-                        self._tier_debug(
-                            f"bt-exit pair={pair} id={trade_id} pnl={profit_abs:.4f} closs {before}->{after}"
-                        )
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    try:
-                        self.logger.warning(
-                            f"[tier] failed to record backtest exit {trade_id} {pair}: {exc}"
-                        )
-                    except Exception:
-                        pass
-                processed.add(trade_id)
         return True
 
     def _extract_entry_meta(
@@ -1840,7 +1807,7 @@ class TaxBrainV29(IStrategy):
     def custom_stake_amount(
         self,
         pair: str,
-        current_time,
+        current_time: datetime,
         current_rate: float,
         proposed_stake: float,
         min_stake: float | None,
@@ -1859,8 +1826,8 @@ class TaxBrainV29(IStrategy):
         When recording trades via state.record_trade_open(), always use nominal position sizes;
         do not confuse stake_margin with any *_nominal field.
         """
-        # === 1. 先补录强平/漏掉的单子 (Fix: Liquidation Reset Bug) ===
         self._reconcile_missed_exits(pair)
+        self._backtest_catch_up(current_time)
 
         meta = self._extract_entry_meta(pair, entry_tag, side)
         if not meta:
@@ -1873,7 +1840,6 @@ class TaxBrainV29(IStrategy):
             meta["bucket"] = gate_result.bucket
 
         sl = float(meta.get("sl_pct", 0.0))
-
         tp = float(meta.get("tp_pct", 0.0))
         direction = str(meta.get("dir"))
 
@@ -1889,6 +1855,7 @@ class TaxBrainV29(IStrategy):
             plan_atr_pct=meta.get("atr_pct"),
             exit_profile=meta.get("exit_profile"),
             bucket=meta.get("bucket"),
+            current_rate=current_rate,
         )
         if stake <= 0 or risk <= 0:
             return 0.0
@@ -1934,39 +1901,70 @@ class TaxBrainV29(IStrategy):
             )
             if opened:
                 try:
-                    self.state.get_pair_state(pair)._cooldown_last_ts = float(
-                        current_time.timestamp())
+                    self.state.get_pair_state(pair)._cooldown_last_ts = float(current_time.timestamp())
                 except Exception:
                     pass
             if opened and self._persist_enabled:
                 self.persist.save()
 
         elif is_exit:
-            # 对 exit：完全不依赖 _pending_entry_meta
-            closed = False
-            if self._is_backtest_like_runmode() and trade_id in getattr(self, "_bt_closed_trades", set()):
-                # 已在 confirm_trade_exit 中计数，避免重复累加 closs
-                closed = True
-            else:
-                closed = self.execution.on_close_filled(
-                    pair=pair,
-                    trade=trade,
-                    order=order,
-                    tier_mgr=self.tier_mgr,
-                )
-            if closed:
+            processed = getattr(self, "_bt_closed_trades", None)
+            if processed is None:
+                processed = set()
+                self._bt_closed_trades = processed
+
+            if self._is_backtest_like_runmode() and trade_id in processed:
+                return
+
+            if self._is_backtest_like_runmode() and current_time:
+                self._backtest_catch_up(current_time)
+
+            profit_abs = getattr(trade, "close_profit_abs", 0.0)
+            if profit_abs is None or profit_abs == 0.0:
+                fill_price = getattr(order, "average", getattr(order, "price", getattr(trade, "close_rate", 0.0)))
+                if fill_price and fill_price > 0:
+                    profit_abs = self._compute_profit_abs(trade, fill_price)
+
+            if profit_abs != 0:
                 try:
-                    self.state.get_pair_state(pair)._cooldown_last_ts = float(
-                        current_time.timestamp())
+                    trade.close_profit_abs = profit_abs
+                    trade.profit_abs = profit_abs
                 except Exception:
                     pass
+
+            closed = self.execution.on_close_filled(
+                pair=pair,
+                trade=trade,
+                order=order,
+                tier_mgr=self.tier_mgr,
+            )
+
+            if closed:
+                try:
+                    self.state.get_pair_state(pair)._cooldown_last_ts = float(current_time.timestamp())
+                except Exception:
+                    pass
+
+                reason = getattr(trade, "exit_reason", "unknown_fill")
+                fill_price = getattr(order, "average", getattr(order, "price", getattr(trade, "close_rate", 0.0)))
+
+                self._log_full_exit_state(
+                    pair=pair,
+                    trade=trade,
+                    reason=reason,
+                    pnl_abs=profit_abs,
+                    exit_rate=fill_price,
+                    exit_time=current_time,
+                )
+
+            if self._is_backtest_like_runmode():
+                processed.add(trade_id)
+
             if closed and self._persist_enabled:
                 self.persist.save()
-
         else:
             # 其它类型（比如 reduce_only / 手动改单等），可以先忽略或简单打个日志
             return
-
 
     def order_cancelled(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
         """当订单被撤销时，释放对应预约并记录分析日志，符合 V29.1 修订 #5（仅释放预约，不回灌财政字段）。"""
@@ -2366,50 +2364,108 @@ class TaxBrainV29(IStrategy):
         return None
 
     def _reconcile_missed_exits(self, pair: str) -> None:
-            """
-            [回测专用] 对账补录：主动扫描那些没有触发 confirm_trade_exit 的已结交易（主要是强平）。
-            如果不补录，系统会不知道发生了强平，导致 Tier 不升级，马丁不加仓。
-            """
-            if not self._is_backtest_like_runmode() or not self.tier_mgr:
-                return
+        if not self._is_backtest_like_runmode() or not self.tier_mgr:
+            return
+        processed = getattr(self, "_bt_closed_trades", None)
+        if processed is None:
+            processed = set()
+            self._bt_closed_trades = processed
 
-            # 1. 确保已处理集合存在
-            processed = getattr(self, "_bt_closed_trades", None)
-            if processed is None:
-                processed = set()
-                self._bt_closed_trades = processed
+        trades = Trade.get_trades_proxy(pair=pair, is_open=False)
+        if not trades:
+            return
 
-            # 2. 从 Freqtrade 获取该币种所有已平仓订单
-            # 注意：这会获取历史所有已平仓单，为了性能，我们只检查最后几个
-            trades = Trade.get_trades_proxy(pair=pair, is_open=False)
-            if not trades:
-                return
+        for trade in reversed(trades):
+            trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
+            if trade_id in processed:
+                break
 
-            # 3. 倒序检查（只检查最近的，提高效率）
-            for trade in reversed(trades):
-                trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-                
-                # 如果这个单子我们已经处理过了，就停止检查（假设更早的也处理了）
-                if trade_id in processed:
-                    break
-                
-                # 4. 发现漏网之鱼！补录状态！
-                # 因为 Trade 对象在数据库里是 Close 状态，close_profit_abs 应该是准的
-                profit_abs = getattr(trade, "close_profit_abs", None)
-                if profit_abs is None:
-                    # 兜底计算
-                    rate = getattr(trade, "close_rate", 0.0)
-                    profit_abs = self._compute_profit_abs(trade, rate)
-                
-                # 执行核心状态更新：增加 closs，增加 local_loss，增加 debt_pool
-                self.state.record_trade_close(pair, trade_id, float(profit_abs), self.tier_mgr)
-                processed.add(trade_id)
-                
-                # 记录补录日志
-                try:
-                    self._tier_debug(f"RECONCILE: Found missed exit (Liquidation?) for {pair} {trade_id}, pnl={profit_abs}")
-                    # 如果你加了 _log_full_exit_state 辅助函数，这里也可以调用它记录到 jsonl
-                    if hasattr(self, "_log_full_exit_state"):
-                        self._log_full_exit_state(pair, trade, "liquidation_reconcile", float(profit_abs))
-                except Exception:
-                    pass
+            profit_abs = getattr(trade, "close_profit_abs", None)
+            if profit_abs is None:
+                rate = getattr(trade, "close_rate", 0.0)
+                profit_abs = self._compute_profit_abs(trade, rate)
+
+            self.state.record_trade_close(pair, trade_id, float(profit_abs), self.tier_mgr)
+            processed.add(trade_id)
+
+    def _backtest_catch_up(self, current_time: datetime) -> None:
+        if not self._is_backtest_like_runmode() or not self.state.last_finalized_bar_ts:
+            return
+        now_ts = current_time.timestamp()
+        last_ts = self.state.last_finalized_bar_ts
+        delta_seconds = now_ts - last_ts
+        if delta_seconds < self._tf_sec:
+            return
+
+        bars_passed = int(delta_seconds // self._tf_sec)
+        self.state.bar_tick += bars_passed
+        self.state.last_finalized_bar_ts = now_ts
+
+        decay_rate = getattr(getattr(self.cfg, "risk", None), "pain_decay_per_bar", 0.999)
+        if self.state.debt_pool > 0:
+            self.state.debt_pool *= (decay_rate ** bars_passed)
+        for pst in self.state.per_pair.values():
+            if pst.cooldown_bars_left > 0:
+                pst.cooldown_bars_left = max(0, pst.cooldown_bars_left - bars_passed)
+
+        cycle_len = int(self.cfg.cycle_len_bars)
+        start_tick = self.state.treasury.cycle_start_tick
+        if (self.state.bar_tick - start_tick) >= cycle_len:
+            equity = self.eq_provider.get_equity()
+            if (equity - self.state.treasury.cycle_start_equity) >= 0 and self.cfg.risk.clear_debt_on_profitable_cycle:
+                self.state.debt_pool = 0.0
+                for pst in self.state.per_pair.values():
+                    pst.local_loss = 0.0
+                    pst.closs = 0
+            self.state.treasury.cycle_start_tick = self.state.bar_tick
+            self.state.treasury.cycle_start_equity = equity
+
+        try:
+            snapshot = self.cycle_agent._build_snapshot()
+            plan = self.treasury_agent.plan(snapshot, self.eq_provider.get_equity())
+            self.state.treasury.fast_alloc_risk = plan.fast_alloc_risk
+            self.state.treasury.slow_alloc_risk = plan.slow_alloc_risk
+        except Exception:
+            pass
+
+    def _log_full_exit_state(
+        self,
+        pair: str,
+        trade,
+        reason: str,
+        pnl_abs: float,
+        exit_rate: float | None = None,
+        exit_time: datetime | None = None,
+    ):
+        try:
+            trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
+            pst = self.state.get_pair_state(pair)
+            tier_pol = self.tier_mgr.get(pst.closs)
+            tier_name = getattr(tier_pol, "name", "unknown")
+
+            entry_price = getattr(trade, "open_rate", 0.0)
+            amount = getattr(trade, "amount", 0.0)
+            stake_amount = getattr(trade, "stake_amount", 0.0)
+            open_date = getattr(trade, "open_date", None)
+
+            final_exit_price = exit_rate if exit_rate is not None else getattr(trade, "close_rate", 0.0)
+            final_exit_time = exit_time if exit_time is not None else getattr(trade, "close_date", None)
+
+            details = {
+                "pnl_abs": pnl_abs,
+                "tier": tier_name,
+                "closs": pst.closs,
+                "local_debt": pst.local_loss,
+                "central_debt": self.state.debt_pool,
+                "cooldown": pst.cooldown_bars_left,
+                "entry_price": entry_price,
+                "exit_price": final_exit_price,
+                "amount": amount,
+                "stake": stake_amount,
+                "open_at": str(open_date) if open_date else "",
+                "close_at": str(final_exit_time) if final_exit_time else "",
+                "duration": str(final_exit_time - open_date) if (final_exit_time and open_date) else "",
+            }
+            self.analytics.log_exit(pair, trade_id, reason, **details)
+        except Exception as e:
+            print(f"Log exit state failed: {e}")

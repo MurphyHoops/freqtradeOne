@@ -122,7 +122,7 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     base_nominal = inputs.base_nominal
     bucket_risk = inputs.bucket_risk or 0.0
     ctx = inputs.ctx
-    recovery_price_pct = sl_price_pct  # default to SL distance; ATR mode may swap this to TP distance for recovery sizing
+    recovery_price_pct = sl_price_pct  #   default to SL distance; ATR mode may swap this to TP distance for recovery sizing
     base_risk = inputs.base_risk
     bucket_for_recovery = inputs.bucket_risk if tr_cfg.include_bucket_in_recovery else 0.0
     debt_pool_component = 0.0
@@ -132,7 +132,7 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
         else:
             debt_pool_component = inputs.state.debt_pool
 
-    B0 = max(sizing_cfg.static_initial_nominal, 0.0) if sizing_cfg else 0.0
+    B0 = inputs.base_nominal
     # if inputs.bucket_label == "fast":
     #     L_total = 0.0
     # else:
@@ -158,7 +158,7 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
         return SizingResult(target_risk=0.0, reason="TARGET_RECOVERY_no_recovery_price")
 
     S_recover_loss_raw = L_total / recovery_price_pct
-    S_recover_bucket_raw = L_bucket / recovery_price_pct
+    S_recover_bucket_raw = L_bucket / recovery_price_pct 
 
     alpha = getattr(tr_cfg, "bucket_scaling_factor", 1.0)
     S_recover_loss = S_recover_loss_raw

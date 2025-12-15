@@ -69,6 +69,16 @@ class DummyEquity:
         return self._equity
 
 
+class DummyDataProvider:
+    """Minimal dataprovider exposing exchange min_notional via market()."""
+
+    def __init__(self, min_cost: float):
+        self._min_cost = min_cost
+
+    def market(self, pair: str):
+        return {"limits": {"cost": {"min": self._min_cost}, "amount": {"min": None}}}
+
+
 class DummyTierMgr:
     """Return a prebuilt TierPolicy."""
 
@@ -155,6 +165,7 @@ def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
     )
     tier_mgr = DummyTierMgr(policy)
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
+    sizer.set_dataprovider(DummyDataProvider(6.0))
 
     stake, risk, bucket = sizer.compute(
         "TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000
@@ -179,6 +190,7 @@ def test_sizer_target_recovery_uses_local_loss():
             initial_size_equity_pct=0.0,
             initial_max_nominal_per_trade=1_000_000.0,
             per_pair_max_nominal_static=1_000_000.0,
+            initial_max_nominal_cap=1_000_000.0,
         ),
     )
     cfg.sizing_algos = replace(
@@ -192,6 +204,7 @@ def test_sizer_target_recovery_uses_local_loss():
     policy = build_policy(sizing_algo="TARGET_RECOVERY", recovery_factor=2.0, per_pair_risk_cap_pct=10.0, max_stake_notional_pct=10.0)
     tier_mgr = DummyTierMgr(policy)
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
+    sizer.set_dataprovider(DummyDataProvider(50.0))
 
     stake, risk, bucket = sizer.compute("TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000)
 
@@ -214,6 +227,7 @@ def test_sizer_respects_caps_and_minmax():
             initial_size_equity_pct=0.0,
             initial_max_nominal_per_trade=1000.0,
             per_pair_max_nominal_static=800.0,
+            initial_max_nominal_cap=1000.0,
         ),
     )
     cfg.sizing_algos = replace(
@@ -227,6 +241,7 @@ def test_sizer_respects_caps_and_minmax():
     policy = build_policy(per_pair_risk_cap_pct=10.0, max_stake_notional_pct=1.0)
     tier_mgr = DummyTierMgr(policy)
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
+    sizer.set_dataprovider(DummyDataProvider(50.0))
 
     stake, risk, bucket = sizer.compute(
         "TEST/USDT",
@@ -238,8 +253,8 @@ def test_sizer_respects_caps_and_minmax():
     )
 
     assert bucket == "slow"
-    assert stake == pytest.approx(200.0)
-    assert risk == pytest.approx(10.0)
+    assert stake == pytest.approx(800.0)
+    assert risk == pytest.approx(40.0)
 
 
 def test_sizer_caps_with_proposed_stake():

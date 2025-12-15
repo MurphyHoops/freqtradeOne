@@ -167,8 +167,6 @@ class ExecutionAgent:
         profit_abs: float = 0.0
         if getattr(trade, "close_profit_abs", None) is not None:
             profit_abs = float(trade.close_profit_abs)
-        elif getattr(trade, "profit_abs", None) is not None:
-            profit_abs = float(trade.profit_abs)
 
         self.state.record_trade_close(pair, trade_id, profit_abs, tier_mgr)
         self.eq.on_trade_closed_update(profit_abs)

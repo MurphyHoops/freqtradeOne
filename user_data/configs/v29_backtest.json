@@ -5,7 +5,7 @@
     "dry_run_wallet": 1000,
     "stake_currency": "USDT",
     "stake_amount": "unlimited",
-    "max_open_trades": 50,
+    "max_open_trades": 2,
     "tradable_balance_ratio": 0.99,
     "timeframe": "5m",
     "startup_candle_count": 210,

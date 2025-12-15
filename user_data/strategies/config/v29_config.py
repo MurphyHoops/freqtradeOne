@@ -102,7 +102,7 @@ class GatekeepingConfig:
 
     # Slow Bucket 准入条件 (稳健积累)
     slow_percentile: int = 60       # Percentile threshold for slow admission; higher = stricter (top 40% by default).
-    slow_max_closs: int = 1         # Max closs allowed into slow; raise to admit more impaired pairs.
+    slow_max_closs: int = 3         # Max closs allowed into slow; raise to admit more impaired pairs.
 
     # 无债务时的宽松模式
     no_debt_percentile: int = 30    # Percentile threshold when no debt; lower = more permissive.
@@ -235,7 +235,7 @@ def default_profiles_factory() -> Dict[str, ExitProfile]:
     return {
         "ATRtrail_v1": ExitProfile(
             atr_timeframe=None,  # Use primary timeframe ATR
-            atr_mul_sl=8.0,  # Stop at 8x ATR; raise to widen stops
+            atr_mul_sl=4.0,  # Stop at 8x ATR; raise to widen stops
             floor_sl_pct=1e-12,  # Absolute SL floor to avoid zero
             atr_mul_tp=4.0,  # TP at 2x ATR; raise to target farther profits
             breakeven_lock_frac_of_tp=0.0,  # Fraction of TP before breakeven lock; >0 adds protection

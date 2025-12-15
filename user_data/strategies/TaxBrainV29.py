@@ -445,95 +445,99 @@ class GlobalState:
             pst.cooldown_bars_left, tier_pol.cooldown_bars)
 
     def record_trade_close(self, pair: str, trade_id: str, profit_abs: float, tier_mgr) -> None:
-        """在平仓时回收风险、更新债务池，并依据盈亏调整冷却与连续亏损计数。
-        Args:
-            pair: 交易对名称。
-            trade_id: 交易标识。
-            profit_abs: 本次交易的绝对盈亏（正数表示盈利或打平）。
-            tier_mgr: TierManager，用于在状态更新后获取新的策略参数。
-        """
-        pst = self.get_pair_state(pair)
-        pair_key = self._canonical_pair(pair)
+            """
+            在平仓时回收风险、更新债务池。
+            逻辑修正：
+            1. Max Tier 之前的亏损：只增加 pst.local_loss，不增加 self.debt_pool。
+            2. Max Tier 及之后的亏损：增加 self.debt_pool，并清空 pst.local_loss。
+            3. 盈利：优先偿还 pst.local_loss，剩余的(excess)用于偿还 self.debt_pool。
+            """
+            pst = self.get_pair_state(pair)
+            pair_key = self._canonical_pair(pair)
 
-        # 1) 回收风险 账本
-        was_risk = self.trade_risk_ledger.pop(trade_id, 0.0)
-        self.pair_risk_open[pair_key] = max(
-            0.0,
-            self.pair_risk_open.get(pair_key, 0.0) - was_risk,
-        )
-        if self.pair_risk_open.get(pair_key, 0.0) <= 1e-12:
-            self.pair_risk_open[pair_key] = 0.0
+            # 1) 回收风险/保证金账本 (保持原样)
+            was_risk = self.trade_risk_ledger.pop(trade_id, 0.0)
+            self.pair_risk_open[pair_key] = max(0.0, self.pair_risk_open.get(pair_key, 0.0) - was_risk)
+            if self.pair_risk_open.get(pair_key, 0.0) <= 1e-12:
+                self.pair_risk_open[pair_key] = 0.0
 
-        # 2) 回收保证金账本
-        was_stake = self.trade_stake_ledger.pop(trade_id, 0.0)
-        self.pair_stake_open[pair_key] = max(
-            0.0,
-            self.pair_stake_open.get(pair_key, 0.0) - was_stake,
-        )
-        if self.pair_stake_open.get(pair_key, 0.0) <= 1e-12:
-            self.pair_stake_open[pair_key] = 0.0
+            was_stake = self.trade_stake_ledger.pop(trade_id, 0.0)
+            self.pair_stake_open[pair_key] = max(0.0, self.pair_stake_open.get(pair_key, 0.0) - was_stake)
+            if self.pair_stake_open.get(pair_key, 0.0) <= 1e-12:
+                self.pair_stake_open[pair_key] = 0.0
 
-        # 3) 从活跃订单中移除
-        pst.active_trades.pop(trade_id, None)
-        prev_closs = pst.closs
+            # 2) 从活跃订单中移除 (保持原样)
+            pst.active_trades.pop(trade_id, None)
+            prev_closs = pst.closs
 
-        # 4) 根据 TierRouting / DEFAULT_TIER_ROUTING_MAP 计算最大 closs 等级
-        #    这里使用 TierManager 内部已经构造好的 _routing_map，
-        #    实际上就是你在 v29_config.DEFAULT_TIER_ROUTING_MAP / tier_routing.loss_tier_map 配的那一份。
-        routing_map = getattr(tier_mgr, "_routing_map", None) or {}
-        max_closs = max(routing_map.keys()) if routing_map else 3  # 没配置时退回旧行为 0–3
+            # 3) 获取最大亏损等级
+            routing_map = getattr(tier_mgr, "_routing_map", None) or {}
+            max_closs = max(routing_map.keys()) if routing_map else 3
 
-        # 5) Profit: repay local first, then central if excess remains.
-        if profit_abs >= 0:
-            tax_rate = getattr(getattr(self.cfg, "risk", None), "tax_rate_on_wins", 0.0)
-            recovered = min(profit_abs, pst.local_loss)
-            pst.local_loss = 0 #max(0.0, pst.local_loss - recovered)
-            self.debt_pool = max(0.0, self.debt_pool - recovered)
-            excess_profit = profit_abs - recovered
-            tax = 0.0
-            if excess_profit > 0 and self.backend:
-                try:
-                    backend_debt = float(getattr(self.backend.get_snapshot(), "debt_pool", 0.0) or 0.0)
-                except Exception:
-                    backend_debt = 0.0
-                if backend_debt > 0:
-                    tax = excess_profit * tax_rate
-                    if tax > 0:
-                        self.backend.repay_loss(tax)
-            if tax > 0:
-                self.debt_pool = max(0.0, self.debt_pool - tax)
-            pst.closs = 0
+            # ==================== 核心修改区域开始 ====================
+
+            # A) 盈利处理逻辑 (Profit Handling)
+            if profit_abs >= 0:
+                # 1. 优先偿还本地债务
+                # 修正点：不要直接 pst.local_loss = 0，而是减去已还部分
+                recovered_local = min(profit_abs, pst.local_loss)
+                pst.local_loss = max(0.0, pst.local_loss - recovered_local)
+                
+                # 2. 计算超额利润 (Excess Profit)
+                excess_profit = profit_abs - recovered_local
+
+                # 3. 如果有超额利润，且中央债务池有债，则偿还中央债务
+                # 即使该币对没有贡献过中央债务，它的盈利也可以帮别人还债
+                if excess_profit > 0 and self.debt_pool > 0:
+                    # 这里可以引入 tax_rate，或者直接全部用于还债，此处按你的需求“盈利可以抵消中央债务”设定为全额抵扣
+                    repay_amount = min(excess_profit, self.debt_pool)
+                    self.debt_pool = max(0.0, self.debt_pool - repay_amount)
+
+                    # 同步到 Backend (Redis)
+                    # 只有当本地 state 确实减少了 debt_pool 时才去通知 backend
+                    if self.backend and repay_amount > 0:
+                        self.backend.repay_loss(repay_amount)
+
+                # 4. 重置连续亏损计数和冷却
+                pst.closs = 0
+                pol = tier_mgr.get(pst.closs)
+                pst.cooldown_bars_left = max(pst.cooldown_bars_left, pol.cooldown_bars_after_win)
+                return
+
+            # B) 亏损处理逻辑 (Loss Handling)
+            loss = abs(profit_abs)
+
+            # 情况 1: 达到了 Max Tier (熔断/清算)
+            # 只有在这里，亏损才会进入中央债务 (Central Debt)
+            if prev_closs >= max_closs:
+                # 增加中央债务
+                self.debt_pool += loss
+                if self.backend and loss > 0:
+                    self.backend.add_loss(loss)
+                
+                # Max Tier 触发后，本地债务清空 (Reset Local)
+                # 这意味着之前的累积局部亏损被"原谅"或视为沉没成本，重新开始
+                pst.local_loss = 0.0 
+                
+                # 重置 closs 为 0 (或者你可以选择保持在 max，取决于你想让它继续冷却多久)
+                # 这里通常重置为 0 让它重新开始，或者保留高 closs 让它进入很长的冷却
+                pst.closs = 0 
+                
+                pol = tier_mgr.get(pst.closs)
+                pst.cooldown_bars_left = max(pst.cooldown_bars_left, pol.cooldown_bars)
+                return
+
+            # 情况 2: 普通亏损 (Before Max Tier)
+            # 修正点：只加 pst.local_loss，绝对不要加 self.debt_pool
+            pst.local_loss += loss
+            # self.debt_pool += loss  <-- 这一行被删除了，确保不进入中央债务
+
+            # 升级 closs
+            pst.closs = prev_closs + 1
             pol = tier_mgr.get(pst.closs)
-            pst.cooldown_bars_left = max(
-                pst.cooldown_bars_left,
-                pol.cooldown_bars_after_win,
-            )
-            return
+            pst.cooldown_bars_left = max(pst.cooldown_bars_left, pol.cooldown_bars)
 
-        # 6) Loss: local-first; escalate only on max tier failure.
-        loss = abs(profit_abs)
-        if prev_closs >= max_closs:
-            if self.backend and loss > 0:
-                self.backend.add_loss(loss)
-            self.debt_pool = max(0.0, self.debt_pool + loss)
-            pst.local_loss = 0.0
-            pst.closs = 0
-            pol = tier_mgr.get(pst.closs)
-            pst.cooldown_bars_left = max(
-                pst.cooldown_bars_left,
-                pol.cooldown_bars,
-            )
-            return
-
-        pst.local_loss += loss
-        self.debt_pool += loss
-        pst.closs = prev_closs + 1
-        pol = tier_mgr.get(pst.closs)
-        pst.cooldown_bars_left = max(
-            pst.cooldown_bars_left,
-            pol.cooldown_bars,
-        )
-
+            # ==================== 核心修改区域结束 ====================
 
     def to_snapshot(self) -> Dict[str, Any]:
         """序列化全局状态为字典，便于持久化或调试。

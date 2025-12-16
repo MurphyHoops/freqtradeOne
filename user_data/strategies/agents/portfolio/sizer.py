@@ -213,8 +213,10 @@ class SizerAgent:
         """Resolve bucket selection and available bucket risk."""
 
         treasury_cfg = getattr(getattr(self.cfg, "trading", None), "treasury", getattr(self.cfg, "treasury", None))
-        fast = self.state.treasury.fast_alloc_risk.get(ctx.pair, 0.0) if treasury_cfg.enable_fast_bucket else 0.0
-        slow = self.state.treasury.slow_alloc_risk.get(ctx.pair, 0.0) if treasury_cfg.enable_slow_bucket else 0.0
+        canonical_pair = ctx.pair.split(":")[0]
+
+        fast = self.state.treasury.fast_alloc_risk.get(canonical_pair, 0.0) if treasury_cfg.enable_fast_bucket else 0.0
+        slow = self.state.treasury.slow_alloc_risk.get(canonical_pair, 0.0) if treasury_cfg.enable_slow_bucket else 0.0
 
         bucket_risk = fast + slow if treasury_cfg.bucket_sum_mode == "sum" else max(fast, slow)
 

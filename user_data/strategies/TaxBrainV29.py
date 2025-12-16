@@ -1503,6 +1503,10 @@ class TaxBrainV29(IStrategy):
     def _candidate_meta_from_candidate(self, candidate: schemas.Candidate) -> dict[str, Any]:
         return {
             "dir": candidate.direction,
+            # 【新增】补上这两个字段，财政部才能识别信号
+            "kind": candidate.kind,
+            "squad": getattr(candidate, "squad", None),
+            
             "sl_pct": candidate.sl_pct,
             "tp_pct": candidate.tp_pct,
             "exit_profile": candidate.exit_profile,

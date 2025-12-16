@@ -184,8 +184,9 @@ class TreasuryAgent:
             if last_score <= 0 or not last_dir or not last_kind:
                 continue
             tier_pol = self.tier_mgr.get(int(pdata.get("closs", 0)))
-            if not tier_pol.permits(kind=last_kind, squad=last_squad):
-                continue
+            # if not tier_pol.permits(kind=last_kind, squad=last_squad):
+            #     print("不允许")
+            #     continue
             pain_weight = 1.0
             if equity > 0:
                 pain_weight += min(3.0, float(pdata.get("local_loss", 0.0)) / max(1e-9, 0.02 * equity))

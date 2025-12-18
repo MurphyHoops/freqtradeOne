@@ -43,7 +43,7 @@ class ReservationAgent:
         self.backend = backend
         self.reservations: Dict[str, ReservationRecord] = {}
         self.reserved_pair_risk: Dict[str, float] = {}
-        self.reserved_bucket_risk: Dict[str, float] = {"fast": 0.0, "slow": 0.0}
+        self.reserved_bucket_risk: Dict[str, float] = {"long": 0.0, "short": 0.0}
         self.reserved_portfolio_risk: float = 0.0
         self._released_ids_since_cycle: set[str] = set()
 
@@ -142,7 +142,7 @@ class ReservationAgent:
             self.reservations[rid] = ReservationRecord(
                 pair=str(payload.get("pair", "")),
                 risk=float(payload.get("risk", 0.0)),
-                bucket=str(payload.get("bucket", "slow")),
+                bucket=str(payload.get("bucket", "long")),
                 ttl_bars=int(payload.get("ttl_bars", self.cfg.reservation_ttl_bars)),
             )
         self.reserved_pair_risk = {

@@ -94,6 +94,7 @@ class SizerAgent:
         exit_profile: Optional[str] = None,
         bucket: Optional[str] = None,
         current_rate: float = 0.0,
+        score: float = 0.0,
     ) -> Tuple[float, float, str]:
         ctx = SizingContext(
             pair=pair,
@@ -108,6 +109,7 @@ class SizerAgent:
             exit_profile=exit_profile,
             bucket=bucket,
             current_rate=current_rate,
+            score=float(score or 0.0),
         )
         return self._compute_internal(ctx)
 
@@ -115,8 +117,8 @@ class SizerAgent:
         equity = self.eq.get_equity()
         pst = self.state.get_pair_state(ctx.pair)
         tier_pol = self.tier_mgr.get(pst.closs)
-        algo_name = getattr(tier_pol, "sizing_algo", self.cfg.sizing_algos.default_algo)
-        bucket, bucket_risk = self._determine_bucket(ctx)
+       
+        bucket, vector_k = self._resolve_vector_k(ctx.direction)
 
         if tier_pol and getattr(tier_pol, "single_position_only", False) and pst.active_trades:
             return (0.0, 0.0, bucket)
@@ -137,13 +139,12 @@ class SizerAgent:
             return (0.0, 0.0, bucket)
         base_risk = base_nominal * sl_price_pct
         baseline_risk = self._baseline_risk(equity, tier_pol)
-
         caps = self._compute_caps(
             ctx,
             tier_pol,
             equity,
             sl_price_pct,
-            bucket_risk,
+            vector_k,
             per_trade_cap_nominal,
             exchange_cap_nominal,
             lev,
@@ -151,7 +152,54 @@ class SizerAgent:
         if caps.risk_room_nominal <= 0:
             return (0.0, 0.0, bucket)
 
-        inputs = SizingInputs(
+        if vector_k>0:
+            print(vector_k)
+        # 中央分配债务
+        score_val = float(ctx.score or 0.0)
+        if score_val <= 0:
+            try:
+                score_val = float(pst.last_score)
+            except Exception:
+                score_val = 0.0
+        fluid = 0.0
+        if score_val >= 0.3 and vector_k > 0:
+            fluid = vector_k * (score_val ** 2)
+
+        c_target_risk =0
+        if fluid>0:
+            c_inputs = SizingInputs(
+                ctx=ctx,
+                tier=tier_pol,
+                pst=pst,
+                equity=equity,
+                lev=lev,
+                sl_price_pct=sl_price_pct,
+                sl_roi_pct=sl_roi_pct,
+                atr_pct_used=atr_pct_used,
+                atr_mul_sl=atr_mul_sl,
+                base_nominal=base_nominal,
+                debet = fluid,
+                min_entry_nominal=min_entry_nominal,
+                per_trade_cap_nominal=per_trade_cap_nominal,
+                exchange_cap_nominal=exchange_cap_nominal,
+                base_risk=base_risk,
+                baseline_risk=baseline_risk,
+                bucket_label=bucket,
+                caps=caps,
+                state=self.state,
+            )
+
+            c_algo_name = getattr(tier_pol, "center_algo", self.cfg.sizing_algos.default_algo)
+            c_algo_fn = ALGO_REGISTRY.get(c_algo_name)
+            if not c_algo_fn:
+                c_algo_fn = ALGO_REGISTRY["BASE_ONLY"]
+            c_result = c_algo_fn(c_inputs, self.cfg)
+            c_target_risk = max(c_result.target_risk, 0.0)
+            if c_target_risk <= 0:
+                return (0.0, 0.0, c_target_risk)
+
+        # 地方
+        local_inputs = SizingInputs(
             ctx=ctx,
             tier=tier_pol,
             pst=pst,
@@ -162,34 +210,33 @@ class SizerAgent:
             atr_pct_used=atr_pct_used,
             atr_mul_sl=atr_mul_sl,
             base_nominal=base_nominal,
+            debet = pst.local_loss,
             min_entry_nominal=min_entry_nominal,
             per_trade_cap_nominal=per_trade_cap_nominal,
             exchange_cap_nominal=exchange_cap_nominal,
             base_risk=base_risk,
             baseline_risk=baseline_risk,
             bucket_label=bucket,
-            bucket_risk=bucket_risk,
             caps=caps,
             state=self.state,
         )
-
+        algo_name = getattr(tier_pol, "sizing_algo", self.cfg.sizing_algos.default_algo)
         algo_fn = ALGO_REGISTRY.get(algo_name)
         if not algo_fn:
             algo_fn = ALGO_REGISTRY["BASE_ONLY"]
-        result = algo_fn(inputs, self.cfg)
+        result = algo_fn(local_inputs, self.cfg)
         target_risk = max(result.target_risk, 0.0)
         if target_risk <= 0:
             return (0.0, 0.0, bucket)
-
-        nominal_target = target_risk / sl_price_pct if sl_price_pct > 0 else 0.0
-
+ 
+        # 汇总
+        nominal_target = (target_risk + c_target_risk) / sl_price_pct if sl_price_pct > 0 else 0.0
         stake_nominal = self._apply_caps(nominal_target, caps, min_entry_nominal)
         if stake_nominal <= 0:
             return (0.0, 0.0, bucket)
 
         stake_margin = stake_nominal / lev
         risk_final = stake_margin * sl_roi_pct
-        recovery_risk = getattr(result, "recovery_risk", 0.0)
 
         if self.backend:
             backend_room = self._backend_risk_room(equity)
@@ -198,37 +245,26 @@ class SizerAgent:
                 return (0.0, 0.0, bucket)
 
         self._log_debug(
-            f"pair={ctx.pair} closs={pst.closs} local_loss={pst.local_loss:.4f} "
-            f"bucket={bucket} bucket_risk={bucket_risk:.6f} risk_room_nominal={caps.risk_room_nominal:.6f} "
-            f"base_nominal={base_nominal:.6f} recovery_risk={recovery_risk:.6f} sl_price_pct={sl_price_pct:.6f} "
+            f"pair={ctx.pair} closs={pst.closs} score={score_val:.4f} "
+            f"bucket={bucket} vector_k={vector_k:.6f} risk_room_nominal={caps.risk_room_nominal:.6f} "
+            f"base_nominal={base_nominal:.6f} fluid={fluid:.6f} sl_price_pct={sl_price_pct:.6f} "
             f"atr_pct_used={atr_pct_used} atr_mul_sl={atr_mul_sl} nominal_target={nominal_target:.6f} "
             f"min_entry_nominal={min_entry_nominal:.6f} stake_nominal={stake_nominal:.6f} "
-            f"stake_margin={stake_margin:.6f} risk_final={risk_final:.6f} "
-            f"algo={algo_name} reason={result.reason or algo_name}"
+            f"stake_margin={stake_margin:.6f} risk_final={risk_final:.6f}"
         )
 
         return (float(stake_margin), float(risk_final), bucket)
 
-    def _determine_bucket(self, ctx: SizingContext) -> Tuple[str, float]:
-        """Resolve bucket selection and available bucket risk."""
+    def _resolve_vector_k(self, direction: str) -> Tuple[str, float]:
+        """Map signal方向 to极坐标拨款 K 值."""
 
-        treasury_cfg = getattr(getattr(self.cfg, "trading", None), "treasury", getattr(self.cfg, "treasury", None))
-        canonical_pair = ctx.pair.split(":")[0]
-
-        fast = self.state.treasury.fast_alloc_risk.get(canonical_pair, 0.0) if treasury_cfg.enable_fast_bucket else 0.0
-        slow = self.state.treasury.slow_alloc_risk.get(canonical_pair, 0.0) if treasury_cfg.enable_slow_bucket else 0.0
-
-        bucket_risk = fast + slow if treasury_cfg.bucket_sum_mode == "sum" else max(fast, slow)
-
-        if ctx.bucket:
-            bucket = ctx.bucket
-        elif fast > 0:
-            bucket = "fast"
-        elif slow > 0:
-            bucket = "slow"
+        bucket = direction or "long"
+        treasury = getattr(self.state, "treasury", None)
+        if bucket == "short":
+            k_val = float(getattr(treasury, "k_short", 0.0) if treasury else 0.0)
         else:
-            bucket = "slow"
-        return bucket, bucket_risk
+            k_val = float(getattr(treasury, "k_long", 0.0) if treasury else 0.0)
+        return bucket, max(0.0, k_val)
 
     def _derive_sl_context(
         self, ctx: SizingContext, tier_pol: TierPolicy, pst
@@ -352,7 +388,7 @@ class SizerAgent:
         tier_pol: TierPolicy,
         equity: float,
         sl_price_pct: float,
-        bucket_risk: float,
+        vector_k: float,
         per_trade_cap_nominal: float,
         exchange_cap_nominal: float,
         lev: float,
@@ -372,9 +408,8 @@ class SizerAgent:
         portfolio_nominal_room = max(0.0, portfolio_cap_total - total_open_nominal)
 
         bucket_cap_nominal = float("inf")
-        treasury_cfg = getattr(getattr(self.cfg, "trading", None), "treasury", getattr(self.cfg, "treasury", None))
-        if treasury_cfg and treasury_cfg.bucket_as_cap and bucket_risk > 0 and sl_price_pct > 0:
-            bucket_cap_nominal = bucket_risk / sl_price_pct
+        if vector_k > 0:
+            bucket_cap_nominal = vector_k
 
         proposed_nominal_cap = float("inf")
         if ctx.proposed_stake and ctx.proposed_stake > 0:

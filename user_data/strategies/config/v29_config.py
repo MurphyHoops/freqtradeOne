@@ -45,6 +45,7 @@ class TierSpec:
     min_rr_ratio: float = 1.0  # Minimum reward/risk ratio; >1 enforces positive skew.
     min_edge: float = 0.0  # Minimum expected edge; raise to reject thin edges.
     sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"  # Sizing policy used for the tier.
+    center_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "TARGET_RECOVERY",
     k_mult_base_pct: float = 1.0  # Baseline stake multiplier vs equity; larger = bigger base size.
     recovery_factor: float = 1.0  # Multiplier applied to local_loss for recovery sizing; larger = more aggressive recovery.
     cooldown_bars: int = 0  # Bars to pause after any trade in this tier; raise to slow entries.
@@ -73,19 +74,9 @@ class SizingConfig:
 
 @dataclass(frozen=True)
 class TreasuryConfig:
-    """Fast/slow bucket controls and caps for treasury allocations."""
+    """UEOT polar treasury controls (replaces fast/slow buckets)."""
 
-    enable_fast_bucket: bool = True  # Master switch for fast bucket; disable to route all to slow.
-    enable_slow_bucket: bool = True  # Master switch for slow bucket; disable to force fast-only.
-    treasury_fast_split_pct: float = 0.4  # Fraction of debt budget allocated to fast; raise for aggressive recovery.
-    fast_topK_squads: int = 10  # Max squads/pairs admitted to fast; lower to focus only best.
-    slow_universe_pct: float = 1.0  # Fraction of ranked list admitted to slow; lower to be selective.
-    min_injection_nominal_fast: float = 30.0  # Minimum nominal per fast injection; raise to avoid dust.
-    min_injection_nominal_slow: float = 7.0  # Minimum nominal per slow injection; raise to avoid tiny entries.
-    fast_mode: Literal["per_squad", "top_pairs"] = "per_squad"  # Selection mode for fast bucket.
     debt_pool_cap_pct: float = 0.15  # Max portion of equity that can be used to repay debt; lower to cap recovery aggression.
-    bucket_as_cap: bool = True  # If True, bucket allocation acts as a hard cap on sizing.
-    bucket_sum_mode: Literal["sum", "max"] = "sum"  # Combine fast/slow budgets by sum or max when both present.
 
 
 @dataclass(frozen=True)
@@ -95,6 +86,7 @@ class GatekeepingConfig:
     enabled: bool = True  # Master toggle for gatekeeping; disable to bypass checks.
     min_score_fast: float = 0.0  # Minimum score required for fast bucket admission.
     min_score_slow: float = 0.0  # Minimum score required for slow bucket admission.
+    min_score: float = 0.0  # Unified UEOT score floor.
 
     # Fast Bucket 准入条件 (激进回血)
     fast_percentile: int = 90       # Percentile threshold for fast admission; higher = stricter (top 10% by default).
@@ -115,7 +107,6 @@ class TargetRecoveryConfig:
 
     use_atr_based: bool = True  # If True, recovery sizing uses ATR-based TP distance; False falls back to SL distance.
     include_bucket_in_recovery: bool = True  # Include bucket debt in recovery sizing; raise/lower to control aggression.
-    include_debt_pool: bool = False  # Include global debt pool in recovery sizing; True increases recovery pressure.
     max_recovery_multiple: float = 10900.0  # Cap on recovery multiplier vs base size; lower to avoid runaway recovery.
 
 
@@ -151,6 +142,9 @@ class RiskConfig:
     tax_rate_on_wins: float = 0.20  # Fraction of profit siphoned to repay debt; higher repays faster but reduces compounding.
     pain_decay_per_bar: float = 0.999  # Debt decay per bar (0-1); smaller = faster natural debt forgiveness.
     clear_debt_on_profitable_cycle: bool = True  # （周期性清空债务和closs）If True, profitable cycles wipe remaining debt; disable to keep debt sticky.
+    aggressiveness: float = 0.2  # UEOT polar field aggressiveness multiplier.
+    entropy_factor: float = 0.4  # Chaos bonus intensity applied when bias is neutral.
+    volatility_factor: float = 1.0  # Additional multiplier on sensed volatility; keep within 0.5~3.0.
 
     
 @dataclass(frozen=True)
@@ -159,6 +153,14 @@ class TradingConfig:
 
     sizing: SizingConfig = field(default_factory=SizingConfig)  # Initial sizing and leverage defaults.
     treasury: TreasuryConfig = field(default_factory=TreasuryConfig)  # Debt-repayment treasury allocations.
+
+
+@dataclass(frozen=True)
+class SensorConfig:
+    """Sensor weights and entropy for market bias synthesis."""
+
+    weights: Mapping[str, float] = field(default_factory=lambda: {"BTC": 0.6, "ETH": 0.4})
+    entropy_factor: float = 0.4
 
 
 # Helper factories must be defined before StrategyConfig default_factory binding
@@ -300,6 +302,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_rr_ratio=0.00001,
         min_edge=0.002,
         sizing_algo="BASE_ONLY",
+        center_algo="TARGET_RECOVERY",
         k_mult_base_pct=0.0,
         recovery_factor=1.0,
         cooldown_bars=0,
@@ -321,6 +324,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_rr_ratio=0.000001,
         min_edge=0.000,
         sizing_algo="TARGET_RECOVERY",
+        center_algo="TARGET_RECOVERY",
         k_mult_base_pct=1.0,
         recovery_factor=1,
         cooldown_bars=0,
@@ -341,6 +345,7 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
         min_rr_ratio=0.000001,
         min_edge=0.000,
         sizing_algo="TARGET_RECOVERY",
+        center_algo="TARGET_RECOVERY",
         k_mult_base_pct=1.0,
         recovery_factor=1,
         cooldown_bars=0,
@@ -377,6 +382,7 @@ class V29Config:
     trading: TradingConfig = field(default_factory=TradingConfig)  # Sizing and treasury controls.
     strategy: StrategyConfig = field(default_factory=StrategyConfig)  # Signal/tier/exit wiring.
     informative_timeframes: tuple[str, ...] = ()  # Extra informative timeframes; add e.g. ("1h","4h") to enable multi-tf signals.
+    sensor: SensorConfig = field(default_factory=SensorConfig)
 
     cycle_len_bars: int = 288  # Bars per cycle for debt reset checks; lower = more frequent cycle accounting.
     # Early lock / breakeven guards
@@ -420,6 +426,9 @@ class V29Config:
         t_sizing = _coerce_dc(getattr(trading_cfg, "sizing", None), SizingConfig)
         t_treasury = _coerce_dc(getattr(trading_cfg, "treasury", None), TreasuryConfig)
         self.trading = replace(trading_cfg, sizing=t_sizing, treasury=t_treasury)
+
+        sensor_cfg = _coerce_dc(getattr(self, "sensor", None), SensorConfig)
+        self.sensor = sensor_cfg
 
         algos = _coerce_dc(getattr(self, "sizing_algos", None), SizingAlgoConfig)
         algos_tr = _coerce_dc(getattr(algos, "target_recovery", None), TargetRecoveryConfig)
@@ -514,17 +523,7 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         "per_pair_max_nominal_static": ("trading", "sizing", "per_pair_max_nominal_static"),
         "enforce_leverage": ("trading", "sizing", "enforce_leverage"),
         # treasury
-        "treasury_fast_split_pct": ("trading", "treasury", "treasury_fast_split_pct"),
-        "fast_topK_squads": ("trading", "treasury", "fast_topK_squads"),
-        "slow_universe_pct": ("trading", "treasury", "slow_universe_pct"),
-        "enable_fast_bucket": ("trading", "treasury", "enable_fast_bucket"),
-        "enable_slow_bucket": ("trading", "treasury", "enable_slow_bucket"),
-        "min_injection_nominal_fast": ("trading", "treasury", "min_injection_nominal_fast"),
-        "min_injection_nominal_slow": ("trading", "treasury", "min_injection_nominal_slow"),
-        "fast_mode": ("trading", "treasury", "fast_mode"),
         "debt_pool_cap_pct": ("trading", "treasury", "debt_pool_cap_pct"),
-        "bucket_as_cap": ("trading", "treasury", "bucket_as_cap"),
-        "bucket_sum_mode": ("trading", "treasury", "bucket_sum_mode"),
     }
 
     target_recovery_map: Dict[str, str] = {

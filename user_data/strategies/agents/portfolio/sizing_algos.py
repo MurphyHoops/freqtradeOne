@@ -43,6 +43,7 @@ class SizingInputs:
     atr_mul_sl: float
 
     base_nominal: float
+    debet: float | 0
     min_entry_nominal: float
     per_trade_cap_nominal: float
     exchange_cap_nominal: float
@@ -50,9 +51,9 @@ class SizingInputs:
     base_risk: float
     baseline_risk: float
     bucket_label: str
-    bucket_risk: float
     caps: Caps
     state: PortfolioState
+   
 
 
 @dataclass
@@ -73,9 +74,7 @@ def algo_base_only(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     if inputs.base_nominal <= 0 or inputs.sl_price_pct <= 0:
         return SizingResult(target_risk=0.0, reason="BASE_ONLY_zero_budget")
 
-    base_risk = inputs.base_risk
-    bucket_risk = inputs.bucket_risk or 0.0
-    target_risk = max(base_risk, bucket_risk)
+    target_risk = inputs.base_risk
     return SizingResult(target_risk=max(target_risk, 0.0), reason="BASE_ONLY")
 
 
@@ -89,13 +88,12 @@ def algo_baseline(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     del cfg  # placeholder for future use
     base_risk = inputs.base_risk
     baseline_risk = inputs.baseline_risk
-    bucket_risk = inputs.bucket_risk or 0.0
 
-    if baseline_risk <= 0 and bucket_risk <= 0:
+    if baseline_risk <= 0:
         return SizingResult(target_risk=0.0, reason="BASELINE_zero_budget")
 
     recovery_risk = max(0.0, baseline_risk - base_risk)
-    target_risk = max(base_risk + recovery_risk, bucket_risk, baseline_risk)
+    target_risk = max(base_risk + recovery_risk, baseline_risk)
     return SizingResult(target_risk=max(target_risk, 0.0), reason="BASELINE", recovery_risk=recovery_risk)
 
 
@@ -113,29 +111,14 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     """
 
     tr_cfg = cfg.sizing_algos.target_recovery
-    trading_cfg = getattr(cfg, "trading", cfg)
-    treasury_cfg = getattr(trading_cfg, "treasury", getattr(cfg, "treasury", None))
-    sizing_cfg = getattr(trading_cfg, "sizing", getattr(cfg, "sizing", None))
     sl_price_pct = inputs.sl_price_pct
     tier = inputs.tier
-    pst = inputs.pst
     base_nominal = inputs.base_nominal
-    bucket_risk = inputs.bucket_risk or 0.0
     ctx = inputs.ctx
     recovery_price_pct = sl_price_pct  #   default to SL distance; ATR mode may swap this to TP distance for recovery sizing
     base_risk = inputs.base_risk
-    bucket_for_recovery = inputs.bucket_risk if tr_cfg.include_bucket_in_recovery else 0.0
-    debt_pool_component = 0.0
-    if tr_cfg.include_debt_pool and treasury_cfg:
-        if treasury_cfg.debt_pool_cap_pct > 0:
-            debt_pool_component = min(inputs.state.debt_pool, treasury_cfg.debt_pool_cap_pct * inputs.equity)
-        else:
-            debt_pool_component = inputs.state.debt_pool
 
-    B0 = inputs.base_nominal
-
-    L_total = pst.local_loss * tier.recovery_factor
-    rec_bucket = bucket_for_recovery + debt_pool_component
+    L_total = inputs.debet * tier.recovery_factor
 
     if sl_price_pct <= 0:
         return SizingResult(target_risk=0.0, reason="TARGET_RECOVERY_sl_zero")
@@ -151,24 +134,19 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
             if tp_price_pct and tp_price_pct > 0:
                 recovery_price_pct = tp_price_pct
 
-    L_bucket = rec_bucket
     if recovery_price_pct <= 0:
         return SizingResult(target_risk=0.0, reason="TARGET_RECOVERY_no_recovery_price")
 
-    S_recover_loss_raw = L_total / recovery_price_pct
-    S_recover_bucket_raw = L_bucket / recovery_price_pct 
-
-    alpha = getattr(tr_cfg, "bucket_scaling_factor", 1.0)
-    S_recover_loss = S_recover_loss_raw
-    S_recover_bucket = alpha * S_recover_bucket_raw
-    S_total_target_nominal = max(B0 + S_recover_loss + S_recover_bucket, 0.0)
-
+    S_recover_loss =  L_total / recovery_price_pct
+    if S_recover_loss > 0 and S_recover_loss < base_nominal:
+        S_recover_loss = base_nominal
+    S_total_target_nominal = S_recover_loss + base_nominal
     if tr_cfg.max_recovery_multiple and tr_cfg.max_recovery_multiple > 0:
         S_total_target_nominal = min(S_total_target_nominal, base_nominal * tr_cfg.max_recovery_multiple)
 
     desired_nominal = max(base_nominal, S_total_target_nominal)
     desired_risk = desired_nominal * sl_price_pct
-    target_risk = max(desired_risk, bucket_risk or 0.0)
+    target_risk = max(desired_risk, 0.0)
     recovery_risk = max(0.0, desired_risk - base_risk)
     return SizingResult(target_risk=max(target_risk, 0.0), reason="TARGET_RECOVERY", recovery_risk=recovery_risk)
 

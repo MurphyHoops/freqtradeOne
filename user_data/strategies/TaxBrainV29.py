@@ -155,6 +155,7 @@ from user_data.strategies.agents.portfolio.global_backend import (
     LocalGlobalBackend,
     RedisGlobalBackend,
 )
+from user_data.strategies.agents.market.sensor import MarketSensor
 
 # safe, optional import – file lives next to your strategy agents
 
@@ -188,7 +189,7 @@ class ActiveTradeMeta:
         direction: 信号方向，取值为 'long' 或 'short'。
         entry_bar_tick: 建仓发生时的全局 bar_tick 序号，用于与 CycleAgent 对齐。
         entry_price: 建仓价格，供执行/退出时计算盈亏。
-        bucket: 拨款桶信息，fast 或 slow。
+        bucket: 极坐标场标记，long/short。
         icu_bars_left: ICU 强制回收剩余 bar 数，None 表示当前不受 ICU 约束。
     """
     sl_pct: float
@@ -260,39 +261,43 @@ class GateResult:
 
 @dataclass
 class TreasuryState:
-    """TreasuryState 持久化 fast/slow 拨款结果以及财政周期起点，保证跨周期及崩溃恢复后的拨款连续性。
-    Attributes:
-        fast_alloc_risk: fast 拨款桶中每个交易对的名义风险额度。
-        slow_alloc_risk: slow 拨款桶中每个交易对的名义风险额度。
-        cycle_start_tick: 当前财政周期开始时记录的 bar_tick。
-        cycle_start_equity: 当前财政周期开始时的权益快照。
-    """
-    fast_alloc_risk: Dict[str, float] = field(default_factory=dict)
-    slow_alloc_risk: Dict[str, float] = field(default_factory=dict)
+    """TreasuryState 持久化极坐标场的拨款参数以及财政周期起点。"""
+
+    k_long: float = 0.0
+    k_short: float = 0.0
+    theta: float = 0.0
+    final_r: float = 0.0
+    available: float = 0.0
+    bias: float = 0.0
+    volatility: float = 1.0
     cycle_start_tick: int = 0
     cycle_start_equity: float = 0.0
 
     def to_snapshot(self) -> Dict[str, Any]:
-        """导出财政子模块的可序列化快照数据，供 StateStore 写入磁盘。
-        Returns:
-            Dict[str, Any]: fast/slow 拨款与周期起点组成的字典。
-        """
+        """导出财政子模块的可序列化快照数据，供 StateStore 写入磁盘。"""
+
         return {
-            "fast_alloc_risk": self.fast_alloc_risk,
-            "slow_alloc_risk": self.slow_alloc_risk,
+            "k_long": self.k_long,
+            "k_short": self.k_short,
+            "theta": self.theta,
+            "final_r": self.final_r,
+            "available": self.available,
+            "bias": self.bias,
+            "volatility": self.volatility,
             "cycle_start_tick": self.cycle_start_tick,
             "cycle_start_equity": self.cycle_start_equity,
         }
 
     def restore_snapshot(self, payload: Dict[str, Any]) -> None:
-        """从 StateStore 读取的字典中恢复财政拨款状态。
-        Args:
-            payload: 包含 fast/slow 拨款及周期起点信息的字典。
-        """
-        self.fast_alloc_risk = {k: float(v) for k, v in payload.get(
-            "fast_alloc_risk", {}).items()}
-        self.slow_alloc_risk = {k: float(v) for k, v in payload.get(
-            "slow_alloc_risk", {}).items()}
+        """从 StateStore 读取的字典中恢复财政拨款状态。"""
+
+        self.k_long = float(payload.get("k_long", 0.0))
+        self.k_short = float(payload.get("k_short", 0.0))
+        self.theta = float(payload.get("theta", 0.0))
+        self.final_r = float(payload.get("final_r", 0.0))
+        self.available = float(payload.get("available", 0.0))
+        self.bias = float(payload.get("bias", 0.0))
+        self.volatility = float(payload.get("volatility", 1.0))
         self.cycle_start_tick = int(payload.get("cycle_start_tick", 0))
         self.cycle_start_equity = float(payload.get("cycle_start_equity", 0.0))
 
@@ -511,9 +516,9 @@ class GlobalState:
             # 只有在这里，亏损才会进入中央债务 (Central Debt)
             if prev_closs >= max_closs:
                 # 增加中央债务
-                self.debt_pool += loss
+                self.debt_pool += loss + pst.local_loss # 本地债务给中央
                 if self.backend and loss > 0:
-                    self.backend.add_loss(loss)
+                    self.backend.add_loss(loss + pst.local_loss)
                 
                 # Max Tier 触发后，本地债务清空 (Reset Local)
                 # 这意味着之前的累积局部亏损被"原谅"或视为沉没成本，重新开始
@@ -625,7 +630,7 @@ class GlobalState:
                     direction=str(meta_payload.get("direction", "")),
                     entry_bar_tick=int(meta_payload.get("entry_bar_tick", 0)),
                     entry_price=float(meta_payload.get("entry_price", 0.0)),
-                    bucket=str(meta_payload.get("bucket", "slow")),
+                    bucket=str(meta_payload.get("bucket", "long")),
                     icu_bars_left=(
                         int(meta_payload["icu_bars_left"])
                         if meta_payload.get("icu_bars_left") is not None
@@ -683,9 +688,8 @@ class EquityProvider:
         self.equity_current += float(profit_abs)
 
 class TaxBrainV29(IStrategy):
-    """TaxBrainV29 是遵循 AGENTS.md 规范实现的多代理路由策略类。
-    该类负责在 Freqtrade 各个 hook 中调度信号、财政、风险、预约、执行等子代理，
-    并保持 V29.1 的五项修订（动态 ADX、盈利周期清债、timeframe/startup 覆盖、早锁盈兜底、仅释放预约）持续生效。
+    """
+
     """
     timeframe = V29Config().system.timeframe
     can_short = True
@@ -771,6 +775,12 @@ class TaxBrainV29(IStrategy):
             self.global_backend = LocalGlobalBackend()
         else:
             raise ValueError(f"Unknown global_backend_mode: {self.cfg.system.global_backend_mode}")
+
+        sensor_weights = dict(getattr(getattr(self.cfg, "sensor", None), "weights", {}) or {})
+        sensor_entropy = float(
+            getattr(getattr(self.cfg, "sensor", None), "entropy_factor", getattr(getattr(self.cfg, "risk", None), "entropy_factor", 0.4))
+        )
+        self.market_sensor = MarketSensor(self.global_backend, weights=sensor_weights, entropy_factor=sensor_entropy)
 
         self.state = GlobalState(self.cfg, backend=self.global_backend)
         self.analytics = AnalyticsAgent(user_data_dir / "logs")
@@ -980,23 +990,25 @@ class TaxBrainV29(IStrategy):
         return self._prepare_informative_frame(result, timeframe)
 
     def informative_pairs(self):
-        if not self._informative_timeframes:
-            return []
         try:
             whitelist = self.dp.current_whitelist()
         except Exception:
             whitelist = self.config.get(
                 "exchange", {}).get("pair_whitelist", [])
         pairs: list[tuple[str, str]] = []
-        if not whitelist:
-            return pairs
         seen: set[tuple[str, str]] = set()
-        for pair in whitelist:
-            for tf in self._informative_timeframes:
-                key = (pair, tf)
-                if key not in seen:
-                    seen.add(key)
-                    pairs.append(key)
+        if whitelist and self._informative_timeframes:
+            for pair in whitelist:
+                for tf in self._informative_timeframes:
+                    key = (pair, tf)
+                    if key not in seen:
+                        seen.add(key)
+                        pairs.append(key)
+        sensor_pairs = [("BTC/USDT", self.timeframe), ("ETH/USDT", self.timeframe)]
+        for sp in sensor_pairs:
+            if sp not in seen:
+                seen.add(sp)
+                pairs.append(sp)
         return pairs
 
     def bot_start(self, **kwargs) -> None:
@@ -1052,6 +1064,21 @@ class TaxBrainV29(IStrategy):
             self._informative_cache.pop(pair, None)
         if len(df) == 0:
             return df
+
+        if pair.upper().startswith("BTC"):
+            eth_df = None
+            try:
+                eth_df = self._get_informative_dataframe("ETH/USDT", self.timeframe)
+            except Exception:
+                try:
+                    eth_df = self.dp.get_analyzed_dataframe("ETH/USDT", self.timeframe)
+                except Exception:
+                    eth_df = None
+            try:
+                self.market_sensor.analyze(df, eth_df)
+            except Exception:
+                pass
+
         last = df.iloc[-1].copy()
         last_ts = float(pd.to_datetime(
             last.get("date", pd.Timestamp.utcnow())).timestamp())
@@ -1694,25 +1721,16 @@ class TaxBrainV29(IStrategy):
 
     def _format_gatekeeper_detail(self, result: GateResult, score: float) -> str:
         thresholds = result.thresholds or {}
-        th_fast = thresholds.get("fast")
-        th_slow = thresholds.get("slow")
-        th_loose = thresholds.get("loose")
+        th_min = thresholds.get("min_score")
         detail_parts: list[str] = []
-        if th_slow is not None:
-            detail_parts.append(f"score {score:.4f} < {float(th_slow):.4f}")
-        elif th_fast is not None:
-            detail_parts.append(f"score {score:.4f} < {float(th_fast):.4f}")
-        elif th_loose is not None:
-            detail_parts.append(f"score {score:.4f} < {float(th_loose):.4f}")
+        if th_min is not None and score < float(th_min):
+            detail_parts.append(f"score {score:.4f} < {float(th_min):.4f}")
 
         gcfg = getattr(getattr(self.cfg, "risk", None), "gatekeeping", None)
         if gcfg and result.closs is not None:
-            slow_cap = getattr(gcfg, "slow_max_closs", None)
-            fast_cap = getattr(gcfg, "fast_max_closs", None)
-            if slow_cap is not None and result.debt and result.closs > slow_cap:
-                detail_parts.append(f"closs {result.closs} > {slow_cap}")
-            elif fast_cap is not None and result.closs > fast_cap:
-                detail_parts.append(f"closs {result.closs} > {fast_cap}")
+            closs_cap = getattr(gcfg, "slow_max_closs", None)
+            if closs_cap is not None and result.closs > closs_cap:
+                detail_parts.append(f"closs {result.closs} > {closs_cap}")
 
         if result.debt is not None:
             try:
@@ -1880,6 +1898,10 @@ class TaxBrainV29(IStrategy):
         sl = float(meta.get("sl_pct", 0.0))
         tp = float(meta.get("tp_pct", 0.0))
         direction = str(meta.get("dir"))
+        try:
+            score_val = float(meta.get("score", meta.get("expected_edge", meta.get("raw_score", 0.0))))
+        except Exception:
+            score_val = 0.0
 
         stake, risk, bucket = self.sizer.compute(
             pair=pair,
@@ -1894,6 +1916,7 @@ class TaxBrainV29(IStrategy):
             exit_profile=meta.get("exit_profile"),
             bucket=meta.get("bucket"),
             current_rate=current_rate,
+            score=score_val,
         )
         if stake <= 0 or risk <= 0:
             return 0.0
@@ -2461,8 +2484,13 @@ class TaxBrainV29(IStrategy):
         try:
             snapshot = self.cycle_agent._build_snapshot()
             plan = self.treasury_agent.plan(snapshot, self.eq_provider.get_equity())
-            self.state.treasury.fast_alloc_risk = plan.fast_alloc_risk
-            self.state.treasury.slow_alloc_risk = plan.slow_alloc_risk
+            self.state.treasury.k_long = plan.k_long
+            self.state.treasury.k_short = plan.k_short
+            self.state.treasury.theta = plan.theta
+            self.state.treasury.final_r = plan.final_r
+            self.state.treasury.available = plan.available
+            self.state.treasury.bias = plan.bias
+            self.state.treasury.volatility = plan.volatility
         except Exception:
             pass
 

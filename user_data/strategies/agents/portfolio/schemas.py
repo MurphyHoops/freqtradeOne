@@ -20,3 +20,4 @@ class SizingContext:
     exit_profile: Optional[str] = None
     bucket: Optional[str] = None
     current_rate: float = 0.0
+    score: float = 0.0

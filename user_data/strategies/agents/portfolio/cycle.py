@@ -2,7 +2,7 @@
 
 CycleAgent 在每根 K 线完成时负责驱动以下流程：
 1. 推进全局 `bar_tick`、衰减债务/冷却计数；
-2. 构造当前状态快照并调用 TreasuryAgent 生成拨款计划；
+2. 构造当前状态快照并调用 TreasuryAgent 生成极坐标拨款计划；
 3. 根据盈利周期配置执行“盈利清债”（V29.1 修订 #2）；
 4. 触发风险不变式检查、日志打点与状态持久化。
 """
@@ -71,7 +71,7 @@ class CycleAgent:
             eq_provider: EquityProvider，用于读取当前组合权益。
 
         Returns:
-            AllocationPlan: 最新的 fast / slow 拨款计划。
+            AllocationPlan: 最新的 K_long / K_short 拨款计划。
         """
 
         self.state.bar_tick += 1
@@ -80,8 +80,13 @@ class CycleAgent:
         equity = eq_provider.get_equity()
         snapshot = self._build_snapshot()
         plan = self.treasury.plan(snapshot, equity)
-        self.state.treasury.fast_alloc_risk = plan.fast_alloc_risk
-        self.state.treasury.slow_alloc_risk = plan.slow_alloc_risk
+        self.state.treasury.k_long = plan.k_long
+        self.state.treasury.k_short = plan.k_short
+        self.state.treasury.theta = plan.theta
+        self.state.treasury.final_r = plan.final_r
+        self.state.treasury.available = plan.available
+        self.state.treasury.bias = plan.bias
+        self.state.treasury.volatility = plan.volatility
 
         if self.state.treasury.cycle_start_tick == 0:
             self.state.treasury.cycle_start_tick = self.state.bar_tick
@@ -102,8 +107,6 @@ class CycleAgent:
             self.state.treasury.cycle_start_tick = self.state.bar_tick
             self.state.treasury.cycle_start_equity = equity
 
-        fast_alloc_size = sum(plan.fast_alloc_risk.values())
-        slow_alloc_size = sum(plan.slow_alloc_risk.values())
         cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
         cap_abs = cap_pct * equity
         used_risk = self.state.get_total_open_risk() + self.reservation.get_total_reserved()
@@ -135,8 +138,10 @@ class CycleAgent:
             bar_tick=self.state.bar_tick,
             pnl=pnl_since_cycle_start,
             debt_pool=self.state.debt_pool,
-            fast_alloc_size=fast_alloc_size,
-            slow_alloc_size=slow_alloc_size,
+            k_long=plan.k_long,
+            k_short=plan.k_short,
+            theta=plan.theta,
+            final_r=plan.final_r,
             cap_used_pct=cap_used_pct,
             reservations=reservations_count,
             cycle_cleared=cycle_cleared,

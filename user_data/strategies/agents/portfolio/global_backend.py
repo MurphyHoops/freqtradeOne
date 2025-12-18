@@ -16,6 +16,8 @@ except ImportError:  # pragma: no cover - handled in tests
 class GlobalSnapshot:
     debt_pool: float
     risk_used: float
+    market_bias: float = 0.0
+    market_volatility: float = 1.0
 
 
 class GlobalRiskBackend(Protocol):
@@ -40,6 +42,9 @@ class GlobalRiskBackend(Protocol):
     def get_score_percentile_threshold(self, percentile: int) -> float:
         ...
 
+    def set_market_metrics(self, bias: float, volatility: float) -> None:
+        ...
+
 
 class LocalGlobalBackend(GlobalRiskBackend):
     """In-memory backend used for single-instance runs."""
@@ -47,16 +52,27 @@ class LocalGlobalBackend(GlobalRiskBackend):
     def __init__(self) -> None:
         self._debt_pool: float = 0.0
         self._risk_used: float = 0.0
+        self._market_bias: float = 0.0
+        self._market_volatility: float = 1.0
         self._scores: List[float] = []  # sliding window of recent scores
 
     def get_snapshot(self) -> GlobalSnapshot:
-        return GlobalSnapshot(debt_pool=self._debt_pool, risk_used=self._risk_used)
+        return GlobalSnapshot(
+            debt_pool=self._debt_pool,
+            risk_used=self._risk_used,
+            market_bias=self._market_bias,
+            market_volatility=self._market_volatility,
+        )
 
     def add_loss(self, amount: float) -> None:
         self._debt_pool += float(amount)
 
     def repay_loss(self, amount: float) -> None:
         self._debt_pool = max(0.0, self._debt_pool - float(amount))
+
+    def set_market_metrics(self, bias: float, volatility: float) -> None:
+        self._market_bias = float(max(-1.0, min(1.0, bias)))
+        self._market_volatility = float(max(0.0, volatility if volatility is not None else 1.0) or 1.0)
 
     def add_risk_usage(self, amount: float, cap_limit: Optional[float] = None) -> bool:
         amount = float(amount)
@@ -107,6 +123,8 @@ class RedisGlobalBackend(GlobalRiskBackend):
         self._key_debt = f"{namespace}GLOBAL_DEBT"
         self._key_risk_used = f"{namespace}GLOBAL_RISK_USED"
         self._key_scores = f"{namespace}SCORES_WINDOW"
+        self._key_bias = f"{namespace}GLOBAL_MARKET_BIAS"
+        self._key_vol = f"{namespace}GLOBAL_MARKET_VOL"
         self._client = redis.Redis(
             host=host,
             port=port,
@@ -182,17 +200,21 @@ class RedisGlobalBackend(GlobalRiskBackend):
             return self._local_cache_snapshot
 
         try:
-            debt_val, risk_val = self._client.mget([self._key_debt, self._key_risk_used])
+            pipe = self._client.pipeline()
+            pipe.mget([self._key_debt, self._key_risk_used, self._key_bias, self._key_vol])
+            (debt_val, risk_val, bias_val, vol_val) = pipe.execute()[0]
             snapshot = GlobalSnapshot(
                 debt_pool=self._to_float(debt_val),
                 risk_used=self._to_float(risk_val),
+                market_bias=max(-1.0, min(1.0, self._to_float(bias_val))),
+                market_volatility=self._to_float(vol_val) or 1.0,
             )
             self._local_cache_snapshot = snapshot
             self._last_snapshot_time = now
             return snapshot
         except (redis.RedisError, TimeoutError, Exception) as exc:  # type: ignore
             self._safe_log_error("Redis get_snapshot failed", exc)
-            return GlobalSnapshot(debt_pool=0.0, risk_used=0.0)
+            return GlobalSnapshot(debt_pool=0.0, risk_used=0.0, market_bias=0.0, market_volatility=1.0)
 
     def add_loss(self, amount: float) -> None:
         try:
@@ -236,6 +258,22 @@ class RedisGlobalBackend(GlobalRiskBackend):
             self._invalidate_snapshot_cache()
         except (redis.RedisError, TimeoutError, Exception) as exc:  # type: ignore
             self._safe_log_error(f"Redis release_risk_usage failed for amount={amount}", exc)
+
+    def set_market_metrics(self, bias: float, volatility: float) -> None:
+        """Atomically store latest market bias/volatility computed by MarketSensor."""
+
+        bias = max(-1.0, min(1.0, float(bias)))
+        volatility = float(volatility if volatility is not None else 1.0) or 1.0
+        try:
+            pipe = self._client.pipeline()
+            pipe.set(self._key_bias, bias)
+            pipe.set(self._key_vol, volatility)
+            pipe.execute()
+            self._invalidate_snapshot_cache()
+        except (redis.RedisError, TimeoutError, Exception) as exc:  # type: ignore
+            self._safe_log_error(
+                f"Redis set_market_metrics failed for bias={bias} volatility={volatility}", exc
+            )
 
     def record_signal_score(self, pair: str, score: float) -> None:
         try:

@@ -66,7 +66,7 @@ class ExecutionAgent:
         tp = float(meta.get("tp_pct", meta.get("tp", 0.0)))
         direction = str(meta.get("dir", "")) or ("short" if getattr(trade, "is_short", False) else "long")
         rid = meta.get("reservation_id")
-        bucket = str(meta.get("bucket", "slow"))
+        bucket = str(meta.get("bucket", direction or "long"))
         real_risk = float(meta.get("risk_final", meta.get("risk", 0.0)))
         entry_price = float(meta.get("entry_price", getattr(trade, "open_rate", 0.0)))
         exit_profile = meta.get("exit_profile")

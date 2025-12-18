@@ -152,8 +152,6 @@ class SizerAgent:
         if caps.risk_room_nominal <= 0:
             return (0.0, 0.0, bucket)
 
-        if vector_k>0:
-            print(vector_k)
         # 中央分配债务
         score_val = float(ctx.score or 0.0)
         if score_val <= 0:
@@ -195,8 +193,6 @@ class SizerAgent:
                 c_algo_fn = ALGO_REGISTRY["BASE_ONLY"]
             c_result = c_algo_fn(c_inputs, self.cfg)
             c_target_risk = max(c_result.target_risk, 0.0)
-            if c_target_risk <= 0:
-                return (0.0, 0.0, c_target_risk)
 
         # 地方
         local_inputs = SizingInputs(
@@ -226,7 +222,7 @@ class SizerAgent:
             algo_fn = ALGO_REGISTRY["BASE_ONLY"]
         result = algo_fn(local_inputs, self.cfg)
         target_risk = max(result.target_risk, 0.0)
-        if target_risk <= 0:
+        if target_risk + c_target_risk <= 0:
             return (0.0, 0.0, bucket)
  
         # 汇总
@@ -408,8 +404,8 @@ class SizerAgent:
         portfolio_nominal_room = max(0.0, portfolio_cap_total - total_open_nominal)
 
         bucket_cap_nominal = float("inf")
-        if vector_k > 0:
-            bucket_cap_nominal = vector_k
+        # if vector_k > 0:
+        #     bucket_cap_nominal = vector_k
 
         proposed_nominal_cap = float("inf")
         if ctx.proposed_stake and ctx.proposed_stake > 0:

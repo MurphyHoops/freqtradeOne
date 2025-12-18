@@ -141,7 +141,7 @@ class RiskConfig:
     gatekeeping: GatekeepingConfig = field(default_factory=GatekeepingConfig)  # Tiered gatekeeping parameters.
     tax_rate_on_wins: float = 0.20  # Fraction of profit siphoned to repay debt; higher repays faster but reduces compounding.
     pain_decay_per_bar: float = 0.999  # Debt decay per bar (0-1); smaller = faster natural debt forgiveness.
-    clear_debt_on_profitable_cycle: bool = True  # （周期性清空债务和closs）If True, profitable cycles wipe remaining debt; disable to keep debt sticky.
+    clear_debt_on_profitable_cycle: bool = False  # （周期性清空债务和closs）If True, profitable cycles wipe remaining debt; disable to keep debt sticky.
     aggressiveness: float = 0.2  # UEOT polar field aggressiveness multiplier.
     entropy_factor: float = 0.4  # Chaos bonus intensity applied when bias is neutral.
     volatility_factor: float = 1.0  # Additional multiplier on sensed volatility; keep within 0.5~3.0.
@@ -237,9 +237,9 @@ def default_profiles_factory() -> Dict[str, ExitProfile]:
     return {
         "ATRtrail_v1": ExitProfile(
             atr_timeframe=None,  # Use primary timeframe ATR
-            atr_mul_sl=4.0,  # Stop at 8x ATR; raise to widen stops
+            atr_mul_sl=2,  # Stop at 8x ATR; raise to widen stops
             floor_sl_pct=1e-12,  # Absolute SL floor to avoid zero
-            atr_mul_tp=4.0,  # TP at 2x ATR; raise to target farther profits
+            atr_mul_tp=2,  # TP at 2x ATR; raise to target farther profits
             breakeven_lock_frac_of_tp=0.0,  # Fraction of TP before breakeven lock; >0 adds protection
             trail_mode=None,
             trail_atr_mul=0.0,

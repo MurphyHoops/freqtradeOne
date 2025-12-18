@@ -32,6 +32,7 @@ class TierPolicy:
     min_rr_ratio: float
     min_edge: float
     sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"]
+    center_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"]
     k_mult_base_pct: float
     recovery_factor: float
     cooldown_bars: int
@@ -141,6 +142,7 @@ class TierManager:
             min_rr_ratio=spec.min_rr_ratio,
             min_edge=spec.min_edge,
             sizing_algo=spec.sizing_algo,
+            center_algo=spec.center_algo,
             k_mult_base_pct=spec.k_mult_base_pct,
             recovery_factor=spec.recovery_factor,
             cooldown_bars=spec.cooldown_bars,

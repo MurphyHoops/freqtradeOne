@@ -479,30 +479,18 @@ class GlobalState:
             routing_map = getattr(tier_mgr, "_routing_map", None) or {}
             max_closs = max(routing_map.keys()) if routing_map else 3
 
-            # ==================== 核心修改区域开始 ====================
-
             # A) 盈利处理逻辑 (Profit Handling)
             if profit_abs >= 0:
-                # 1. 优先偿还本地债务
-                # 修正点：不要直接 pst.local_loss = 0，而是减去已还部分
-                recovered_local = min(profit_abs, pst.local_loss)
-                pst.local_loss = max(0.0, pst.local_loss - recovered_local)
-                
-                # 2. 计算超额利润 (Excess Profit)
-                excess_profit = profit_abs - recovered_local
+                excess_profit = pst.local_loss - profit_abs
+                pst.local_loss = 0
+                self.debt_pool =max(0, self.debt_pool + excess_profit)
 
-                # 3. 如果有超额利润，且中央债务池有债，则偿还中央债务
-                # 即使该币对没有贡献过中央债务，它的盈利也可以帮别人还债
-                if excess_profit > 0 and self.debt_pool > 0:
-                    # 这里可以引入 tax_rate，或者直接全部用于还债，此处按你的需求“盈利可以抵消中央债务”设定为全额抵扣
-                    repay_amount = min(excess_profit, self.debt_pool)
-                    self.debt_pool = max(0.0, self.debt_pool - repay_amount)
-
-                    # 同步到 Backend (Redis)
-                    # 只有当本地 state 确实减少了 debt_pool 时才去通知 backend
-                    if self.backend and repay_amount > 0:
-                        self.backend.repay_loss(repay_amount)
-
+                if self.backend:
+                    if excess_profit>0:
+                        self.backend.add_loss(excess_profit)
+                    else:
+                        self.backend.repay_loss(0 - excess_profit)
+                        
                 # 4. 重置连续亏损计数和冷却
                 pst.closs = 0
                 pol = tier_mgr.get(pst.closs)
@@ -694,7 +682,7 @@ class TaxBrainV29(IStrategy):
     timeframe = V29Config().system.timeframe
     can_short = True
     startup_candle_count = V29Config().system.startup_candle_count
-    # minimal_roi = {"0": 0.03}
+    # minimal_roi = {"0": 0.0003    }
     # stoploss = -0.2
     use_custom_roi = False
     use_custom_stoploss = False
@@ -1882,7 +1870,7 @@ class TaxBrainV29(IStrategy):
         # ==================== 【修复结束】 ====================
 
         # 2. 时光机倒带：补齐债务衰减、冷却，并重新运行 Treasury.plan()
-        # 此时 Treasury 已经能看到上面注入的 last_score 了
+        # 此时 Treasury 已经能看到上面注入的 last_score    
         self._backtest_catch_up(current_time)
 
         # 3. 后续标准流程（保持原样）
@@ -2450,37 +2438,89 @@ class TaxBrainV29(IStrategy):
             processed.add(trade_id)
 
     def _backtest_catch_up(self, current_time: datetime) -> None:
-        if not self._is_backtest_like_runmode() or not self.state.last_finalized_bar_ts:
+        """
+
+        在回测模式下模拟时间推进，驱动债务衰减和财政周期更新。
+
+        修复了 populate_indicators 导致的“未来时间”阻断逻辑运行的问题。
+
+        """
+        if not self._is_backtest_like_runmode():
             return
+
+        # 获取当前回测时间戳
         now_ts = current_time.timestamp()
         last_ts = self.state.last_finalized_bar_ts
+
+        # ==================== [核心修复] 时间重置逻辑 ====================
+        # 1. last_ts 为 None: 说明刚启动，从未记录过。
+        # 2. last_ts > now_ts: 说明 last_ts 被 populate_indicators 设为了数据集的末尾时间(未来)，
+        #    而当前回测指针(now_ts)刚从过去开始跑。此时产生了时间倒挂。
+        # 3. 时间差距过大: 如果上次时间是 1970 (0.0)，也需要重置。
+        if last_ts is None or last_ts > now_ts or last_ts == 0.0:
+            # 将上次结算时间重置为“当前时间 - 1个周期”，确保本次能触发逻辑
+            self.state.last_finalized_bar_ts = now_ts - self._tf_sec
+            last_ts = self.state.last_finalized_bar_ts
+            
+            # 可选：如果是刚开始回测，初始化财政周期的起始时间
+            if self.state.treasury.cycle_start_tick == 0:
+                self.state.treasury.cycle_start_tick = self.state.bar_tick
+                self.state.treasury.cycle_start_equity = self.eq_provider.get_equity()
+
+        # ==================== 标准步进逻辑 ====================
+        
         delta_seconds = now_ts - last_ts
+        
+        # 只有当时间流逝超过设定的 timeframe (例如5分钟) 才推进状态
         if delta_seconds < self._tf_sec:
             return
 
+        # 计算过去了多少个 K 线周期
         bars_passed = int(delta_seconds // self._tf_sec)
+        
+        # 更新 Bar 计数
         self.state.bar_tick += bars_passed
-        self.state.last_finalized_bar_ts = now_ts
+        
+        # [重要] 推进 last_finalized_bar_ts，保持步调一致
+        # 不直接设为 now_ts 是为了避免 K 线时间对齐误差累积
+        self.state.last_finalized_bar_ts += (bars_passed * self._tf_sec)
+
+        # --- 以下为业务逻辑 (债务衰减 / 冷却 / 财政计划) ---
 
         decay_rate = getattr(getattr(self.cfg, "risk", None), "pain_decay_per_bar", 0.999)
+        
+        # 1. 中央债务池自然衰减
         if self.state.debt_pool > 0:
             self.state.debt_pool *= (decay_rate ** bars_passed)
+            # 防止无限趋近 0 但不归零
+            if self.state.debt_pool < 1.0: 
+                self.state.debt_pool = 0.0
+
+        # 2. 交易对冷却时间减少
         for pst in self.state.per_pair.values():
             if pst.cooldown_bars_left > 0:
                 pst.cooldown_bars_left = max(0, pst.cooldown_bars_left - bars_passed)
 
+        # 3. 财政周期 (Treasury Cycle) 检查
         cycle_len = int(self.cfg.cycle_len_bars)
         start_tick = self.state.treasury.cycle_start_tick
+        
         if (self.state.bar_tick - start_tick) >= cycle_len:
             equity = self.eq_provider.get_equity()
+            
+            # 如果配置了“盈利周期清空债务”，执行清债
             if (equity - self.state.treasury.cycle_start_equity) >= 0 and self.cfg.risk.clear_debt_on_profitable_cycle:
                 self.state.debt_pool = 0.0
                 for pst in self.state.per_pair.values():
                     pst.local_loss = 0.0
                     pst.closs = 0
+            
+            # 重置周期起始点
             self.state.treasury.cycle_start_tick = self.state.bar_tick
             self.state.treasury.cycle_start_equity = equity
 
+        # 4. 重新计算财政拨款 (Re-Plan)'
+        # 注意：这里会利用修正后的债务池数据和权益数据
         try:
             snapshot = self.cycle_agent._build_snapshot()
             plan = self.treasury_agent.plan(snapshot, self.eq_provider.get_equity())
@@ -2517,12 +2557,33 @@ class TaxBrainV29(IStrategy):
             final_exit_price = exit_rate if exit_rate is not None else getattr(trade, "close_rate", 0.0)
             final_exit_time = exit_time if exit_time is not None else getattr(trade, "close_date", None)
 
+            # --- [新增] 获取 K 值 (根据方向) ---
+            is_short = getattr(trade, "is_short", False)
+            k_val = self.state.treasury.k_short if is_short else self.state.treasury.k_long
+
+            # --- [新增] 获取 Backend 真实债务 ---
+            backend_debt = 0.0
+            if self.state.backend:
+                try:
+                    # 获取后端快照中的 debt_pool
+                    backend_debt = float(self.state.backend.get_snapshot().debt_pool)
+                except Exception:
+                    pass
+
             details = {
                 "pnl_abs": pnl_abs,
                 "tier": tier_name,
                 "closs": pst.closs,
-                "local_debt": pst.local_loss,
-                "central_debt": self.state.debt_pool,
+                
+                # 核心债务数据
+                "local_loss": pst.local_loss,            # 1. 局部债务
+                "central_debt_local": self.state.debt_pool, # 2. 中央债务 (本地衰减版)
+                "central_debt_backend": backend_debt,    # 3. [新增] 中央债务 (后端刚性版)
+                
+                # 信号与参数
+                "score": pst.last_score,                 # 4. [新增] 分数
+                "k_val": k_val,                          # 5. [新增] K值 (拨款系数)
+
                 "cooldown": pst.cooldown_bars_left,
                 "entry_price": entry_price,
                 "exit_price": final_exit_price,

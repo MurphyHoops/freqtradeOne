@@ -530,8 +530,6 @@ class GlobalState:
             pol = tier_mgr.get(pst.closs)
             pst.cooldown_bars_left = max(pst.cooldown_bars_left, pol.cooldown_bars)
 
-            # ==================== 核心修改区域结束 ====================
-
     def to_snapshot(self) -> Dict[str, Any]:
         """序列化全局状态为字典，便于持久化或调试。
         Returns:
@@ -1636,23 +1634,6 @@ class TaxBrainV29(IStrategy):
                 pass
         return best
 
-    def _compute_profit_abs(self, trade, rate: float) -> float:
-        """Compute absolute PnL for a trade, falling back to a simple delta calc."""
-        try:
-            for attr in ("close_profit_abs", "profit_abs"):
-                val = getattr(trade, attr, None)
-                if val is not None:
-                    return float(val)
-        except Exception:
-            pass
-        try:
-            open_rate = float(getattr(trade, "open_rate", rate) or rate)
-            amount = float(getattr(trade, "amount", 0.0) or 0.0)
-            direction = -1.0 if getattr(trade, "is_short", False) else 1.0
-            return direction * (float(rate) - open_rate) * amount
-        except Exception:
-            return 0.0
-
     def confirm_trade_exit(
         self,
         pair: str,
@@ -1971,8 +1952,7 @@ class TaxBrainV29(IStrategy):
             profit_abs = getattr(trade, "close_profit_abs", 0.0)
             if profit_abs is None or profit_abs == 0.0:
                 fill_price = getattr(order, "average", getattr(order, "price", getattr(trade, "close_rate", 0.0)))
-                if fill_price and fill_price > 0:
-                    profit_abs = self._compute_profit_abs(trade, fill_price)
+                profit_abs = trade.calc_profit(fill_price)
 
             if profit_abs != 0:
                 try:
@@ -2411,31 +2391,6 @@ class TaxBrainV29(IStrategy):
                     return "atr_entry_tp"
 
         return None
-
-    def _reconcile_missed_exits(self, pair: str) -> None:
-        if not self._is_backtest_like_runmode() or not self.tier_mgr:
-            return
-        processed = getattr(self, "_bt_closed_trades", None)
-        if processed is None:
-            processed = set()
-            self._bt_closed_trades = processed
-
-        trades = Trade.get_trades_proxy(pair=pair, is_open=False)
-        if not trades:
-            return
-
-        for trade in reversed(trades):
-            trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-            if trade_id in processed:
-                break
-
-            profit_abs = getattr(trade, "close_profit_abs", None)
-            if profit_abs is None:
-                rate = getattr(trade, "close_rate", 0.0)
-                profit_abs = self._compute_profit_abs(trade, rate)
-
-            self.state.record_trade_close(pair, trade_id, float(profit_abs), self.tier_mgr)
-            processed.add(trade_id)
 
     def _backtest_catch_up(self, current_time: datetime) -> None:
         """

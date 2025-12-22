@@ -521,9 +521,7 @@ class GlobalState:
                 return
 
             # 情况 2: 普通亏损 (Before Max Tier)
-            # 修正点：只加 pst.local_loss，绝对不要加 self.debt_pool
             pst.local_loss += loss
-            # self.debt_pool += loss  <-- 这一行被删除了，确保不进入中央债务
 
             # 升级 closs
             pst.closs = prev_closs + 1

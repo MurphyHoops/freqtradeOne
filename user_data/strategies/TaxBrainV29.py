@@ -5,7 +5,6 @@
 from __future__ import annotations
 from typing import Optional, Any, Dict
 import talib.abstract as ta
-import copy
 import json
 import sys
 import time
@@ -18,6 +17,7 @@ from typing import Any, Dict, Optional, Set, List, Tuple
 import pandas as pd
 from pandas import Timestamp
 import math
+import numpy as np
 
 ROOT_PATH = Path(__file__).resolve().parents[2]
 if str(ROOT_PATH) not in sys.path:
@@ -142,7 +142,7 @@ from user_data.strategies.agents.signals.builder import (
     collect_factor_requirements,
     collect_indicator_requirements,
 )
-from user_data.strategies.agents.signals import builder, indicators, schemas
+from user_data.strategies.agents.signals import builder, indicators, schemas, factors, vectorized
 from user_data.strategies.agents.portfolio.risk import RiskAgent
 from user_data.strategies.agents.portfolio.reservation import ReservationAgent
 from user_data.strategies.agents.portfolio.persist import StateStore
@@ -958,7 +958,7 @@ class TaxBrainV29(IStrategy):
             if isinstance(result, tuple):
                 result = result[0]
             if isinstance(result, pd.DataFrame) and not result.empty:
-                prepared = self._prepare_informative_frame(result.copy(), timeframe)
+                prepared = self._prepare_informative_frame(result, timeframe)
                 self._informative_cache.setdefault(pair, {})[timeframe] = prepared
                 return prepared
             return self._prepare_informative_frame(result, timeframe)
@@ -966,7 +966,7 @@ class TaxBrainV29(IStrategy):
         if isinstance(result, tuple):
             result = result[0]
         if isinstance(result, pd.DataFrame) and not result.empty:
-            prepared = self._prepare_informative_frame(result.copy(), timeframe)
+            prepared = self._prepare_informative_frame(result, timeframe)
             self._informative_cache.setdefault(pair, {})[timeframe] = prepared
             return prepared
         return self._prepare_informative_frame(result, timeframe)
@@ -986,11 +986,15 @@ class TaxBrainV29(IStrategy):
                     if key not in seen:
                         seen.add(key)
                         pairs.append(key)
-        sensor_pairs = [("BTC/USDT", self.timeframe), ("ETH/USDT", self.timeframe)]
-        for sp in sensor_pairs:
-            if sp not in seen:
-                seen.add(sp)
-                pairs.append(sp)
+        system_cfg = getattr(self.cfg, "system", None)
+        sensor_enabled = bool(getattr(system_cfg, "market_sensor_enabled", True)) if system_cfg else True
+        sensor_backtest = bool(getattr(system_cfg, "market_sensor_in_backtest", False)) if system_cfg else False
+        if sensor_enabled and (not self._is_backtest_like_runmode() or sensor_backtest):
+            sensor_pairs = [("BTC/USDT", self.timeframe), ("ETH/USDT", self.timeframe)]
+            for sp in sensor_pairs:
+                if sp not in seen:
+                    seen.add(sp)
+                    pairs.append(sp)
         return pairs
 
     @staticmethod
@@ -1008,9 +1012,8 @@ class TaxBrainV29(IStrategy):
                 mean_ret = returns.rolling(history_window, min_periods=min_points).mean()
                 dev = returns - mean_ret
                 cum_dev = dev.rolling(history_window, min_periods=min_points).sum()
-                r_range = cum_dev.rolling(history_window, min_periods=min_points).apply(
-                    lambda x: np.nanmax(x) - np.nanmin(x), raw=True
-                )
+                roll = cum_dev.rolling(history_window, min_periods=min_points)
+                r_range = roll.max() - roll.min()
                 s_std = dev.rolling(history_window, min_periods=min_points).std()
                 hurst = np.log(r_range / s_std) / np.log(
                     np.maximum(1.0, dev.rolling(history_window, min_periods=min_points).count())
@@ -1028,6 +1031,63 @@ class TaxBrainV29(IStrategy):
             except Exception:
                 df["adx_zsig"] = np.nan
         return df
+
+    def _informative_required_columns(self, timeframe: str) -> list[str]:
+        required: set[str] = set()
+        factors_needed = self._factor_requirements.get(timeframe, set())
+        derived_base_cols = {
+            "DELTA_CLOSE_EMAFAST_PCT": {"close", "ema_fast"},
+            "EMA_TREND": {"ema_fast", "ema_slow"},
+        }
+        for base in factors_needed:
+            base = str(base).upper()
+            if base in factors.BASE_FACTOR_SPECS:
+                required.add(factors.BASE_FACTOR_SPECS[base].column)
+            elif base in factors.DERIVED_FACTOR_SPECS:
+                required.update(derived_base_cols.get(base, set()))
+                for indicator_name in factors.DERIVED_FACTOR_SPECS[base].indicators:
+                    spec = indicators.INDICATOR_SPECS.get(str(indicator_name).upper())
+                    if spec:
+                        required.update(spec.columns)
+        indicator_needs = self._indicator_requirements.get(timeframe, set())
+        for indicator_name in indicator_needs:
+            spec = indicators.INDICATOR_SPECS.get(str(indicator_name).upper())
+            if spec:
+                required.update(spec.columns)
+        return sorted(required)
+
+    def _merge_informative_columns_into_base(self, df: pd.DataFrame, pair: str) -> None:
+        """Merge informative columns once into base dataframe for vectorized backtests."""
+        if df is None or df.empty:
+            return
+        base_time = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
+        left = pd.DataFrame({"_t": base_time})
+        for tf in getattr(self, "_informative_timeframes", []):
+            info_df = self._get_informative_dataframe(pair, tf)
+            if info_df is None or info_df.empty:
+                continue
+            cols = self._informative_required_columns(tf)
+            cols = [col for col in cols if col in info_df.columns]
+            if not cols:
+                continue
+            if "date" in info_df.columns and "date" not in cols:
+                cols.append("date")
+            right = info_df.loc[:, cols]
+            right = right.assign(
+                _tinfo=pd.to_datetime(right["date"]) if "date" in right.columns else pd.to_datetime(right.index)
+            )
+            merged = pd.merge_asof(
+                left.sort_values("_t"),
+                right.sort_values("_tinfo"),
+                left_on="_t",
+                right_on="_tinfo",
+                direction="backward",
+            )
+            merged.index = df.index
+            suffix = str(tf).replace("/", "_")
+            for col in cols:
+                if col in merged.columns:
+                    df[f"{col}_{suffix}"] = merged[col]
 
     def bot_start(self, **kwargs) -> None:
         """ """
@@ -1060,10 +1120,17 @@ class TaxBrainV29(IStrategy):
             当 cfg.adx_len != 14 时会记录动态列名日志，对应 V29.1 修订 #1。
         """
         pair = metadata["pair"]
-        print(">>> base_needs:", self._indicator_requirements.get(None))
+        system_cfg = getattr(self.cfg, "system", None)
+        if system_cfg and getattr(system_cfg, "debug_prints", False):
+            print(">>> base_needs:", self._indicator_requirements.get(None))
         base_needs = self._indicator_requirements.get(None)
         df = indicators.compute_indicators(df, self.cfg, required=base_needs)
         df = self._append_regime_columns(df)
+        backtest_like = self._is_backtest_like_runmode()
+        if system_cfg and backtest_like and getattr(system_cfg, "merge_informative_into_base", False):
+            self._merge_informative_columns_into_base(df, pair)
+            timeframes = (None, *getattr(self, "_informative_timeframes", ()))
+            vectorized.add_derived_factor_columns(df, timeframes)
         informative_rows: Dict[str, pd.Series] = {}
         if self._informative_timeframes:
             for tf in self._informative_timeframes:
@@ -1073,9 +1140,9 @@ class TaxBrainV29(IStrategy):
                     continue
                 if info_df is None or info_df.empty:
                     continue
-                informative_rows[tf] = info_df.iloc[-1].copy()
+                informative_rows[tf] = info_df.iloc[-1]
                 cache = self._informative_cache.setdefault(pair, {})
-                cache[tf] = info_df.copy()
+                cache[tf] = info_df
         if informative_rows:
             self._informative_last[pair] = informative_rows
         elif pair in self._informative_last:
@@ -1084,7 +1151,9 @@ class TaxBrainV29(IStrategy):
         if len(df) == 0:
             return df
 
-        if pair.upper().startswith("BTC"):
+        sensor_enabled = bool(getattr(system_cfg, "market_sensor_enabled", True)) if system_cfg else True
+        sensor_backtest = bool(getattr(system_cfg, "market_sensor_in_backtest", False)) if system_cfg else False
+        if pair.upper().startswith("BTC") and sensor_enabled and (not backtest_like or sensor_backtest):
             eth_df = None
             try:
                 eth_df = self._get_informative_dataframe("ETH/USDT", self.timeframe)
@@ -1098,7 +1167,7 @@ class TaxBrainV29(IStrategy):
             except Exception:
                 pass
 
-        last = df.iloc[-1].copy()
+        last = df.iloc[-1]
         last_ts = float(pd.to_datetime(
             last.get("date", pd.Timestamp.utcnow())).timestamp())
         try:
@@ -1205,9 +1274,11 @@ class TaxBrainV29(IStrategy):
                 continue
             left = pd.DataFrame({"_t": pd.to_datetime(
                 df["date"]) if "date" in df.columns else pd.to_datetime(df.index)})
-            right = info_df.copy()
-            right["_tinfo"] = pd.to_datetime(
-                right["date"]) if "date" in right.columns else pd.to_datetime(right.index)
+            right = info_df
+            right = right.assign(
+                _tinfo=pd.to_datetime(
+                    right["date"]) if "date" in right.columns else pd.to_datetime(right.index)
+            )
             merged = pd.merge_asof(left.sort_values("_t"),
                                    right.sort_values("_tinfo"),
                                    left_on="_t", right_on="_tinfo",
@@ -1336,23 +1407,54 @@ class TaxBrainV29(IStrategy):
 
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         pair = metadata["pair"]
-        if "BNB" in pair:
-            print("BNB")
+        system_cfg = getattr(self.cfg, "system", None)
+
         df["enter_long"] = 0
         df["enter_short"] = 0
         df["enter_tag"] = None
-        aligned_info = self._aligned_informative_for_df(pair, df)
         runmode = getattr(self.dp, "runmode", None)
         is_vector_pass = (RunMode and runmode in {
                           RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.PLOT})
-        pst_snapshot = copy.deepcopy(self.state.get_pair_state(pair))
+        vectorized_bt = bool(getattr(system_cfg, "vectorized_entry_backtest", False)) if system_cfg else False
+        merge_info = bool(getattr(system_cfg, "merge_informative_into_base", False)) if system_cfg else False
+        use_vector_prefilter = bool(is_vector_pass and vectorized_bt and (not self._informative_timeframes or merge_info))
+        aligned_info = {} if use_vector_prefilter else self._aligned_informative_for_df(pair, df)
+        pst_snapshot = self.state.get_pair_state(pair)
         history_window = 200
         close_series = df.get("close", pd.Series(dtype=float))
         adx_series = df.get("adx", pd.Series(dtype=float))
 
-        if is_vector_pass:
+        if use_vector_prefilter:
+            timeframes = (None, *getattr(self, "_informative_timeframes", ()))
+            vectorized.add_derived_factor_columns(df, timeframes)
+            df["LOSS_TIER_STATE"] = pst_snapshot.closs
+            signal_mask = vectorized.prefilter_signal_mask(df, self.cfg)
+            for idx in df.index[signal_mask]:
+                row = df.loc[idx]
+                raw_candidates = builder.build_candidates(row, self.cfg)
+                if not raw_candidates:
+                    continue
+                planned: list[schemas.Candidate] = []
+                for candidate in raw_candidates:
+                    cand_with_plan = self._candidate_with_plan(pair, candidate, row, None)
+                    if cand_with_plan:
+                        planned.append(cand_with_plan)
+                if not planned:
+                    continue
+                if is_vector_pass:
+                    planned = [
+                        cand for cand in planned
+                        if self._candidate_allowed_any_tier(cand)
+                    ]
+                    if not planned:
+                        continue
+                grouped = self._trim_candidate_pool(self._group_candidates_by_direction(planned))
+                if not grouped.get("long") and not grouped.get("short"):
+                    continue
+                self._apply_entry_signal(df, idx, grouped)
+        elif is_vector_pass:
             for idx in df.index:
-                row = df.loc[idx].copy()
+                row = df.loc[idx]
                 row["LOSS_TIER_STATE"] = pst_snapshot.closs
                 inf_rows = self._informative_rows_for_index(aligned_info, idx)
                 raw_candidates = builder.build_candidates(
@@ -1385,7 +1487,7 @@ class TaxBrainV29(IStrategy):
 
         actual_state = self.state.get_pair_state(pair)
         last_idx = df.index[-1]
-        last_row = df.loc[last_idx].copy()
+        last_row = df.loc[last_idx]
         last_row["LOSS_TIER_STATE"] = actual_state.closs
         last_inf_rows = self._informative_rows_for_index(aligned_info, last_idx)
         last_candidate = self._eval_entry_on_row(

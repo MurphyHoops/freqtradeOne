@@ -9,7 +9,12 @@
     "redis_namespace": "TB_V29:",
     "timeframe": "5m",
     "startup_candle_count": 210,
-    "dry_run_wallet_fallback": 1000.0
+    "dry_run_wallet_fallback": 1000.0,
+    "vectorized_entry_backtest": true,
+    "merge_informative_into_base": true,
+    "market_sensor_enabled": true,
+    "market_sensor_in_backtest": false,
+    "debug_prints": false
   },
   "risk": {
     "_comment": "Global risk controls",

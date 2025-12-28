@@ -136,71 +136,61 @@ def _compute_hurst_rs(history_close: Optional[Iterable[float]], window: int = 20
     return max(0.0, min(1.0, hurst))
 
 
-def _compute_z_score(value: float, mu: Any, sigma: Any) -> float:
+def _compute_adx_zsig(
+    history_adx: Optional[Iterable[float]],
+    current_adx: float,
+    window: int = 200,
+    min_points: int = 50,
+) -> float:
+    """Compute sigmoid(z-score) for ADX using recent history; returns NaN if insufficient."""
+
+    if history_adx is None or current_adx is None or math.isnan(current_adx):
+        return float("nan")
     try:
-        v = float(value)
-        m = float(mu)
-        s = float(sigma)
+        values = [
+            float(v)
+            for v in history_adx
+            if v is not None and not math.isnan(float(v)) and not math.isinf(float(v))
+        ]
     except Exception:
         return float("nan")
-    if math.isnan(v) or math.isnan(m) or math.isnan(s) or s <= 1e-9:
+    if window and window > 0:
+        values = values[-window:]
+    if len(values) < max(2, min_points):
         return float("nan")
-    return (v - m) / s
-
-
-def _safe_snap_attr(global_snap: Any, name: str) -> float:
-    try:
-        val = getattr(global_snap, name, None)
-    except Exception:
-        val = None
-    try:
-        val_f = float(val)
-    except Exception:
+    mu = sum(values) / len(values)
+    variance = sum((v - mu) ** 2 for v in values) / max(1, len(values))
+    sigma = math.sqrt(variance)
+    if sigma <= 1e-9:
         return float("nan")
-    if math.isnan(val_f) or math.isinf(val_f):
-        return float("nan")
-    return val_f
-
-
-def _compute_bct_beta(global_snap: Any) -> float:
-    if global_snap is None:
-        return 1.0
-    rho_b = _safe_snap_attr(global_snap, "rho_b")
-    if math.isnan(rho_b):
-        rho_b = _safe_snap_attr(global_snap, "debt_pool")
-    r_sys = _safe_snap_attr(global_snap, "r_sys")
-    if math.isnan(r_sys):
-        r_sys = _safe_snap_attr(global_snap, "risk_used")
-    if math.isnan(rho_b) or math.isnan(r_sys) or r_sys <= 0:
-        return 1.0
-    phi = max(0.0, rho_b / max(r_sys, 1e-9))
-    beta = 1.0 + min(2.0, math.log1p(phi))
-    return max(1.0, min(3.0, beta))
+    z_val = (current_adx - mu) / sigma
+    return _sigmoid(z_val)
 
 
 def calculate_regime_factor(
     bag: Any,
     strategy_type: str | None,
     history_close: Optional[Iterable[float]] = None,
-    global_snap: Any = None,
+    history_adx: Optional[Iterable[float]] = None,
+    hurst_val: Optional[float] = None,
+    z_sig: Optional[float] = None,
 ) -> float:
-    """Return a regime multiplier (0.5-1.5) coupled to Hurst + Z-Score + BCT beta."""
+    """Return a regime multiplier (0.5-1.5) coupled to Hurst + ADX Z-Score."""
 
     try:
         adx = float(bag.get("ADX"))
     except Exception:
         adx = float("nan")
 
-    hurst_val = _compute_hurst_rs(history_close)
+    if hurst_val is None:
+        hurst_val = _compute_hurst_rs(history_close)
     if math.isnan(hurst_val):
         hurst_val = 0.5
 
-    z_adx = _compute_z_score(adx, getattr(global_snap, "adx_mu", None), getattr(global_snap, "adx_sigma", None))
-    if math.isnan(z_adx):
-        z_adx = 0.0 if math.isnan(adx) else (adx - 25.0) / 10.0  # fallback to scaled ADX when stats missing
-    z_sig = _sigmoid(z_adx)
-
-    beta = _compute_bct_beta(global_snap)
+    if z_sig is None:
+        z_sig = _compute_adx_zsig(history_adx, adx)
+    if z_sig is None or math.isnan(z_sig):
+        z_sig = 0.5
 
     bias = (strategy_type or "").lower()
     is_trend = any(token in bias for token in ("trend", "breakout"))
@@ -208,14 +198,14 @@ def calculate_regime_factor(
 
     if is_trend and not is_mean_rev:
         raw_factor = 0.7 * hurst_val + 0.3 * z_sig
-        factor = 1.0 + (raw_factor - 0.5) * beta
+        factor = 1.0 + (raw_factor - 0.5)
     elif is_mean_rev and not is_trend:
         raw_factor = (0.5 - hurst_val) * 2.0
-        factor = 1.0 + raw_factor * beta
+        factor = 1.0 + raw_factor
     else:
         # neutral: blend both signals with softer leverage
         raw_factor = 0.5 * hurst_val + 0.5 * z_sig
-        factor = 1.0 + (raw_factor - 0.5) * (beta * 0.5)
+        factor = 1.0 + 0.5 * (raw_factor - 0.5)
 
     return max(0.5, min(1.5, factor))
 
@@ -345,10 +335,6 @@ class FactorBank:
             fallback_col = BASE_FACTOR_SPECS[base].column
             value = _safe_get(row, fallback_col)
         return value
-
-def _get_factor(self, base: str, timeframe: Optional[str]) -> float:
-        return self.get(_compose_factor(base, timeframe))
-
 
 __all__ = [
     "BaseFactorSpec",

@@ -102,6 +102,12 @@ class SizingAlgoConfig:
     target_recovery: TargetRecoveryConfig = field(default_factory=TargetRecoveryConfig)  # Tunables for TARGET_RECOVERY.
     score_floor: float = 0.3  # Minimum score to start allocating central (fluid) debt; lower = more permissive.
     score_exponent: float = 2.0  # Curve applied to score for fluid sizing (>=0); higher = reward high scores more.
+    bct_beta_min: float = 1.0  # Minimum beta applied to score exponent under low pressure.
+    bct_beta_max: float = 4.0  # Maximum beta applied to score exponent under high pressure.
+    bct_pressure_ratio: float = 1.0  # Pressure value that maps to beta_max; lower = more aggressive ramp.
+    bct_pressure_ema_alpha: float = 0.2  # EWMA alpha for pressure smoothing; 0 disables smoothing.
+    fluid_cap_pct_of_equity: float = 0.05  # Cap for central fluid allocation as fraction of equity.
+    c_target_risk_cap_pct_of_equity: float = 0.05  # Cap for central target risk as fraction of equity.
 
 
 @dataclass(frozen=True)

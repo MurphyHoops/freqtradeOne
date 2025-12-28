@@ -40,6 +40,7 @@ class SizerAgent:
         )
         self._validate_sizing_algos()
         self.dp = None
+        self._bct_pressure_ema: Optional[float] = None
 
     def set_dataprovider(self, dp) -> None:
         """Inject DataProvider for dynamic min_notional lookups."""
@@ -163,15 +164,49 @@ class SizerAgent:
         score_cfg = getattr(self.cfg, "sizing_algos", getattr(self.cfg, "sizing", None))
         score_floor = float(getattr(score_cfg, "score_floor", 0.3) or 0.0) if score_cfg else 0.3
         score_exp = float(getattr(score_cfg, "score_exponent", 2.0) or 2.0) if score_cfg else 2.0
+        beta_min = float(getattr(score_cfg, "bct_beta_min", 1.0) or 1.0) if score_cfg else 1.0
+        beta_max = float(getattr(score_cfg, "bct_beta_max", 4.0) or 4.0) if score_cfg else 4.0
+        pressure_ratio = float(getattr(score_cfg, "bct_pressure_ratio", 1.0) or 1.0) if score_cfg else 1.0
+        pressure_ema_alpha = float(getattr(score_cfg, "bct_pressure_ema_alpha", 0.0) or 0.0) if score_cfg else 0.0
+        fluid_cap_pct = float(getattr(score_cfg, "fluid_cap_pct_of_equity", 0.0) or 0.0) if score_cfg else 0.0
         clamped_score = max(0.0, min(1.0, score_val))
+        beta_low, beta_high = sorted((beta_min, beta_max))
+        pressure = 1.0
+        if equity > 0:
+            debt_pool = float(getattr(self.state, "debt_pool", 0.0))
+            risk_used = float(self.state.get_total_open_risk() + self.reservation.get_total_reserved())
+            if self.backend:
+                try:
+                    snapshot = self.backend.get_snapshot()
+                    debt_pool = float(getattr(snapshot, "debt_pool", debt_pool))
+                    risk_used = float(getattr(snapshot, "risk_used", risk_used))
+                except Exception:
+                    pass
+            cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
+            denom = max(equity * cap_pct, 1e-9)
+            pressure = max(0.0, (debt_pool + risk_used) / denom)
+        if pressure_ema_alpha > 0:
+            alpha = max(0.0, min(1.0, pressure_ema_alpha))
+            if self._bct_pressure_ema is None:
+                self._bct_pressure_ema = pressure
+            else:
+                self._bct_pressure_ema = alpha * pressure + (1.0 - alpha) * self._bct_pressure_ema
+            pressure = self._bct_pressure_ema
+        if pressure_ratio <= 0:
+            pressure_ratio = 1.0
+        pressure_norm = max(0.0, min(1.0, pressure / pressure_ratio))
+        beta = beta_low + (beta_high - beta_low) * pressure_norm
         if vector_k > 0 and clamped_score > score_floor:
             span = max(1e-9, 1.0 - score_floor)
             normalized = max(0.0, clamped_score - score_floor) / span
             try:
-                shaped = normalized ** score_exp if score_exp > 0 else normalized
+                exp_val = score_exp * beta
+                shaped = normalized ** exp_val if exp_val > 0 else normalized
             except Exception:
                 shaped = normalized
             fluid = vector_k * shaped
+            if fluid_cap_pct > 0 and equity > 0:
+                fluid = min(fluid, equity * fluid_cap_pct)
 
         c_target_risk =0
         if fluid>0:
@@ -203,6 +238,11 @@ class SizerAgent:
                 c_algo_fn = ALGO_REGISTRY["BASE_ONLY"]
             c_result = c_algo_fn(c_inputs, self.cfg)
             c_target_risk = max(c_result.target_risk, 0.0)
+            c_target_risk_cap_pct = float(
+                getattr(score_cfg, "c_target_risk_cap_pct_of_equity", 0.0) or 0.0
+            ) if score_cfg else 0.0
+            if c_target_risk_cap_pct > 0 and equity > 0:
+                c_target_risk = min(c_target_risk, equity * c_target_risk_cap_pct)
 
         # 地方
         local_inputs = SizingInputs(
@@ -253,7 +293,8 @@ class SizerAgent:
         self._log_debug(
             f"pair={ctx.pair} closs={pst.closs} score={score_val:.4f} "
             f"bucket={bucket} vector_k={vector_k:.6f} risk_room_nominal={caps.risk_room_nominal:.6f} "
-            f"base_nominal={base_nominal:.6f} fluid={fluid:.6f} score_floor={score_floor:.3f} score_exp={score_exp:.2f} sl_price_pct={sl_price_pct:.6f} "
+            f"base_nominal={base_nominal:.6f} fluid={fluid:.6f} score_floor={score_floor:.3f} score_exp={score_exp:.2f} "
+            f"beta={beta:.2f} pressure={pressure:.3f} sl_price_pct={sl_price_pct:.6f} "
             f"atr_pct_used={atr_pct_used} atr_mul_sl={atr_mul_sl} nominal_target={nominal_target:.6f} "
             f"min_entry_nominal={min_entry_nominal:.6f} stake_nominal={stake_nominal:.6f} "
             f"stake_margin={stake_margin:.6f} risk_final={risk_final:.6f}"

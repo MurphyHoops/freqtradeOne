@@ -88,6 +88,12 @@
     "default_algo": "BASELINE",
     "score_floor": 0.3,
     "score_exponent": 2.0,
+    "bct_beta_min": 1.0,
+    "bct_beta_max": 4.0,
+    "bct_pressure_ratio": 1.0,
+    "bct_pressure_ema_alpha": 0.2,
+    "fluid_cap_pct_of_equity": 0.05,
+    "c_target_risk_cap_pct_of_equity": 0.05,
     "target_recovery": {
       "use_atr_based": true,
       "include_bucket_in_recovery": true,

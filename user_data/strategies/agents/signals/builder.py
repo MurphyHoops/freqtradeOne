@@ -11,6 +11,8 @@ from ...config.v29_config import V29Config
 from .factors import (
     DEFAULT_BAG_FACTORS,
     FactorBank,
+    _compute_adx_zsig,
+    _compute_hurst_rs,
     apply_timeframe_to_factor,
     calculate_regime_factor,
     factor_components_with_default,
@@ -200,11 +202,21 @@ def build_candidates(
     cfg,
     informative: Optional[Dict[str, Any]] = None,
     history_close: Optional[Iterable[float]] = None,
-    global_snap: Any = None,
+    history_adx: Optional[Iterable[float]] = None,
 ) -> List[Candidate]:
     """Build candidates for the latest market row (and optional informative rows)."""
 
     fb = FactorBank(row, informative=informative)
+    hurst_val: Optional[float] = None
+    z_sig: Optional[float] = None
+    if history_close:
+        hurst_val = _compute_hurst_rs(history_close)
+    if history_adx:
+        try:
+            adx_now = float(fb.get("ADX"))
+        except Exception:
+            adx_now = float("nan")
+        z_sig = _compute_adx_zsig(history_adx, adx_now)
     base_cache: Dict[Optional[str], Dict[str, float]] = {}
     base_cache[None] = _prefetch_base(fb, None)
     if any(math.isnan(v) for v in base_cache[None].values()):
@@ -257,7 +269,14 @@ def build_candidates(
             win_prob_val = _safe(spec.win_prob_fn(bag, cfg, raw), default=base_wp)
         except Exception:
             win_prob_val = base_wp
-        regime_factor = calculate_regime_factor(bag, strat_name, history_close, global_snap)
+        regime_factor = calculate_regime_factor(
+            bag,
+            strat_name,
+            history_close=history_close,
+            history_adx=history_adx,
+            hurst_val=hurst_val,
+            z_sig=z_sig,
+        )
         gcfg = getattr(getattr(cfg, "risk", None), "gatekeeping", getattr(cfg, "gatekeeping", None))
         score_exp = float(getattr(gcfg, "score_curve_exponent", 1.0) or 1.0) if gcfg else 1.0
         final_score = max(0.0, min(1.0, win_prob_val * regime_factor))

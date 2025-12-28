@@ -58,7 +58,7 @@ def factor_series(df: pd.DataFrame, base: str, timeframe: Optional[str]) -> Opti
     return df[col] if col in df.columns else None
 
 
-def prefilter_signal_mask(df: pd.DataFrame, cfg) -> pd.Series:
+def prefilter_signal_mask(df: pd.DataFrame, cfg, specs: Optional[Iterable] = None) -> pd.Series:
     """Return a boolean mask for rows that can possibly pass signal conditions."""
 
     enabled = {
@@ -69,7 +69,8 @@ def prefilter_signal_mask(df: pd.DataFrame, cfg) -> pd.Series:
         if name
     }
     mask_any = pd.Series(False, index=df.index)
-    for spec in REGISTRY.all():
+    specs_iter = specs if specs is not None else REGISTRY.all()
+    for spec in specs_iter:
         if enabled and spec.name not in enabled:
             continue
         spec_mask = pd.Series(True, index=df.index)
@@ -114,4 +115,3 @@ def prefilter_signal_mask(df: pd.DataFrame, cfg) -> pd.Series:
             # Unknown operator: keep conservative (no filtering)
         mask_any = mask_any | spec_mask
     return mask_any.fillna(False)
-

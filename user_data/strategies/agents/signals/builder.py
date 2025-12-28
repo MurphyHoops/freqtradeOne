@@ -203,6 +203,7 @@ def build_candidates(
     informative: Optional[Dict[str, Any]] = None,
     history_close: Optional[Iterable[float]] = None,
     history_adx: Optional[Iterable[float]] = None,
+    specs: Optional[Iterable[Any]] = None,
 ) -> List[Candidate]:
     """Build candidates for the latest market row (and optional informative rows)."""
 
@@ -236,7 +237,8 @@ def build_candidates(
     strategy_map = getattr(getattr(cfg, "strategy", None), "strategies", getattr(cfg, "strategies", {})) or {}
     risk = RiskEstimator(cfg)
     results: List[Candidate] = []
-    for spec in REGISTRY.all():
+    specs_iter = specs if specs is not None else REGISTRY.all()
+    for spec in specs_iter:
         if enabled and spec.name not in enabled:
             continue
         tf = spec.timeframe
@@ -258,7 +260,6 @@ def build_candidates(
         if sl <= 0 or tp <= 0:
             continue
         raw = _safe(spec.raw_fn(bag, cfg))
-        win = _safe(spec.win_prob_fn(bag, cfg, raw), default=0.5)
         rr = tp / max(sl, 1e-12)
         min_rr = plan.min_rr if plan.min_rr is not None else spec.min_rr
         min_edge = plan.min_edge if plan.min_edge is not None else spec.min_edge

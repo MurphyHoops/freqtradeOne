@@ -42,3 +42,4 @@
 - 启用 Redis：配置 `system.global_backend_mode="redis"`，并提供 `redis_host/redis_port/redis_db/redis_namespace`；失败仅降级日志，不中断。
 - 日志与持久化：`user_data/logs` 存储 analytics、sizer/tier debug；状态文件 `taxbrain_v29_state.json` 可断点续跑。
 - 指标/信号：如需裁剪信号或额外因子，可在 config 中 `enabled_signals`/`extra_signal_factors` 调整，builder 会自动计算依赖的指标与信息周期。
+- Vectorized backtest with informative timeframes requires `merge_informative_into_base=true` for consistency.

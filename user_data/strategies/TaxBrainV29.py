@@ -993,6 +993,42 @@ class TaxBrainV29(IStrategy):
                 pairs.append(sp)
         return pairs
 
+    @staticmethod
+    def _append_regime_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Append Hurst + ADX Z-Score columns using rolling windows."""
+
+        if df is None or df.empty:
+            return df
+        history_window = 200
+        min_points = 50
+        if "close" in df.columns:
+            try:
+                close_series = pd.to_numeric(df["close"], errors="coerce")
+                returns = close_series.pct_change().replace([np.inf, -np.inf], np.nan)
+                mean_ret = returns.rolling(history_window, min_periods=min_points).mean()
+                dev = returns - mean_ret
+                cum_dev = dev.rolling(history_window, min_periods=min_points).sum()
+                r_range = cum_dev.rolling(history_window, min_periods=min_points).apply(
+                    lambda x: np.nanmax(x) - np.nanmin(x), raw=True
+                )
+                s_std = dev.rolling(history_window, min_periods=min_points).std()
+                hurst = np.log(r_range / s_std) / np.log(
+                    np.maximum(1.0, dev.rolling(history_window, min_periods=min_points).count())
+                )
+                df["hurst"] = hurst.clip(lower=0.0, upper=1.0)
+            except Exception:
+                df["hurst"] = np.nan
+        if "adx" in df.columns:
+            try:
+                adx_series = pd.to_numeric(df["adx"], errors="coerce")
+                mu = adx_series.rolling(history_window, min_periods=min_points).mean()
+                sigma = adx_series.rolling(history_window, min_periods=min_points).std()
+                z = (adx_series - mu) / sigma.replace(0.0, np.nan)
+                df["adx_zsig"] = 1.0 / (1.0 + np.exp(-z))
+            except Exception:
+                df["adx_zsig"] = np.nan
+        return df
+
     def bot_start(self, **kwargs) -> None:
         """ """
         self._runmode_token = self._compute_runmode_token()
@@ -1027,6 +1063,7 @@ class TaxBrainV29(IStrategy):
         print(">>> base_needs:", self._indicator_requirements.get(None))
         base_needs = self._indicator_requirements.get(None)
         df = indicators.compute_indicators(df, self.cfg, required=base_needs)
+        df = self._append_regime_columns(df)
         informative_rows: Dict[str, pd.Series] = {}
         if self._informative_timeframes:
             for tf in self._informative_timeframes:
@@ -1314,30 +1351,14 @@ class TaxBrainV29(IStrategy):
         adx_series = df.get("adx", pd.Series(dtype=float))
 
         if is_vector_pass:
-            from collections import deque
-
-            close_hist: deque = deque(maxlen=history_window)
-            adx_hist: deque = deque(maxlen=history_window)
             for idx in df.index:
                 row = df.loc[idx].copy()
                 row["LOSS_TIER_STATE"] = pst_snapshot.closs
                 inf_rows = self._informative_rows_for_index(aligned_info, idx)
-                try:
-                    close_val = float(close_series.loc[idx])
-                except Exception:
-                    close_val = float("nan")
-                try:
-                    adx_val = float(adx_series.loc[idx])
-                except Exception:
-                    adx_val = float("nan")
-                close_hist.append(close_val)
-                adx_hist.append(adx_val)
                 raw_candidates = builder.build_candidates(
                     row,
                     self.cfg,
                     informative=inf_rows,
-                    history_close=list(close_hist),
-                    history_adx=list(adx_hist),
                 )
                 if not raw_candidates:
                     continue
@@ -1367,14 +1388,10 @@ class TaxBrainV29(IStrategy):
         last_row = df.loc[last_idx].copy()
         last_row["LOSS_TIER_STATE"] = actual_state.closs
         last_inf_rows = self._informative_rows_for_index(aligned_info, last_idx)
-        history_close = close_series.iloc[max(0, len(close_series) - history_window) :].tolist()
-        history_adx = adx_series.iloc[max(0, len(adx_series) - history_window) :].tolist()
         last_candidate = self._eval_entry_on_row(
             last_row,
             last_inf_rows,
             actual_state,
-            history_close=history_close,
-            history_adx=history_adx,
         )
         if last_candidate:
             last_candidate = self._candidate_with_plan(pair, last_candidate, last_row, last_inf_rows)

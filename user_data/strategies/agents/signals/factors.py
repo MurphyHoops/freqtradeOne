@@ -34,6 +34,8 @@ BASE_FACTOR_SPECS: Dict[str, BaseFactorSpec] = {
     "ATR": BaseFactorSpec(indicators=("ATR",), column="atr"),
     "ATR_PCT": BaseFactorSpec(indicators=("ATR",), column="atr_pct"),
     "ADX": BaseFactorSpec(indicators=("ADX",), column="adx"),
+    "HURST": BaseFactorSpec(indicators=(), column="hurst"),
+    "ADX_ZSIG": BaseFactorSpec(indicators=(), column="adx_zsig"),
     "NEWBARS_HIGH": BaseFactorSpec(indicators=("NEWHBARS",), column="newbars_high"),
     "NEWBARS_LOW": BaseFactorSpec(indicators=("NEWHBARS",), column="newbars_low"),
 }
@@ -183,6 +185,11 @@ def calculate_regime_factor(
         adx = float("nan")
 
     if hurst_val is None:
+        try:
+            hurst_val = float(bag.get("HURST"))
+        except Exception:
+            hurst_val = None
+    if hurst_val is None:
         hurst_val = _compute_hurst_rs(history_close)
     try:
         hurst_val = float(hurst_val)
@@ -191,6 +198,11 @@ def calculate_regime_factor(
     if math.isnan(hurst_val) or math.isinf(hurst_val):
         hurst_val = 0.5
 
+    if z_sig is None:
+        try:
+            z_sig = float(bag.get("ADX_ZSIG"))
+        except Exception:
+            z_sig = None
     if z_sig is None:
         z_sig = _compute_adx_zsig(history_adx, adx)
     try:

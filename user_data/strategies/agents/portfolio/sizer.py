@@ -179,14 +179,19 @@ class SizerAgent:
         pressure = 1.0
         if equity > 0:
             debt_pool = float(getattr(self.state, "debt_pool", 0.0))
-            risk_used = float(self.state.get_total_open_risk())
-            if include_reservation:
-                risk_used += float(self.reservation.get_total_reserved())
+            local_open = float(self.state.get_total_open_risk())
+            local_reserved = float(self.reservation.get_total_reserved())
+            local_total = local_open + (local_reserved if include_reservation else 0.0)
+            risk_used = float(local_total)
             if self.backend:
                 try:
                     snapshot = self.backend.get_snapshot()
                     debt_pool = float(getattr(snapshot, "debt_pool", debt_pool))
-                    risk_used = float(getattr(snapshot, "risk_used", risk_used))
+                    backend_used = float(getattr(snapshot, "risk_used", risk_used))
+                    if include_reservation:
+                        risk_used = max(backend_used, local_total)
+                    else:
+                        risk_used = backend_used
                 except Exception:
                     pass
             cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)

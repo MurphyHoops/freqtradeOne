@@ -1616,6 +1616,11 @@ class TaxBrainV29(IStrategy):
                     self._pending_entry_meta[pair] = normalized
 
         if is_backtest_mode:
+            system_cfg = getattr(self.cfg, "system", None)
+            if system_cfg and getattr(system_cfg, "cte_catch_up_in_backtest", False):
+                self._backtest_catch_up(current_time)
+            pst = self.state.get_pair_state(pair)
+            tier_pol = self.tier_mgr.get(pst.closs)
             try:
                 self._tier_debug(
                     f"cte precheck pair={pair} candidate_present={bool(candidate_from_tag)} entry_tag_present={bool(entry_tag)}"
@@ -1632,6 +1637,19 @@ class TaxBrainV29(IStrategy):
                         f"bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} reason=no_candidate"
                     )
                     return False
+                if system_cfg and getattr(system_cfg, "cte_enforce_tier_in_backtest", False):
+                    if not self._candidate_allowed_by_policy(tier_pol, candidate_from_tag):
+                        tier_name = getattr(tier_pol, "name", None) if tier_pol else None
+                        try:
+                            self.logger.info(
+                                f"[tier] bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} reason=tier_policy"
+                            )
+                        except Exception:
+                            pass
+                        self._tier_debug(
+                            f"bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} reason=tier_policy"
+                        )
+                        return False
                 if pair not in self._pending_entry_meta:
                     self._pending_entry_meta[pair] = self._candidate_meta_from_candidate(candidate_from_tag)
                 tier_name = getattr(tier_pol, "name", None) if tier_pol else None

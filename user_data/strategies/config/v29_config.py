@@ -128,6 +128,8 @@ class SystemConfig:
     market_sensor_enabled: bool = True  # Master toggle for market sensor.
     market_sensor_in_backtest: bool = False  # Enable market sensor during backtest/hyperopt.
     debug_prints: bool = False  # Enable verbose prints in strategy hooks.
+    cte_enforce_tier_in_backtest: bool = True  # Enforce current tier policy in confirm_trade_entry during backtests.
+    cte_catch_up_in_backtest: bool = True  # Run backtest catch-up before confirm_trade_entry decisions.
 
 
 @dataclass(frozen=True)

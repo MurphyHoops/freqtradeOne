@@ -14,7 +14,9 @@
     "merge_informative_into_base": true,
     "market_sensor_enabled": true,
     "market_sensor_in_backtest": false,
-    "debug_prints": false
+    "debug_prints": false,
+    "cte_enforce_tier_in_backtest": true,
+    "cte_catch_up_in_backtest": true
   },
   "risk": {
     "_comment": "Global risk controls",

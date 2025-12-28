@@ -1314,27 +1314,30 @@ class TaxBrainV29(IStrategy):
         adx_series = df.get("adx", pd.Series(dtype=float))
 
         if is_vector_pass:
+            from collections import deque
+
+            close_hist: deque = deque(maxlen=history_window)
+            adx_hist: deque = deque(maxlen=history_window)
             for idx in df.index:
                 row = df.loc[idx].copy()
                 row["LOSS_TIER_STATE"] = pst_snapshot.closs
                 inf_rows = self._informative_rows_for_index(aligned_info, idx)
                 try:
-                    pos = close_series.index.get_loc(idx)
+                    close_val = float(close_series.loc[idx])
                 except Exception:
-                    pos = None
-                if isinstance(pos, int):
-                    start = max(0, pos - history_window + 1)
-                    history_close = close_series.iloc[start : pos + 1].tolist()
-                    history_adx = adx_series.iloc[start : pos + 1].tolist()
-                else:
-                    history_close = None
-                    history_adx = None
+                    close_val = float("nan")
+                try:
+                    adx_val = float(adx_series.loc[idx])
+                except Exception:
+                    adx_val = float("nan")
+                close_hist.append(close_val)
+                adx_hist.append(adx_val)
                 raw_candidates = builder.build_candidates(
                     row,
                     self.cfg,
                     informative=inf_rows,
-                    history_close=history_close,
-                    history_adx=history_adx,
+                    history_close=list(close_hist),
+                    history_adx=list(adx_hist),
                 )
                 if not raw_candidates:
                     continue

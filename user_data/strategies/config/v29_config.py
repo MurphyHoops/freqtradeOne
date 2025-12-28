@@ -106,6 +106,7 @@ class SizingAlgoConfig:
     bct_beta_max: float = 4.0  # Maximum beta applied to score exponent under high pressure.
     bct_pressure_ratio: float = 1.0  # Pressure value that maps to beta_max; lower = more aggressive ramp.
     bct_pressure_ema_alpha: float = 0.2  # EWMA alpha for pressure smoothing; 0 disables smoothing.
+    bct_pressure_include_reservation: bool = True  # Include reserved risk in pressure when backend is absent.
     fluid_cap_pct_of_equity: float = 0.05  # Cap for central fluid allocation as fraction of equity.
     c_target_risk_cap_pct_of_equity: float = 0.05  # Cap for central target risk as fraction of equity.
 

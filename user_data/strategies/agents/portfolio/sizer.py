@@ -169,12 +169,19 @@ class SizerAgent:
         pressure_ratio = float(getattr(score_cfg, "bct_pressure_ratio", 1.0) or 1.0) if score_cfg else 1.0
         pressure_ema_alpha = float(getattr(score_cfg, "bct_pressure_ema_alpha", 0.0) or 0.0) if score_cfg else 0.0
         fluid_cap_pct = float(getattr(score_cfg, "fluid_cap_pct_of_equity", 0.0) or 0.0) if score_cfg else 0.0
+        include_reservation = (
+            bool(getattr(score_cfg, "bct_pressure_include_reservation", True))
+            if score_cfg is not None
+            else True
+        )
         clamped_score = max(0.0, min(1.0, score_val))
         beta_low, beta_high = sorted((beta_min, beta_max))
         pressure = 1.0
         if equity > 0:
             debt_pool = float(getattr(self.state, "debt_pool", 0.0))
-            risk_used = float(self.state.get_total_open_risk() + self.reservation.get_total_reserved())
+            risk_used = float(self.state.get_total_open_risk())
+            if include_reservation:
+                risk_used += float(self.reservation.get_total_reserved())
             if self.backend:
                 try:
                     snapshot = self.backend.get_snapshot()

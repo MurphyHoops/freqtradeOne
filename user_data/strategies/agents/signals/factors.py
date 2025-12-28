@@ -184,12 +184,20 @@ def calculate_regime_factor(
 
     if hurst_val is None:
         hurst_val = _compute_hurst_rs(history_close)
-    if math.isnan(hurst_val):
+    try:
+        hurst_val = float(hurst_val)
+    except Exception:
+        hurst_val = float("nan")
+    if math.isnan(hurst_val) or math.isinf(hurst_val):
         hurst_val = 0.5
 
     if z_sig is None:
         z_sig = _compute_adx_zsig(history_adx, adx)
-    if z_sig is None or math.isnan(z_sig):
+    try:
+        z_sig = float(z_sig)
+    except Exception:
+        z_sig = float("nan")
+    if math.isnan(z_sig) or math.isinf(z_sig):
         z_sig = 0.5
 
     bias = (strategy_type or "").lower()

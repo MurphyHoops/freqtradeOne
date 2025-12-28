@@ -92,6 +92,7 @@
     "bct_beta_max": 4.0,
     "bct_pressure_ratio": 1.0,
     "bct_pressure_ema_alpha": 0.2,
+    "bct_pressure_include_reservation": true,
     "fluid_cap_pct_of_equity": 0.05,
     "c_target_risk_cap_pct_of_equity": 0.05,
     "target_recovery": {

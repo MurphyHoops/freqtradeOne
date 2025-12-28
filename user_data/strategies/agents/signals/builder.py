@@ -211,12 +211,16 @@ def build_candidates(
     z_sig: Optional[float] = None
     if history_close:
         hurst_val = _compute_hurst_rs(history_close)
+        if hurst_val is not None and (math.isnan(hurst_val) or math.isinf(hurst_val)):
+            hurst_val = None
     if history_adx:
         try:
             adx_now = float(fb.get("ADX"))
         except Exception:
             adx_now = float("nan")
         z_sig = _compute_adx_zsig(history_adx, adx_now)
+        if z_sig is not None and (math.isnan(z_sig) or math.isinf(z_sig)):
+            z_sig = None
     base_cache: Dict[Optional[str], Dict[str, float]] = {}
     base_cache[None] = _prefetch_base(fb, None)
     if any(math.isnan(v) for v in base_cache[None].values()):

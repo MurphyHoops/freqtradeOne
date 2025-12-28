@@ -84,21 +84,8 @@ class GatekeepingConfig:
     """Global debt gatekeeping parameters."""
 
     enabled: bool = True  # Master toggle for gatekeeping; disable to bypass checks.
-    min_score_fast: float = 0.0  # Minimum score required for fast bucket admission.
-    min_score_slow: float = 0.0  # Minimum score required for slow bucket admission.
+    score_curve_exponent: float = 1.0  # Shape factor for score (1=linear, >1 widens gap).
     min_score: float = 0.0  # Unified UEOT score floor.
-
-    # Fast Bucket 准入条件 (激进回血)
-    fast_percentile: int = 90       # Percentile threshold for fast admission; higher = stricter (top 10% by default).
-    fast_max_closs: int = 0         # Max closs allowed into fast; lower blocks damaged pairs.
-
-    # Slow Bucket 准入条件 (稳健积累)
-    slow_percentile: int = 60       # Percentile threshold for slow admission; higher = stricter (top 40% by default).
-    slow_max_closs: int = 3         # 中央有债务的时候就会启动，closs一旦超过这个值就不会再开仓
-
-    # 无债务时的宽松模式
-    no_debt_percentile: int = 30    # Percentile threshold when no debt; lower = more permissive.
-    healthy_allow_score: float = 0.0  # Healthy coin privilege score; closs=0 above this can enter slow during debt. Lower -> more entries.
 
 
 @dataclass(frozen=True)
@@ -116,6 +103,8 @@ class SizingAlgoConfig:
 
     default_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"  # Default sizing algorithm.
     target_recovery: TargetRecoveryConfig = field(default_factory=TargetRecoveryConfig)  # Tunables for TARGET_RECOVERY.
+    score_floor: float = 0.3  # Minimum score to start allocating central (fluid) debt; lower = more permissive.
+    score_exponent: float = 2.0  # Curve applied to score for fluid sizing (>=0); higher = reward high scores more.
 
 
 @dataclass(frozen=True)

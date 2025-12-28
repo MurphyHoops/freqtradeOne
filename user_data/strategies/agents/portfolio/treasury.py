@@ -108,25 +108,26 @@ class TreasuryAgent:
         )
 
     def evaluate_signal_quality(self, pair: str, score: float, closs: int) -> dict:
-        """Simplified gatekeeper based on unified min_score."""
+        """Simplified gatekeeper based on unified min_score (fast/slow buckets removed)."""
 
         gcfg = getattr(getattr(self.cfg, "risk", None), "gatekeeping", None)
         if not gcfg or not getattr(gcfg, "enabled", True):
-            return {"allowed": True, "bucket": None, "reason": "gatekeeping_disabled"}
+            return {"allowed": True, "reason": "gatekeeping_disabled", "thresholds": {"min_score": 0.0}}
 
-        min_score = float(getattr(gcfg, "min_score", getattr(gcfg, "min_score_slow", 0.0)) or 0.0)
+        min_score = float(getattr(gcfg, "min_score", 0.0) or 0.0)
         debt = 0.0
         try:
             debt = float(getattr(self.backend.get_snapshot(), "debt_pool", 0.0)) if self.backend else 0.0
         except Exception:
             debt = 0.0
 
+        thresholds: Dict[str, float] = {"min_score": min_score}
+
         if score >= min_score:
             return {
                 "allowed": True,
-                "bucket": None,
                 "reason": "score_ok",
-                "thresholds": {"min_score": min_score},
+                "thresholds": thresholds,
                 "score": score,
                 "closs": closs,
                 "debt": debt,
@@ -134,7 +135,7 @@ class TreasuryAgent:
         return {
             "allowed": False,
             "reason": f"Score<{min_score:.2f}",
-            "thresholds": {"min_score": min_score},
+            "thresholds": thresholds,
             "score": score,
             "closs": closs,
             "debt": debt,

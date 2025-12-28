@@ -19,16 +19,10 @@
     "pain_decay_per_bar": 0.999,
     "clear_debt_on_profitable_cycle": true,
     "gatekeeping": {
-      "_comment": "Tiered debt gatekeeping thresholds",
+      "_comment": "Unified gatekeeping threshold",
       "enabled": true,
-      "min_score_fast": 0.8,
-      "min_score_slow": 0.6,
-      "fast_percentile": 90,
-      "fast_max_closs": 0,
-      "slow_percentile": 60,
-      "slow_max_closs": 1,
-      "no_debt_percentile": 30,
-      "healthy_allow_score": 0.2
+      "min_score": 0.0,
+      "score_curve_exponent": 1.0
     }
   },
   "trading": {
@@ -42,17 +36,7 @@
       "enforce_leverage": 10.0
     },
     "treasury": {
-      "enable_fast_bucket": true,
-      "enable_slow_bucket": true,
-      "treasury_fast_split_pct": 0.4,
-      "fast_topK_squads": 10,
-      "slow_universe_pct": 1.0,
-      "min_injection_nominal_fast": 30.0,
-      "min_injection_nominal_slow": 7.0,
-      "fast_mode": "per_squad",
-      "debt_pool_cap_pct": 0.15,
-      "bucket_as_cap": true,
-      "bucket_sum_mode": "sum"
+      "debt_pool_cap_pct": 0.15
     }
   },
   "strategy": {
@@ -103,6 +87,8 @@
   "sizing_algos": {
     "_comment": "Shared sizing algo parameters",
     "default_algo": "BASELINE",
+    "score_floor": 0.3,
+    "score_exponent": 2.0,
     "target_recovery": {
       "use_atr_based": true,
       "include_bucket_in_recovery": true,

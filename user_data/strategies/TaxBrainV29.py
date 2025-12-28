@@ -241,7 +241,6 @@ class GateResult:
     """Normalized gatekeeping outcome used by custom_stake_amount."""
 
     allowed: bool
-    bucket: Optional[str] = None
     thresholds: Dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     debt: Optional[float] = None
@@ -252,7 +251,6 @@ class GateResult:
         thresholds = payload.get("thresholds") if isinstance(payload, dict) else {}
         return cls(
             allowed=bool(payload.get("allowed", True)) if isinstance(payload, dict) else True,
-            bucket=payload.get("bucket") if isinstance(payload, dict) else None,
             thresholds=thresholds if isinstance(thresholds, dict) else {},
             reason=str(payload.get("reason", "")) if isinstance(payload, dict) else "",
             debt=payload.get("debt") if isinstance(payload, dict) else None,
@@ -408,7 +406,7 @@ class GlobalState:
             sl_pct: 建仓时的止损百分比。
             tp_pct: 建仓时的止盈百分比。
             direction: 方向标识 'long' 或 'short'。
-            bucket: 当前订单使用的拨款桶（fast/slow）。
+            bucket: 当前订单使用的拨款桶（long/short）。
             entry_price: 建仓价格。
             tier_pol: 所属 TierPolicy，用于初始化 ICU 倒计时与冷却时长。
         """
@@ -1526,6 +1524,7 @@ class TaxBrainV29(IStrategy):
             "atr_pct": getattr(candidate, "plan_atr_pct", None),
             "expected_edge":candidate.expected_edge,
             "raw_score":candidate.raw_score,
+            "score": getattr(candidate, "expected_edge", None),
         }
 
     def _normalize_entry_meta(self, meta: Optional[Dict[str, Any]], side: str) -> Optional[Dict[str, Any]]:
@@ -1693,12 +1692,6 @@ class TaxBrainV29(IStrategy):
         if th_min is not None and score < float(th_min):
             detail_parts.append(f"score {score:.4f} < {float(th_min):.4f}")
 
-        gcfg = getattr(getattr(self.cfg, "risk", None), "gatekeeping", None)
-        if gcfg and result.closs is not None:
-            closs_cap = getattr(gcfg, "slow_max_closs", None)
-            if closs_cap is not None and result.closs > closs_cap:
-                detail_parts.append(f"closs {result.closs} > {closs_cap}")
-
         if result.debt is not None:
             try:
                 detail_parts.append(f"debt={float(result.debt):.4f}")
@@ -1718,7 +1711,7 @@ class TaxBrainV29(IStrategy):
             raw = {}
 
         result = GateResult.from_mapping(raw, default_closs=pst.closs) if raw else GateResult(
-            allowed=True, bucket=None, thresholds={}, reason="", debt=None, closs=pst.closs
+            allowed=True, thresholds={}, reason="", debt=None, closs=pst.closs
         )
         if not result.allowed:
             detail = self._format_gatekeeper_detail(result, score)
@@ -1859,8 +1852,6 @@ class TaxBrainV29(IStrategy):
         gate_result = self._check_gatekeeping(pair, meta)
         if not gate_result.allowed:
             return 0.0
-        if gate_result.bucket:
-            meta["bucket"] = gate_result.bucket
 
         sl = float(meta.get("sl_pct", 0.0))
         tp = float(meta.get("tp_pct", 0.0))

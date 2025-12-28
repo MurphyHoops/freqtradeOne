@@ -165,6 +165,21 @@ def _safe(value: float, default: float = 0.0) -> float:
         return default
 
 
+def _shape_score(score: float, exponent: float) -> float:
+    """Optionally reshape score to widen separation between highs/lows."""
+
+    try:
+        exp = float(exponent)
+    except Exception:
+        exp = 1.0
+    if exp <= 0:
+        return max(0.0, min(1.0, score))
+    base = max(0.0, min(1.0, score))
+    if exp == 1.0:
+        return base
+    return max(0.0, min(1.0, base ** exp))
+
+
 class _FactorBag(dict):
     """Lazy-fetch container around FactorBank for sl/tp/raw calculations."""
 
@@ -232,9 +247,15 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
         strat_name = plan.recipe or spec.name
         strat_spec = strategy_map.get(strat_name)
         base_wp = float(getattr(strat_spec, "base_win_prob", getattr(spec, "base_win_prob", 0.5)))
+        try:
+            win_prob_val = _safe(spec.win_prob_fn(bag, cfg, raw), default=base_wp)
+        except Exception:
+            win_prob_val = base_wp
         regime_factor = calculate_regime_factor(bag, strat_name)
-        final_score = max(0.0, min(1.0, base_wp * regime_factor))
-        score_for_use = final_score
+        gcfg = getattr(getattr(cfg, "risk", None), "gatekeeping", getattr(cfg, "gatekeeping", None))
+        score_exp = float(getattr(gcfg, "score_curve_exponent", 1.0) or 1.0) if gcfg else 1.0
+        final_score = max(0.0, min(1.0, win_prob_val * regime_factor))
+        score_for_use = _shape_score(final_score, score_exp)
         if score_for_use < min_edge:
             continue
 

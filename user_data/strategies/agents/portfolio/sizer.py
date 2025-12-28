@@ -160,8 +160,18 @@ class SizerAgent:
             except Exception:
                 score_val = 0.0
         fluid = 0.0
-        if score_val >= 0.3 and vector_k > 0:
-            fluid = vector_k * (score_val ** 2)
+        score_cfg = getattr(self.cfg, "sizing_algos", getattr(self.cfg, "sizing", None))
+        score_floor = float(getattr(score_cfg, "score_floor", 0.3) or 0.0) if score_cfg else 0.3
+        score_exp = float(getattr(score_cfg, "score_exponent", 2.0) or 2.0) if score_cfg else 2.0
+        clamped_score = max(0.0, min(1.0, score_val))
+        if vector_k > 0 and clamped_score > score_floor:
+            span = max(1e-9, 1.0 - score_floor)
+            normalized = max(0.0, clamped_score - score_floor) / span
+            try:
+                shaped = normalized ** score_exp if score_exp > 0 else normalized
+            except Exception:
+                shaped = normalized
+            fluid = vector_k * shaped
 
         c_target_risk =0
         if fluid>0:
@@ -243,7 +253,7 @@ class SizerAgent:
         self._log_debug(
             f"pair={ctx.pair} closs={pst.closs} score={score_val:.4f} "
             f"bucket={bucket} vector_k={vector_k:.6f} risk_room_nominal={caps.risk_room_nominal:.6f} "
-            f"base_nominal={base_nominal:.6f} fluid={fluid:.6f} sl_price_pct={sl_price_pct:.6f} "
+            f"base_nominal={base_nominal:.6f} fluid={fluid:.6f} score_floor={score_floor:.3f} score_exp={score_exp:.2f} sl_price_pct={sl_price_pct:.6f} "
             f"atr_pct_used={atr_pct_used} atr_mul_sl={atr_mul_sl} nominal_target={nominal_target:.6f} "
             f"min_entry_nominal={min_entry_nominal:.6f} stake_nominal={stake_nominal:.6f} "
             f"stake_margin={stake_margin:.6f} risk_final={risk_final:.6f}"

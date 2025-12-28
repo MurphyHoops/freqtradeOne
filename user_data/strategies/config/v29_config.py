@@ -39,8 +39,6 @@ class TierSpec:
 
     name: str  # Tier identifier; referenced by routing map.
     allowed_recipes: Tuple[str, ...]  # Whitelisted strategy recipes.
-    allowed_entries: Tuple[str, ...] = tuple()  # Optional whitelist of entry signals.
-    allowed_squads: Tuple[str, ...] = tuple()  # Optional whitelist of squads/teams.
     min_raw_score: float = 0.0  # Minimum raw signal score; raise to be pickier.
     min_rr_ratio: float = 1.0  # Minimum reward/risk ratio; >1 enforces positive skew.
     min_edge: float = 0.0  # Minimum expected edge; raise to reject thin edges.
@@ -64,7 +62,6 @@ class SizingConfig:
 
     initial_size_mode: Literal["static", "dynamic", "hybrid"] = "static"  # How base nominal is computed; hybrid = max(static, dynamic).
     static_initial_nominal: float = 6.0  # Deprecated: legacy static seed; kept for backward compatibility.
-    initial_size_equity_pct: float = 0.0  # Dynamic seed as % of equity; raise to scale with account size.
     min_stake_multiplier: float = 1.0  # Multiplier on exchange min_notional to seed positions.
     initial_max_nominal_cap: float = 20.0  # Skip entries whose min_notional exceeds this cap (filters expensive pairs).
     initial_max_nominal_per_trade: float = 3000.0  # Hard ceiling per trade nominal; lower to clamp single-trade exposure.
@@ -285,8 +282,6 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
     "T0_healthy": TierSpec(
         name="T0_healthy",
         allowed_recipes=("NBX_fast_default",),
-        allowed_entries=("newbars_breakout_long_5m", "newbars_breakdown_short_5m"),
-        allowed_squads=("NBX",),
         min_raw_score=0.20,
         min_rr_ratio=0.00001,
         min_edge=0.002,
@@ -305,10 +300,6 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
     "T12_recovery": TierSpec(
         name="T12_recovery",
         allowed_recipes=("Recovery_mix",),
-        allowed_entries=(
-            "newbars_breakdown_short_30m",
-        ),
-        allowed_squads=("PBL", "TRS", "NBX"),
         min_raw_score=0.20,
         min_rr_ratio=0.000001,
         min_edge=0.000,
@@ -327,9 +318,6 @@ DEFAULT_TIERS: Dict[str, TierSpec] = {
     "T3p_ICU": TierSpec(
         name="T3p_ICU",
         allowed_recipes=("ICU_conservative",),
-        allowed_entries=("newbars_breakout_long_30m",
-        ),
-        allowed_squads=("TRS", "MRL","NBX"),
         min_raw_score=0.20,
         min_rr_ratio=0.000001,
         min_edge=0.000,
@@ -430,6 +418,23 @@ class V29Config:
             strategy_profiles = default_profiles_factory()
         strategies = dict(getattr(strat_cfg, "strategies", {}) or {})
         tiers = dict(getattr(strat_cfg, "tiers", {}) or {})
+        tier_fields = {f.name for f in fields(TierSpec)}
+        normalized_tiers: dict[str, TierSpec] = {}
+        for tier_name, spec in tiers.items():
+            if isinstance(spec, TierSpec):
+                normalized_tiers[tier_name] = spec
+                continue
+            if isinstance(spec, Mapping):
+                if "allowed_entries" in spec:
+                    print(f"[WARN] TierSpec.allowed_entries is deprecated and ignored for tier '{tier_name}'.")
+                filtered = {k: v for k, v in spec.items() if k in tier_fields}
+                try:
+                    normalized_tiers[tier_name] = TierSpec(**filtered)
+                except TypeError as exc:
+                    raise ValueError(f"Invalid TierSpec for tier '{tier_name}': {exc}") from exc
+                continue
+            raise ValueError(f"Tier '{tier_name}' must be a TierSpec or mapping.")
+        tiers = normalized_tiers
 
         if strategy_recipes_input:
             specs = tuple(strategy_recipes_input)
@@ -505,7 +510,6 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
         # sizing
         "initial_size_mode": ("trading", "sizing", "initial_size_mode"),
         "static_initial_nominal": ("trading", "sizing", "static_initial_nominal"),
-        "initial_size_equity_pct": ("trading", "sizing", "initial_size_equity_pct"),
         "min_stake_multiplier": ("trading", "sizing", "min_stake_multiplier"),
         "initial_max_nominal_cap": ("trading", "sizing", "initial_max_nominal_cap"),
         "initial_max_nominal_per_trade": ("trading", "sizing", "initial_max_nominal_per_trade"),

@@ -108,7 +108,7 @@ Without these exact signals, remain in your current mode.
 
 ## Gatekeeping & Tiers
 - closs/tier: `TierManager` 依据 `tier_routing.loss_tier_map` 选择 Tier；TierPolicy 决定冷却、risk caps、sizing algo（BASE_ONLY/BASELINE/TARGET_RECOVERY）、默认 exit_profile、单票独占等。
-- 信号准入: 当前实现为统一 `min_score`（可关闭）；未命中即拒绝并记录原因。TierAgent 进一步按 min_raw_score/min_rr/min_edge 过滤。
+- 信号准入: 当前实现为统一 `min_score`（可关闭）；未命中即拒绝并记录原因。TierAgent 进一步按 min_raw_score/min_rr/min_edge 过滤。Tier 白名单仅基于 recipe，entry 级过滤由 `StrategySpec.entries` 定义，已移除 tier 级 `allowed_entries`。
 - Backend 风控: 下单前如启用 Redis，`add_risk_usage` 以 CAP 上限为乐观锁，拒绝溢出；成交/释放走 `ReservationAgent.release` 与 `backend.release_risk_usage` 对账，`RiskAgent` 负责不变式校验。
 
 ## Sizing / Execution Details

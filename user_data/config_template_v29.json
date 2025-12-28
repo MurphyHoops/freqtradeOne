@@ -30,7 +30,6 @@
     "sizing": {
       "initial_size_mode": "static",
       "static_initial_nominal": 6.0,
-      "initial_size_equity_pct": 0.0,
       "initial_max_nominal_per_trade": 3000.0,
       "per_pair_max_nominal_static": 3000.0,
       "enforce_leverage": 10.0

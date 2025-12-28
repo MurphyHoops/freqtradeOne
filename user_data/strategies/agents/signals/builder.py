@@ -195,7 +195,13 @@ class _FactorBag(dict):
         return super().__getitem__(key)
 
 
-def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None) -> List[Candidate]:
+def build_candidates(
+    row: Any,
+    cfg,
+    informative: Optional[Dict[str, Any]] = None,
+    history_close: Optional[Iterable[float]] = None,
+    global_snap: Any = None,
+) -> List[Candidate]:
     """Build candidates for the latest market row (and optional informative rows)."""
 
     fb = FactorBank(row, informative=informative)
@@ -251,7 +257,7 @@ def build_candidates(row: Any, cfg, informative: Optional[Dict[str, Any]] = None
             win_prob_val = _safe(spec.win_prob_fn(bag, cfg, raw), default=base_wp)
         except Exception:
             win_prob_val = base_wp
-        regime_factor = calculate_regime_factor(bag, strat_name)
+        regime_factor = calculate_regime_factor(bag, strat_name, history_close, global_snap)
         gcfg = getattr(getattr(cfg, "risk", None), "gatekeeping", getattr(cfg, "gatekeeping", None))
         score_exp = float(getattr(gcfg, "score_curve_exponent", 1.0) or 1.0) if gcfg else 1.0
         final_score = max(0.0, min(1.0, win_prob_val * regime_factor))

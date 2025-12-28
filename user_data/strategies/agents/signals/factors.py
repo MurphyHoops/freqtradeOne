@@ -77,37 +77,145 @@ DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {
 DEFAULT_BAG_FACTORS = ("ATR", "ATR_PCT", "CLOSE")
 
 
-def calculate_regime_factor(bag: Any, strategy_type: str | None) -> float:
-    """Return a regime multiplier (0.5-1.5) based on ADX/RSI and strategy bias."""
+def _sigmoid(x: float) -> float:
+    try:
+        return 1.0 / (1.0 + math.exp(-float(x)))
+    except OverflowError:
+        return 0.0 if x < 0 else 1.0
+    except Exception:
+        return 0.5
+
+
+def _compute_hurst_rs(history_close: Optional[Iterable[float]], window: int = 200, min_points: int = 50) -> float:
+    """Compute a simplified R/S Hurst exponent; returns NaN when data is insufficient."""
+
+    if not history_close:
+        return float("nan")
+    try:
+        values = [
+            float(v)
+            for v in history_close
+            if v is not None and not math.isnan(float(v)) and not math.isinf(float(v))
+        ]
+    except Exception:
+        return float("nan")
+    if window and window > 0:
+        values = values[-window:]
+    if len(values) < max(2, min_points):
+        return float("nan")
+
+    returns: list[float] = []
+    for prev, curr in zip(values, values[1:]):
+        if prev == 0 or math.isnan(prev) or math.isinf(prev) or math.isnan(curr) or math.isinf(curr):
+            continue
+        returns.append((curr - prev) / abs(prev))
+    if len(returns) < max(2, min_points // 2):
+        return float("nan")
+
+    mean_ret = sum(returns) / len(returns)
+    devs = [r - mean_ret for r in returns]
+    cum_devs: list[float] = []
+    running = 0.0
+    for d in devs:
+        running += d
+        cum_devs.append(running)
+    if not cum_devs:
+        return float("nan")
+
+    R = max(cum_devs) - min(cum_devs)
+    variance = sum(d * d for d in devs) / max(1, len(devs))
+    S = math.sqrt(variance)
+    if R <= 0 or S <= 0:
+        return float("nan")
+    try:
+        hurst = math.log(R / S) / math.log(len(cum_devs))
+    except Exception:
+        return float("nan")
+    if math.isnan(hurst) or math.isinf(hurst):
+        return float("nan")
+    return max(0.0, min(1.0, hurst))
+
+
+def _compute_z_score(value: float, mu: Any, sigma: Any) -> float:
+    try:
+        v = float(value)
+        m = float(mu)
+        s = float(sigma)
+    except Exception:
+        return float("nan")
+    if math.isnan(v) or math.isnan(m) or math.isnan(s) or s <= 1e-9:
+        return float("nan")
+    return (v - m) / s
+
+
+def _safe_snap_attr(global_snap: Any, name: str) -> float:
+    try:
+        val = getattr(global_snap, name, None)
+    except Exception:
+        val = None
+    try:
+        val_f = float(val)
+    except Exception:
+        return float("nan")
+    if math.isnan(val_f) or math.isinf(val_f):
+        return float("nan")
+    return val_f
+
+
+def _compute_bct_beta(global_snap: Any) -> float:
+    if global_snap is None:
+        return 1.0
+    rho_b = _safe_snap_attr(global_snap, "rho_b")
+    if math.isnan(rho_b):
+        rho_b = _safe_snap_attr(global_snap, "debt_pool")
+    r_sys = _safe_snap_attr(global_snap, "r_sys")
+    if math.isnan(r_sys):
+        r_sys = _safe_snap_attr(global_snap, "risk_used")
+    if math.isnan(rho_b) or math.isnan(r_sys) or r_sys <= 0:
+        return 1.0
+    phi = max(0.0, rho_b / max(r_sys, 1e-9))
+    beta = 1.0 + min(2.0, math.log1p(phi))
+    return max(1.0, min(3.0, beta))
+
+
+def calculate_regime_factor(
+    bag: Any,
+    strategy_type: str | None,
+    history_close: Optional[Iterable[float]] = None,
+    global_snap: Any = None,
+) -> float:
+    """Return a regime multiplier (0.5-1.5) coupled to Hurst + Z-Score + BCT beta."""
 
     try:
         adx = float(bag.get("ADX"))
     except Exception:
         adx = float("nan")
-    try:
-        rsi = float(bag.get("RSI"))
-    except Exception:
-        rsi = float("nan")
 
-    trend_strength = 0.0
-    if not math.isnan(adx):
-        trend_strength = max(0.0, min(1.0, (adx - 15.0) / 25.0))  # ADX>40 -> strong trend
-    rsi_dist = 0.0
-    if not math.isnan(rsi):
-        rsi_dist = min(1.0, abs(rsi - 50.0) / 50.0)  # distance from neutral
-    trend_signal = (trend_strength + rsi_dist) / 2.0
+    hurst_val = _compute_hurst_rs(history_close)
+    if math.isnan(hurst_val):
+        hurst_val = 0.5
+
+    z_adx = _compute_z_score(adx, getattr(global_snap, "adx_mu", None), getattr(global_snap, "adx_sigma", None))
+    if math.isnan(z_adx):
+        z_adx = 0.0 if math.isnan(adx) else (adx - 25.0) / 10.0  # fallback to scaled ADX when stats missing
+    z_sig = _sigmoid(z_adx)
+
+    beta = _compute_bct_beta(global_snap)
 
     bias = (strategy_type or "").lower()
     is_trend = any(token in bias for token in ("trend", "breakout"))
     is_mean_rev = any(token in bias for token in ("mean_rev", "pullback"))
 
     if is_trend and not is_mean_rev:
-        factor = 1.0 + 0.5 * trend_signal
+        raw_factor = 0.7 * hurst_val + 0.3 * z_sig
+        factor = 1.0 + (raw_factor - 0.5) * beta
     elif is_mean_rev and not is_trend:
-        factor = 1.0 - 0.5 * trend_signal
+        raw_factor = (0.5 - hurst_val) * 2.0
+        factor = 1.0 + raw_factor * beta
     else:
-        # neutral: slight tilt to trendiness but centered
-        factor = 1.0 + 0.25 * (trend_signal - 0.5)
+        # neutral: blend both signals with softer leverage
+        raw_factor = 0.5 * hurst_val + 0.5 * z_sig
+        factor = 1.0 + (raw_factor - 0.5) * (beta * 0.5)
 
     return max(0.5, min(1.5, factor))
 

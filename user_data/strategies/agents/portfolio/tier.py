@@ -26,8 +26,6 @@ class TierPolicy:
 
     name: str
     allowed_recipes: set[str]
-    allowed_entries: set[str]
-    allowed_squads: set[str]
     min_raw_score: float
     min_rr_ratio: float
     min_edge: float
@@ -56,17 +54,9 @@ class TierPolicy:
         if recipe:
             if recipe in self.allowed_recipes:
                 return True
-            # When recipes are explicitly configured, treat mismatches as hard rejects
             if self.allowed_recipes:
                 return False
-        if kind:
-            if kind in self.allowed_entries:
-                return True
-            if self.allowed_entries:
-                return False
-        if squad and squad in self.allowed_squads:
-            return True
-        return not (self.allowed_recipes or self.allowed_entries or self.allowed_squads)
+        return not self.allowed_recipes
 
 
 class TierManager:
@@ -136,8 +126,6 @@ class TierManager:
         return TierPolicy(
             name=spec.name,
             allowed_recipes=set(spec.allowed_recipes),
-            allowed_entries=set(spec.allowed_entries),
-            allowed_squads=set(spec.allowed_squads),
             min_raw_score=spec.min_raw_score,
             min_rr_ratio=spec.min_rr_ratio,
             min_edge=spec.min_edge,

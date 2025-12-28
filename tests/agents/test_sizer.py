@@ -94,8 +94,6 @@ def build_policy(**overrides):
 
     defaults = dict(
         name="tier",
-        allowed_entries={"mean_rev_long"},
-        allowed_squads=set(),
         min_raw_score=0.0,
         min_rr_ratio=0.0,
         min_edge=0.0,
@@ -148,7 +146,6 @@ def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
             cfg.trading.sizing,
             enforce_leverage=1.0,
             static_initial_nominal=6.0,
-            initial_size_equity_pct=0.0,
             initial_max_nominal_per_trade=1_000_000.0,
             per_pair_max_nominal_static=1_000_000.0,
         ),
@@ -187,7 +184,6 @@ def test_sizer_target_recovery_uses_local_loss():
             cfg.trading.sizing,
             enforce_leverage=1.0,
             static_initial_nominal=50.0,
-            initial_size_equity_pct=0.0,
             initial_max_nominal_per_trade=1_000_000.0,
             per_pair_max_nominal_static=1_000_000.0,
             initial_max_nominal_cap=1_000_000.0,
@@ -224,7 +220,6 @@ def test_sizer_respects_caps_and_minmax():
             cfg.trading.sizing,
             enforce_leverage=1.0,
             static_initial_nominal=50.0,
-            initial_size_equity_pct=0.0,
             initial_max_nominal_per_trade=1000.0,
             per_pair_max_nominal_static=800.0,
             initial_max_nominal_cap=1000.0,
@@ -266,7 +261,6 @@ def test_sizer_caps_with_proposed_stake():
         sizing=replace(
             cfg.trading.sizing,
             enforce_leverage=1.0,
-            initial_size_equity_pct=0.0,
             initial_max_nominal_per_trade=1_000_000.0,
             per_pair_max_nominal_static=1_000_000.0,
         ),

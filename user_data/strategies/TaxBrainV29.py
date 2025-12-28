@@ -1112,15 +1112,24 @@ class TaxBrainV29(IStrategy):
         except Exception:
             return default
 
-    def _eval_entry_on_row(self,
-                           row: pd.Series,
-                           inf_rows: Optional[Dict[str, pd.Series]],
-                           pst_state) -> Optional[schemas.Candidate]:
+    def _eval_entry_on_row(
+        self,
+        row: pd.Series,
+        inf_rows: Optional[Dict[str, pd.Series]],
+        pst_state,
+        history_close: Optional[List[float]] = None,
+        global_snap: Any = None,
+    ) -> Optional[schemas.Candidate]:
         """
         ??????????K??????????? Candidate
         """
         candidates = builder.build_candidates(
-            row, self.cfg, informative=inf_rows)
+            row,
+            self.cfg,
+            informative=inf_rows,
+            history_close=history_close,
+            global_snap=global_snap,
+        )
         policy = self.tier_mgr.get(pst_state.closs)
         return self.tier_agent.filter_best(policy, candidates)
 
@@ -1300,13 +1309,23 @@ class TaxBrainV29(IStrategy):
         is_vector_pass = (RunMode and runmode in {
                           RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.PLOT})
         pst_snapshot = copy.deepcopy(self.state.get_pair_state(pair))
+        backend = getattr(self, "global_backend", None)
+        try:
+            global_snap = backend.get_snapshot() if backend else None
+        except Exception:
+            global_snap = None
 
         if is_vector_pass:
             for idx in df.index:
                 row = df.loc[idx].copy()
                 row["LOSS_TIER_STATE"] = pst_snapshot.closs
                 inf_rows = self._informative_rows_for_index(aligned_info, idx)
-                raw_candidates = builder.build_candidates(row, self.cfg, informative=inf_rows)
+                raw_candidates = builder.build_candidates(
+                    row,
+                    self.cfg,
+                    informative=inf_rows,
+                    global_snap=global_snap,
+                )
                 if not raw_candidates:
                     continue
                 planned: list[schemas.Candidate] = []
@@ -1336,7 +1355,12 @@ class TaxBrainV29(IStrategy):
         last_row["LOSS_TIER_STATE"] = actual_state.closs
         last_inf_rows = self._informative_rows_for_index(aligned_info, last_idx)
         last_candidate = self._eval_entry_on_row(
-            last_row, last_inf_rows, actual_state)
+            last_row,
+            last_inf_rows,
+            actual_state,
+            history_close=df.get("close", pd.Series(dtype=float)).tolist() if hasattr(df, "get") else None,
+            global_snap=global_snap,
+        )
         if last_candidate:
             last_candidate = self._candidate_with_plan(pair, last_candidate, last_row, last_inf_rows)
         if not is_vector_pass and last_candidate:

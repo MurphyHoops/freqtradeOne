@@ -25,8 +25,6 @@ def make_policy(**overrides) -> TierPolicy:
     data = dict(
         name="test",
         allowed_recipes=set(),
-        allowed_entries=set(),
-        allowed_squads={"MRL", "PBL", "TRS"},
         min_raw_score=0.0,
         min_rr_ratio=0.0,
         min_edge=0.0,

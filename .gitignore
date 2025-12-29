@@ -31,7 +31,8 @@ Thumbs.db
 # Freqtrade generated artifacts
 freqtrade.log
 freqtrade.db*
-
+bct_mvp/
+buyQuant/
 # User data outputs (generated during backtest/download)
 user_data/backtest_results/
 user_data/logs/*

@@ -82,3 +82,39 @@ def test_informative_cache_reuses_frames(tmp_path: Path):
     assert dp.info_calls == 1, "Aligned fetch should reuse cached dataframe"
     assert "1h" in aligned
     assert len(aligned["1h"]) == len(base_df)
+
+
+def test_aligned_info_cache_lru_eviction(tmp_path: Path):
+    params = {
+        "strategy_params": {
+            "timeframe": "5m",
+            "startup_candle_count": 50,
+            "aligned_info_cache_max_entries": 2,
+        },
+        "dry_run_wallet": 1000,
+        "user_data_dir": str(tmp_path),
+    }
+    strategy = TaxBrainV29(params)
+    strategy._informative_timeframes = ("1h",)
+
+    info_df = _info_frame()
+    dp = _DummyDataProvider(info_df)
+    strategy.dp = dp
+
+    base_df = _base_frame()
+    df1 = base_df.copy()
+    df2 = base_df.copy()
+    df2["date"] = df2["date"] + pd.Timedelta(minutes=5)
+    df3 = base_df.copy()
+    df3["date"] = df3["date"] + pd.Timedelta(minutes=10)
+
+    strategy._aligned_informative_for_df("BTC/USDT", df1)
+    strategy._aligned_informative_for_df("BTC/USDT", df2)
+    strategy._aligned_informative_for_df("BTC/USDT", df3)
+
+    cache = strategy._aligned_info_cache
+    assert len(cache) <= 2
+    key2 = ("BTC/USDT", "1h", len(df2), str(df2["date"].iloc[-1]))
+    key3 = ("BTC/USDT", "1h", len(df3), str(df3["date"].iloc[-1]))
+    assert key2 in cache
+    assert key3 in cache

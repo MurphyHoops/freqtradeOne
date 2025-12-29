@@ -9,6 +9,7 @@ import json
 import sys
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -716,7 +717,7 @@ class TaxBrainV29(IStrategy):
         )
         self._informative_last: Dict[str, Dict[str, pd.Series]] = {}
         self._informative_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
-        self._aligned_info_cache: Dict[tuple, pd.DataFrame] = {}
+        self._aligned_info_cache: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
         self._informative_gc_last_ts: float = 0.0
         self._informative_gc_interval_sec: int = 900  # sweep every 15 minutes to curb memory growth
         self._register_informative_methods()
@@ -1310,10 +1311,16 @@ class TaxBrainV29(IStrategy):
             return out
         base_time = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
         last_ts = base_time.iloc[-1] if len(base_time) else None
+        max_entries = int(getattr(system_cfg, "aligned_info_cache_max_entries", 0) or 0) if system_cfg else 0
         for tf in getattr(self, "_informative_timeframes", []):
             cache_key = (pair, tf, len(df), str(last_ts))
             cached = self._aligned_info_cache.get(cache_key)
             if cached is not None:
+                if hasattr(self._aligned_info_cache, "move_to_end"):
+                    try:
+                        self._aligned_info_cache.move_to_end(cache_key)
+                    except Exception:
+                        pass
                 out[tf] = cached
                 continue
             info_df = self._get_informative_dataframe(pair, tf)
@@ -1332,6 +1339,12 @@ class TaxBrainV29(IStrategy):
             merged.index = df.index
             out[tf] = merged
             self._aligned_info_cache[cache_key] = merged
+            if max_entries > 0:
+                while len(self._aligned_info_cache) > max_entries:
+                    try:
+                        self._aligned_info_cache.popitem(last=False)
+                    except Exception:
+                        break
         return out
 
     def _informative_rows_for_index(self, aligned_info: Dict[str, pd.DataFrame], idx) -> Dict[str, pd.Series]:
@@ -1355,7 +1368,6 @@ class TaxBrainV29(IStrategy):
             "squad": candidate.squad,
             "sl_pct": candidate.sl_pct,
             "tp_pct": candidate.tp_pct,
-            "score": getattr(candidate, "expected_edge", 0.0),
             "exit_profile": candidate.exit_profile,
             "recipe": candidate.recipe,
             "plan_timeframe": getattr(candidate, "plan_timeframe", None),
@@ -1404,6 +1416,13 @@ class TaxBrainV29(IStrategy):
             limited[direction] = ordered[: self._candidate_pool_limit]
         return limited
 
+    @staticmethod
+    def _dump_entry_payload(payload: dict) -> str:
+        try:
+            return json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+        except Exception:
+            return json.dumps(payload)
+
     def _apply_entry_signal(
         self, df: pd.DataFrame, idx, candidates_by_dir: dict[str, list[schemas.Candidate]]
     ) -> None:
@@ -1425,7 +1444,7 @@ class TaxBrainV29(IStrategy):
                 ],
             },
         }
-        df.at[idx, "enter_tag"] = json.dumps(payload)
+        df.at[idx, "enter_tag"] = self._dump_entry_payload(payload)
 
     def _apply_entry_payloads(
         self, df: pd.DataFrame, idx, long_payloads: list[dict], short_payloads: list[dict]
@@ -1437,7 +1456,7 @@ class TaxBrainV29(IStrategy):
             "version": 2,
             "candidates": {"long": long_payloads, "short": short_payloads},
         }
-        df.at[idx, "enter_tag"] = json.dumps(payload)
+        df.at[idx, "enter_tag"] = self._dump_entry_payload(payload)
 
     def _select_topk_payloads(
         self, df: pd.DataFrame, matrices: list[dict], direction: str
@@ -1502,7 +1521,6 @@ class TaxBrainV29(IStrategy):
                         "squad": mat["squad"],
                         "sl_pct": float(sls[spec_idx, col_idx]),
                         "tp_pct": float(tps[spec_idx, col_idx]),
-                        "score": float(edges[spec_idx, col_idx]),
                         "exit_profile": mat["exit_profile"],
                         "recipe": mat["recipe"],
                         "plan_timeframe": mat["plan_timeframe"],

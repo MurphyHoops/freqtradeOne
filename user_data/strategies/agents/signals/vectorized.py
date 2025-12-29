@@ -85,6 +85,7 @@ def prefilter_signal_mask(df: pd.DataFrame, cfg, specs: Optional[Iterable] = Non
         )
         if name
     }
+    cache = _SeriesCache(df)
     mask_any = pd.Series(False, index=df.index)
     specs_iter = specs if specs is not None else REGISTRY.all()
     for spec in specs_iter:
@@ -98,10 +99,7 @@ def prefilter_signal_mask(df: pd.DataFrame, cfg, specs: Optional[Iterable] = Non
             if op is None:
                 continue
             base, tf = factors.factor_components_with_default(cond.factor, spec.timeframe)
-            series = factor_series(df, base, tf)
-            if series is None:
-                spec_mask = spec_mask & False
-                break
+            series = cache.get(base, tf)
             if op in ("<", "<=", ">", ">=", "=="):
                 value = getattr(cond, "value", None)
                 if value is None:
@@ -203,30 +201,6 @@ def _shape_score(series: pd.Series, exponent: float) -> pd.Series:
     return _clip01(base ** exp)
 
 
-def _regime_factor(df: pd.DataFrame, strat_name: str) -> pd.Series:
-    if "hurst" in df.columns:
-        hurst = pd.to_numeric(df["hurst"], errors="coerce").fillna(0.5)
-    else:
-        hurst = pd.Series(0.5, index=df.index)
-    if "adx_zsig" in df.columns:
-        z_sig = pd.to_numeric(df["adx_zsig"], errors="coerce").fillna(0.5)
-    else:
-        z_sig = pd.Series(0.5, index=df.index)
-    bias = (strat_name or "").lower()
-    is_trend = any(token in bias for token in ("trend", "breakout"))
-    is_mean_rev = any(token in bias for token in ("mean_rev", "pullback"))
-    if is_trend and not is_mean_rev:
-        raw = 0.7 * hurst + 0.3 * z_sig
-        factor = 1.0 + (raw - 0.5)
-    elif is_mean_rev and not is_trend:
-        raw = (0.5 - hurst) * 2.0
-        factor = 1.0 + raw
-    else:
-        raw = 0.5 * hurst + 0.5 * z_sig
-        factor = 1.0 + 0.5 * (raw - 0.5)
-    return factor.clip(lower=0.5, upper=1.5)
-
-
 def _as_series(value: Any, index: pd.Index) -> pd.Series:
     if isinstance(value, pd.Series):
         return value.reindex(index)
@@ -301,7 +275,11 @@ def build_signal_matrices(df: pd.DataFrame, cfg, specs: Sequence[Any]) -> list[D
         base_wp = float(getattr(strat_spec, "base_win_prob", getattr(spec, "base_win_prob", 0.5)))
         win_prob = win_prob.replace([np.inf, -np.inf], np.nan).fillna(base_wp)
 
-        regime_factor = _regime_factor(df, strat_name)
+        hurst = pd.to_numeric(df["hurst"], errors="coerce") if "hurst" in df.columns else pd.Series(0.5, index=df.index)
+        z_sig = pd.to_numeric(df["adx_zsig"], errors="coerce") if "adx_zsig" in df.columns else pd.Series(0.5, index=df.index)
+        hurst = hurst.replace([np.inf, -np.inf], np.nan).fillna(0.5)
+        z_sig = z_sig.replace([np.inf, -np.inf], np.nan).fillna(0.5)
+        regime_factor = factors.calculate_regime_factor({}, strat_name, hurst_val=hurst, z_sig=z_sig)
         final_score = _clip01(win_prob * regime_factor)
         score_for_use = _shape_score(final_score, score_exp)
 

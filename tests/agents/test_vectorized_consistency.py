@@ -209,6 +209,20 @@ def test_build_signal_matrices_matches_builder_for_all_builtin_signals():
         assert mat["tp_pct"].iat[pos] == pytest.approx(cand.tp_pct)
 
 
+def test_regime_factor_matches_builder_with_series_inputs():
+    cfg = V29Config()
+    df = _base_frame()
+    df["hurst"] = [0.8] * len(df)
+    df["adx_zsig"] = [0.2] * len(df)
+    vectorized.add_derived_factor_columns(df, (None,))
+    specs = [spec for spec in builder.REGISTRY.all() if spec.name == "mean_rev_long"]
+    assert specs
+
+    matrices = vectorized.build_signal_matrices(df, cfg, specs)
+    cand = builder.build_candidates(df.iloc[-1], cfg, specs=specs)[0]
+    assert matrices[0]["expected_edge"].iat[len(df) - 1] == pytest.approx(cand.expected_edge)
+
+
 def test_informative_merge_matches_aligned_rows(monkeypatch, tmp_path):
     fake = _patch_runmode(monkeypatch)
     info_df = _info_frame()

@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import math
+
+import numpy as np
+import pandas as pd
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING
 
@@ -178,6 +181,67 @@ def calculate_regime_factor(
     z_sig: Optional[float] = None,
 ) -> float:
     """Return a regime multiplier (0.5-1.5) coupled to Hurst + ADX Z-Score."""
+
+    def _vector_kind(value: Any) -> Optional[str]:
+        if isinstance(value, pd.Series):
+            return "series"
+        if isinstance(value, np.ndarray):
+            return "ndarray"
+        return None
+
+    def _series_from(value: Any, index: pd.Index) -> pd.Series:
+        if isinstance(value, pd.Series):
+            series = value.reindex(index)
+        elif isinstance(value, np.ndarray):
+            series = pd.Series(value, index=index)
+        else:
+            try:
+                scalar = float(value) if value is not None else 0.5
+            except Exception:
+                scalar = 0.5
+            series = pd.Series(scalar, index=index)
+        series = pd.to_numeric(series, errors="coerce")
+        series = series.replace([np.inf, -np.inf], np.nan).fillna(0.5)
+        return series
+
+    hurst_kind = _vector_kind(hurst_val)
+    zsig_kind = _vector_kind(z_sig)
+    if hurst_kind or zsig_kind:
+        if hurst_kind == "series" or zsig_kind == "series":
+            index = hurst_val.index if isinstance(hurst_val, pd.Series) else z_sig.index  # type: ignore[union-attr]
+            hurst_series = _series_from(hurst_val, index)
+            zsig_series = _series_from(z_sig, index)
+            bias = (strategy_type or "").lower()
+            is_trend = any(token in bias for token in ("trend", "breakout"))
+            is_mean_rev = any(token in bias for token in ("mean_rev", "pullback"))
+            if is_trend and not is_mean_rev:
+                raw_factor = 0.7 * hurst_series + 0.3 * zsig_series
+                factor = 1.0 + (raw_factor - 0.5)
+            elif is_mean_rev and not is_trend:
+                raw_factor = (0.5 - hurst_series) * 2.0
+                factor = 1.0 + raw_factor
+            else:
+                raw_factor = 0.5 * hurst_series + 0.5 * zsig_series
+                factor = 1.0 + 0.5 * (raw_factor - 0.5)
+            return factor.clip(lower=0.5, upper=1.5)
+
+        hurst_arr = np.asarray(0.5 if hurst_val is None else hurst_val, dtype=float)
+        zsig_arr = np.asarray(0.5 if z_sig is None else z_sig, dtype=float)
+        hurst_arr = np.where(np.isfinite(hurst_arr), hurst_arr, 0.5)
+        zsig_arr = np.where(np.isfinite(zsig_arr), zsig_arr, 0.5)
+        bias = (strategy_type or "").lower()
+        is_trend = any(token in bias for token in ("trend", "breakout"))
+        is_mean_rev = any(token in bias for token in ("mean_rev", "pullback"))
+        if is_trend and not is_mean_rev:
+            raw_factor = 0.7 * hurst_arr + 0.3 * zsig_arr
+            factor = 1.0 + (raw_factor - 0.5)
+        elif is_mean_rev and not is_trend:
+            raw_factor = (0.5 - hurst_arr) * 2.0
+            factor = 1.0 + raw_factor
+        else:
+            raw_factor = 0.5 * hurst_arr + 0.5 * zsig_arr
+            factor = 1.0 + 0.5 * (raw_factor - 0.5)
+        return np.clip(factor, 0.5, 1.5)
 
     try:
         adx = float(bag.get("ADX"))

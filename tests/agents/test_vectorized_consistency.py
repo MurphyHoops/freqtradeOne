@@ -30,13 +30,28 @@ def _base_frame() -> pd.DataFrame:
             "adx": [30.0, 30.0, 30.0],
             "atr": [2.0, 2.0, 2.0],
             "atr_pct": [0.02, 0.02, 0.02],
+            "newbars_high": [100.0, 100.0, 100.0],
+            "newbars_low": [100.0, 100.0, 100.0],
+            "atr_pct_30m": [0.03, 0.03, 0.03],
+            "newbars_high_30m": [100.0, 100.0, 100.0],
+            "newbars_low_30m": [100.0, 100.0, 100.0],
         }
     )
 
 
 def _info_frame() -> pd.DataFrame:
     dates = pd.date_range("2024-01-01", periods=3, freq="1h")
-    return pd.DataFrame({"date": dates})
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "newbars_high": [100.0, 100.0, 100.0],
+            "newbars_low": [100.0, 100.0, 100.0],
+            "atr_pct": [0.03, 0.03, 0.03],
+            "newbars_high_30m": [100.0, 100.0, 100.0],
+            "newbars_low_30m": [100.0, 100.0, 100.0],
+            "atr_pct_30m": [0.03, 0.03, 0.03],
+        }
+    )
 
 
 class _DummyDP:
@@ -164,3 +179,84 @@ def test_build_signal_matrices_matches_builder():
     assert mat["expected_edge"].iat[pos] == pytest.approx(cand.expected_edge)
     assert mat["sl_pct"].iat[pos] == pytest.approx(cand.sl_pct)
     assert mat["tp_pct"].iat[pos] == pytest.approx(cand.tp_pct)
+
+
+def test_build_signal_matrices_matches_builder_for_all_builtin_signals():
+    cfg = V29Config()
+    df = _base_frame()
+    vectorized.add_derived_factor_columns(df, (None, "30m"))
+    specs = builder.REGISTRY.all()
+
+    matrices = vectorized.build_signal_matrices(df, cfg, specs)
+    matrices_by_name = {mat["name"]: mat for mat in matrices}
+    pos = len(df) - 1
+
+    for spec in specs:
+        if not vectorized.is_vectorizable(spec):
+            continue
+        mat = matrices_by_name.get(spec.name)
+        assert mat is not None
+        candidates = builder.build_candidates(df.iloc[-1], cfg, specs=[spec])
+        if not candidates:
+            assert not mat["valid_mask"].iat[pos]
+            continue
+        cand = candidates[0]
+        assert mat["valid_mask"].iat[pos]
+        assert mat["raw_score"].iat[pos] == pytest.approx(cand.raw_score)
+        assert mat["rr_ratio"].iat[pos] == pytest.approx(cand.rr_ratio)
+        assert mat["expected_edge"].iat[pos] == pytest.approx(cand.expected_edge)
+        assert mat["sl_pct"].iat[pos] == pytest.approx(cand.sl_pct)
+        assert mat["tp_pct"].iat[pos] == pytest.approx(cand.tp_pct)
+
+
+def test_informative_merge_matches_aligned_rows(monkeypatch, tmp_path):
+    fake = _patch_runmode(monkeypatch)
+    info_df = _info_frame()
+    dp = SimpleNamespace(runmode=fake.BACKTEST, get_informative_dataframe=_DummyDP(info_df).get_informative_dataframe)
+    params = {
+        "strategy_params": {
+            "timeframe": "5m",
+            "startup_candle_count": 50,
+            "vectorized_entry_backtest": False,
+            "informative_timeframes": ("30m",),
+            "enabled_signals": ("newbars_breakout_long_30m",),
+        },
+        "dry_run_wallet": 1000,
+        "user_data_dir": str(tmp_path),
+    }
+
+    merged_params = dict(params)
+    merged_params["strategy_params"] = dict(params["strategy_params"], merge_informative_into_base=True)
+    merged_strat = TaxBrainV29(merged_params)
+    merged_strat.dp = dp
+
+    aligned_params = dict(params)
+    aligned_params["strategy_params"] = dict(params["strategy_params"], merge_informative_into_base=False)
+    aligned_strat = TaxBrainV29(aligned_params)
+    aligned_strat.dp = dp
+
+    base_df = _base_frame().drop(columns=["atr_pct_30m", "newbars_high_30m", "newbars_low_30m"])
+    merged_df = base_df.copy()
+    merged_strat._merge_informative_columns_into_base(merged_df, "BTC/USDT")
+
+    merged_out = merged_strat.populate_entry_trend(merged_df.copy(), {"pair": "BTC/USDT"})
+    aligned_out = aligned_strat.populate_entry_trend(base_df.copy(), {"pair": "BTC/USDT"})
+
+    assert merged_out[["enter_long", "enter_short"]].equals(aligned_out[["enter_long", "enter_short"]])
+    assert merged_out["enter_tag"].fillna("").tolist() == aligned_out["enter_tag"].fillna("").tolist()
+
+
+def test_missing_informative_atr_pct_blocks_vectorized_and_builder():
+    cfg = V29Config()
+    df = _base_frame().drop(columns=["atr_pct_30m"])
+    vectorized.add_derived_factor_columns(df, (None, "30m"))
+    specs = [spec for spec in builder.REGISTRY.all() if spec.name == "newbars_breakout_long_30m"]
+    assert specs
+
+    matrices = vectorized.build_signal_matrices(df, cfg, specs)
+    assert len(matrices) == 1
+    mat = matrices[0]
+
+    candidates = builder.build_candidates(df.iloc[-1], cfg, specs=specs)
+    assert candidates == []
+    assert not mat["valid_mask"].iat[len(df) - 1]

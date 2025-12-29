@@ -58,6 +58,8 @@ class SignalSpec:
     base_win_prob: float = 0.5
     required_factors: tuple[str, ...] = ()
     timeframe: Optional[str] = None
+    vec_raw_fn: Optional[Callable[..., Any]] = None
+    vec_win_prob_fn: Optional[Callable[..., Any]] = None
 
 
 __all__ = ["Candidate", "Condition", "SignalSpec", "Direction"]

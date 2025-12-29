@@ -1163,7 +1163,8 @@ class TaxBrainV29(IStrategy):
         if system_cfg and backtest_like and getattr(system_cfg, "merge_informative_into_base", False):
             self._merge_informative_columns_into_base(df, pair)
             timeframes = (None, *getattr(self, "_informative_timeframes", ()))
-            vectorized.add_derived_factor_columns(df, timeframes)
+            if self._derived_factor_columns_missing(df, timeframes):
+                vectorized.add_derived_factor_columns(df, timeframes)
         informative_rows: Dict[str, pd.Series] = {}
         if self._informative_timeframes:
             for tf in self._informative_timeframes:
@@ -1304,6 +1305,9 @@ class TaxBrainV29(IStrategy):
         out = {}
         if df is None or df.empty:
             return out
+        system_cfg = getattr(self.cfg, "system", None)
+        if system_cfg and getattr(system_cfg, "merge_informative_into_base", False) and self._is_backtest_like_runmode():
+            return out
         base_time = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
         last_ts = base_time.iloc[-1] if len(base_time) else None
         for tf in getattr(self, "_informative_timeframes", []):
@@ -1426,11 +1430,7 @@ class TaxBrainV29(IStrategy):
     def _apply_entry_payloads(
         self, df: pd.DataFrame, idx, long_payloads: list[dict], short_payloads: list[dict]
     ) -> None:
-        has_long = bool(long_payloads)
-        has_short = bool(short_payloads)
-        df.at[idx, "enter_long"] = 1 if has_long else 0
-        df.at[idx, "enter_short"] = 1 if has_short else 0
-        if not has_long and not has_short:
+        if not long_payloads and not short_payloads:
             df.at[idx, "enter_tag"] = None
             return
         payload = {
@@ -1471,7 +1471,8 @@ class TaxBrainV29(IStrategy):
         plan_atr = np.vstack(plan_atr_list)
         payloads: list[list[dict]] = [[] for _ in range(edges.shape[1])]
         k = self._candidate_pool_limit
-        for col_idx in range(edges.shape[1]):
+        valid_any = np.isfinite(edges).any(axis=0)
+        for col_idx in np.where(valid_any)[0]:
             row_edges = edges[:, col_idx]
             valid_idx = np.where(np.isfinite(row_edges))[0]
             if len(valid_idx) == 0:
@@ -1646,16 +1647,21 @@ class TaxBrainV29(IStrategy):
                             reverse=True,
                         )
                         payloads_short[pos] = combined[: self._candidate_pool_limit]
-
-            for pos, idx in enumerate(df.index):
-                if payloads_long[pos] or payloads_short[pos]:
-                    self._apply_entry_payloads(
-                        df, idx, payloads_long[pos], payloads_short[pos]
-                    )
+            long_mask = pd.Series([bool(p) for p in payloads_long], index=df.index)
+            short_mask = pd.Series([bool(p) for p in payloads_short], index=df.index)
+            df.loc[long_mask, "enter_long"] = 1
+            df.loc[short_mask, "enter_short"] = 1
+            payload_positions = [
+                pos for pos, (longs, shorts) in enumerate(zip(payloads_long, payloads_short))
+                if longs or shorts
+            ]
+            for pos in payload_positions:
+                idx = df.index[pos]
+                self._apply_entry_payloads(df, idx, payloads_long[pos], payloads_short[pos])
         elif is_vector_pass:
             for idx in df.index:
+                df.at[idx, "LOSS_TIER_STATE"] = pst_snapshot.closs
                 row = df.loc[idx]
-                row["LOSS_TIER_STATE"] = pst_snapshot.closs
                 inf_rows = self._informative_rows_for_index(aligned_info, idx)
                 raw_candidates = builder.build_candidates(
                     row,
@@ -1688,8 +1694,8 @@ class TaxBrainV29(IStrategy):
 
         actual_state = self.state.get_pair_state(pair)
         last_idx = df.index[-1]
+        df.at[last_idx, "LOSS_TIER_STATE"] = actual_state.closs
         last_row = df.loc[last_idx]
-        last_row["LOSS_TIER_STATE"] = actual_state.closs
         last_inf_rows = self._informative_rows_for_index(aligned_info, last_idx)
         last_candidate = self._eval_entry_on_row(
             last_row,
@@ -1776,22 +1782,8 @@ class TaxBrainV29(IStrategy):
             )
         except Exception:
             pass
-        if is_backtest_mode and pst.cooldown_bars_left > 0:
-            try:
-                now_ts = float(current_time.timestamp())
-            except Exception:
-                now_ts = None
-            if now_ts is not None:
-                last_ts = getattr(pst, "_cooldown_last_ts", None)
-                if last_ts is None:
-                    pst._cooldown_last_ts = now_ts
-                else:
-                    bars_elapsed = int((now_ts - last_ts) // self._tf_sec)
-                    if bars_elapsed > 0:
-                        pst.cooldown_bars_left = max(
-                            0, pst.cooldown_bars_left - bars_elapsed)
-                        pst._cooldown_last_ts = now_ts
         # 冷却期一律禁止开新仓
+        # Backtest cooldown advancement happens only via _backtest_catch_up.
         # print(f"pst.closs_{pst.closs}")
         if pst.cooldown_bars_left > 0:
             return False
@@ -2766,6 +2758,8 @@ class TaxBrainV29(IStrategy):
         修复了 populate_indicators 导致的“未来时间”阻断逻辑运行的问题。
 
         """
+        if current_time is None:
+            return
         if not self._is_backtest_like_runmode():
             return
 

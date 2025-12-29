@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import SimpleNamespace
 from unittest import mock
 
@@ -89,3 +90,37 @@ def test_custom_stake_amount_rejects_when_gate_disallows():
         side="buy",
     )
     assert stake == 0.0
+
+
+def test_confirm_trade_entry_no_cooldown_decrement_in_backtest():
+    strat = _make_stub_strategy()
+    strat.config = {"runmode": SimpleNamespace(value="backtest")}
+    strat.dp = SimpleNamespace(runmode=SimpleNamespace(value="backtest"))
+    strat.cfg = SimpleNamespace(
+        system=SimpleNamespace(
+            cte_catch_up_in_backtest=False,
+            cte_enforce_tier_in_backtest=False,
+        )
+    )
+    strat._tf_sec = 300
+    strat._tier_debug = lambda *args, **kwargs: None
+    strat._resolve_candidate_from_tag = lambda *args, **kwargs: None
+
+    pair = "BTC/USDT"
+    pst = strat.state.get_pair_state(pair)
+    pst.cooldown_bars_left = 5
+    current_time = datetime(2024, 1, 1, 0, 0, 0)
+    pst._cooldown_last_ts = float(current_time.timestamp()) - 600.0
+
+    strat.confirm_trade_entry(
+        pair=pair,
+        order_type="limit",
+        amount=1.0,
+        rate=100.0,
+        time_in_force="gtc",
+        current_time=current_time,
+        entry_tag=None,
+        side="buy",
+    )
+
+    assert pst.cooldown_bars_left == 5

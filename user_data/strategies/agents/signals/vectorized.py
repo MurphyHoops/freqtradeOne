@@ -11,16 +11,22 @@ import pandas as pd
 from .registry import REGISTRY
 from . import factors
 
-_NEWBARS_THRESHOLD = 80.0
-_VEC_SIGNAL_NAMES = {
-    "mean_rev_long",
-    "pullback_long",
-    "trend_short",
-    "newbars_breakout_long_5m",
-    "newbars_breakdown_short_5m",
-    "newbars_breakout_long_30m",
-    "newbars_breakdown_short_30m",
-}
+
+class _SeriesCache:
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
+        self._cache: Dict[tuple[str, Optional[str]], pd.Series] = {}
+
+    def get(self, base: str, timeframe: Optional[str]) -> pd.Series:
+        key = (base, timeframe)
+        if key in self._cache:
+            return self._cache[key]
+        series = factor_series(self._df, base, timeframe)
+        if series is None:
+            series = pd.Series(np.nan, index=self._df.index)
+        series = pd.to_numeric(series, errors="coerce")
+        self._cache[key] = series
+        return series
 
 
 def _suffix_token(timeframe: Optional[str]) -> str:
@@ -129,7 +135,9 @@ def prefilter_signal_mask(df: pd.DataFrame, cfg, specs: Optional[Iterable] = Non
 
 
 def is_vectorizable(spec) -> bool:
-    if not spec or spec.name not in _VEC_SIGNAL_NAMES:
+    if not spec:
+        return False
+    if not getattr(spec, "vec_raw_fn", None) or not getattr(spec, "vec_win_prob_fn", None):
         return False
     for cond in spec.conditions:
         if getattr(cond, "fn", None) is not None:
@@ -141,15 +149,12 @@ def _bool_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").fillna(0.0) != 0.0
 
 
-def _condition_mask(df: pd.DataFrame, spec) -> pd.Series:
+def _condition_mask(cache: _SeriesCache, df: pd.DataFrame, spec) -> pd.Series:
     mask = pd.Series(True, index=df.index)
     for cond in spec.conditions:
         op = getattr(cond, "op", None)
         base, tf = factors.factor_components_with_default(cond.factor, spec.timeframe)
-        series = factor_series(df, base, tf)
-        if series is None:
-            return pd.Series(False, index=df.index)
-        series = pd.to_numeric(series, errors="coerce")
+        series = cache.get(base, tf)
         if op is None:
             mask = mask & _bool_series(series)
             continue
@@ -222,56 +227,18 @@ def _regime_factor(df: pd.DataFrame, strat_name: str) -> pd.Series:
     return factor.clip(lower=0.5, upper=1.5)
 
 
-def _vec_raw_winprob(
-    df: pd.DataFrame, spec_name: str, timeframe: Optional[str]
-) -> tuple[pd.Series, pd.Series]:
-    def _get_col(base: str) -> pd.Series:
-        col = _col_name(base, timeframe)
-        if col not in df.columns:
-            return pd.Series(np.nan, index=df.index)
-        return pd.to_numeric(df[col], errors="coerce")
-
-    if spec_name == "mean_rev_long":
-        rsi = _get_col("rsi")
-        raw = ((25.0 - rsi) / 25.0).clip(lower=0.0)
-        win = (0.52 + 0.4 * raw).clip(lower=0.5, upper=0.9)
-        return raw, win
-    if spec_name == "pullback_long":
-        ema_fast = _get_col("ema_fast")
-        ema_slow = _get_col("ema_slow")
-        adx = _get_col("adx")
-        trend = (ema_fast / ema_slow - 1.0).clip(lower=0.0)
-        strength = ((adx - 20.0) / 20.0).clip(lower=0.0)
-        raw = 0.5 * trend + 0.5 * strength
-        win = (0.55 + 0.4 * raw).clip(lower=0.5, upper=0.95)
-        return raw, win
-    if spec_name == "trend_short":
-        ema_fast = _get_col("ema_fast")
-        ema_slow = _get_col("ema_slow")
-        adx = _get_col("adx")
-        strength = ((adx - 25.0) / 25.0).clip(lower=0.0)
-        trend = (1.0 - (ema_fast / ema_slow)).clip(lower=0.0)
-        raw = 0.5 * strength + 0.5 * trend
-        win = (0.50 + 0.4 * raw).clip(lower=0.5, upper=0.95)
-        return raw, win
-    if spec_name in {"newbars_breakout_long_5m", "newbars_breakout_long_30m"}:
-        series = _get_col("newbars_high")
-        raw = (series / max(_NEWBARS_THRESHOLD, 1e-9)).clip(lower=0.0, upper=1.0)
-        win = (0.55 + 0.35 * raw).clip(upper=0.95)
-        return raw, win
-    if spec_name in {"newbars_breakdown_short_5m", "newbars_breakdown_short_30m"}:
-        series = _get_col("newbars_low")
-        raw = (series / max(_NEWBARS_THRESHOLD, 1e-9)).clip(lower=0.0, upper=1.0)
-        win = (0.55 + 0.35 * raw).clip(upper=0.95)
-        return raw, win
-    return pd.Series(np.nan, index=df.index), pd.Series(np.nan, index=df.index)
+def _as_series(value: Any, index: pd.Index) -> pd.Series:
+    if isinstance(value, pd.Series):
+        return value.reindex(index)
+    return pd.Series(value, index=index)
 
 
-def _atr_pct_series(df: pd.DataFrame, timeframe: Optional[str]) -> pd.Series:
-    col = _col_name("atr_pct", timeframe)
-    if col in df.columns:
-        return pd.to_numeric(df[col], errors="coerce")
-    return pd.Series(np.nan, index=df.index)
+def _spec_series_getter(cache: _SeriesCache, spec) -> Any:
+    def _get(base: str, timeframe: Optional[str] = None) -> pd.Series:
+        tf = timeframe if timeframe is not None else spec.timeframe
+        return cache.get(base, tf)
+
+    return _get
 
 
 def build_signal_matrices(df: pd.DataFrame, cfg, specs: Sequence[Any]) -> list[Dict[str, Any]]:
@@ -279,6 +246,7 @@ def build_signal_matrices(df: pd.DataFrame, cfg, specs: Sequence[Any]) -> list[D
 
     if df is None or df.empty:
         return []
+    cache = _SeriesCache(df)
     profiles = getattr(getattr(cfg, "strategy", None), "exit_profiles", getattr(cfg, "exit_profiles", {})) or {}
     default_profile = getattr(
         getattr(cfg, "strategy", None), "default_exit_profile", getattr(cfg, "default_exit_profile", None)
@@ -295,26 +263,38 @@ def build_signal_matrices(df: pd.DataFrame, cfg, specs: Sequence[Any]) -> list[D
     for spec in specs:
         if not is_vectorizable(spec):
             continue
-        cond_mask = _condition_mask(df, spec)
+        cond_mask = _condition_mask(cache, df, spec)
         recipe = entry_to_recipe.get(spec.name)
         exit_profile_name = recipe.exit_profile if recipe else default_profile
         profile = profiles.get(exit_profile_name) if exit_profile_name else None
         if profile is None:
             continue
         target_tf = getattr(profile, "atr_timeframe", None) or spec.timeframe
-        atr_pct = _atr_pct_series(df, target_tf)
+        atr_pct = cache.get("ATR_PCT", target_tf)
         k_sl = float(getattr(profile, "atr_mul_sl", 0.0) or 0.0)
         floor = float(getattr(profile, "floor_sl_pct", 0.0) or 0.0)
-        sl_pct = (atr_pct * k_sl).where(atr_pct > 0, np.nan)
-        sl_pct = pd.concat([sl_pct, pd.Series(floor, index=df.index)], axis=1).max(axis=1)
+        valid_atr = atr_pct > 0
+        sl_pct = (atr_pct * k_sl).where(valid_atr, np.nan)
+        if floor > 0:
+            sl_pct = sl_pct.clip(lower=floor)
         atr_mul_tp = getattr(profile, "atr_mul_tp", None)
         if atr_mul_tp is not None and atr_mul_tp > 0:
-            tp_pct = atr_pct * float(atr_mul_tp)
+            tp_pct = (atr_pct * float(atr_mul_tp)).where(valid_atr, np.nan)
         else:
             tp_pct = (sl_pct * 2.0).clip(lower=0.0)
 
         rr_ratio = tp_pct / sl_pct.replace(0.0, np.nan)
-        raw, win_prob = _vec_raw_winprob(df, spec.name, spec.timeframe)
+        get_series = _spec_series_getter(cache, spec)
+        try:
+            raw = _as_series(spec.vec_raw_fn(get_series, cfg, spec.timeframe), df.index)
+        except Exception:
+            raw = pd.Series(np.nan, index=df.index)
+        try:
+            win_prob = _as_series(spec.vec_win_prob_fn(get_series, cfg, raw, spec.timeframe), df.index)
+        except Exception:
+            win_prob = pd.Series(np.nan, index=df.index)
+        raw = pd.to_numeric(raw, errors="coerce")
+        win_prob = pd.to_numeric(win_prob, errors="coerce")
 
         strat_name = recipe.name if recipe else spec.name
         strat_spec = strategy_map.get(strat_name)

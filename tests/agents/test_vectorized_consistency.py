@@ -6,6 +6,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import user_data.strategies.TaxBrainV29 as strat_mod
 from user_data.strategies.TaxBrainV29 import TaxBrainV29
@@ -140,3 +141,26 @@ def test_vectorized_skips_when_informative_unmerged(monkeypatch, tmp_path):
 
     df = _base_frame()
     strategy.populate_entry_trend(df.copy(), {"pair": "BTC/USDT"})
+
+
+def test_build_signal_matrices_matches_builder():
+    cfg = V29Config()
+    df = _base_frame()
+    vectorized.add_derived_factor_columns(df, (None,))
+    specs = [spec for spec in builder.REGISTRY.all() if spec.name == "mean_rev_long"]
+    assert specs
+
+    matrices = vectorized.build_signal_matrices(df, cfg, specs)
+    assert len(matrices) == 1
+    mat = matrices[0]
+    pos = len(df) - 1
+    candidates = builder.build_candidates(df.iloc[-1], cfg, specs=specs)
+    assert len(candidates) == 1
+    cand = candidates[0]
+
+    assert mat["valid_mask"].iat[pos]
+    assert mat["raw_score"].iat[pos] == pytest.approx(cand.raw_score)
+    assert mat["rr_ratio"].iat[pos] == pytest.approx(cand.rr_ratio)
+    assert mat["expected_edge"].iat[pos] == pytest.approx(cand.expected_edge)
+    assert mat["sl_pct"].iat[pos] == pytest.approx(cand.sl_pct)
+    assert mat["tp_pct"].iat[pos] == pytest.approx(cand.tp_pct)

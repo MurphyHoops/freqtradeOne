@@ -1423,6 +1423,93 @@ class TaxBrainV29(IStrategy):
         }
         df.at[idx, "enter_tag"] = json.dumps(payload)
 
+    def _apply_entry_payloads(
+        self, df: pd.DataFrame, idx, long_payloads: list[dict], short_payloads: list[dict]
+    ) -> None:
+        has_long = bool(long_payloads)
+        has_short = bool(short_payloads)
+        df.at[idx, "enter_long"] = 1 if has_long else 0
+        df.at[idx, "enter_short"] = 1 if has_short else 0
+        if not has_long and not has_short:
+            df.at[idx, "enter_tag"] = None
+            return
+        payload = {
+            "version": 2,
+            "candidates": {"long": long_payloads, "short": short_payloads},
+        }
+        df.at[idx, "enter_tag"] = json.dumps(payload)
+
+    def _select_topk_payloads(
+        self, df: pd.DataFrame, matrices: list[dict], direction: str
+    ) -> list[list[dict]]:
+        if df is None or df.empty:
+            return []
+        specs = [m for m in matrices if m.get("direction") == direction]
+        if not specs:
+            return [[] for _ in range(len(df.index))]
+        edges_list = []
+        raw_list = []
+        rr_list = []
+        sl_list = []
+        tp_list = []
+        plan_atr_list = []
+        for mat in specs:
+            valid = mat["valid_mask"]
+            edge = mat["expected_edge"].where(valid, -np.inf)
+            raw = mat["raw_score"].where(valid, -np.inf)
+            edges_list.append(edge.to_numpy(copy=False))
+            raw_list.append(raw.to_numpy(copy=False))
+            rr_list.append(mat["rr_ratio"].to_numpy(copy=False))
+            sl_list.append(mat["sl_pct"].to_numpy(copy=False))
+            tp_list.append(mat["tp_pct"].to_numpy(copy=False))
+            plan_atr_list.append(mat["plan_atr_pct"].to_numpy(copy=False))
+        edges = np.vstack(edges_list)
+        raws = np.vstack(raw_list)
+        rrs = np.vstack(rr_list)
+        sls = np.vstack(sl_list)
+        tps = np.vstack(tp_list)
+        plan_atr = np.vstack(plan_atr_list)
+        payloads: list[list[dict]] = [[] for _ in range(edges.shape[1])]
+        k = self._candidate_pool_limit
+        for col_idx in range(edges.shape[1]):
+            row_edges = edges[:, col_idx]
+            valid_idx = np.where(np.isfinite(row_edges))[0]
+            if len(valid_idx) == 0:
+                continue
+            if len(valid_idx) > k:
+                topk_idx = valid_idx[np.argpartition(row_edges[valid_idx], -k)[-k:]]
+            else:
+                topk_idx = valid_idx
+            order = sorted(
+                topk_idx,
+                key=lambda i: (row_edges[i], raws[i, col_idx]),
+                reverse=True,
+            )
+            for spec_idx in order:
+                mat = specs[spec_idx]
+                atr_val = float(plan_atr[spec_idx, col_idx])
+                if not math.isfinite(atr_val):
+                    atr_val = None
+                payloads[col_idx].append(
+                    {
+                        "direction": direction,
+                        "kind": mat["name"],
+                        "raw_score": float(raws[spec_idx, col_idx]),
+                        "rr_ratio": float(rrs[spec_idx, col_idx]),
+                        "expected_edge": float(edges[spec_idx, col_idx]),
+                        "win_prob": float(edges[spec_idx, col_idx]),
+                        "squad": mat["squad"],
+                        "sl_pct": float(sls[spec_idx, col_idx]),
+                        "tp_pct": float(tps[spec_idx, col_idx]),
+                        "score": float(edges[spec_idx, col_idx]),
+                        "exit_profile": mat["exit_profile"],
+                        "recipe": mat["recipe"],
+                        "plan_timeframe": mat["plan_timeframe"],
+                        "plan_atr_pct": atr_val,
+                    }
+                )
+        return payloads
+
     def _update_last_signal(self, pair: str, candidate: Optional[schemas.Candidate], row: pd.Series) -> None:
         pst = self.state.get_pair_state(pair)
         try:
@@ -1475,34 +1562,96 @@ class TaxBrainV29(IStrategy):
             if self._derived_factor_columns_missing(df, timeframes):
                 vectorized.add_derived_factor_columns(df, timeframes)
             df["LOSS_TIER_STATE"] = pst_snapshot.closs
-            signal_mask = vectorized.prefilter_signal_mask(
-                df, self.cfg, specs=self._enabled_signal_specs
-            )
-            for idx in df.index[signal_mask]:
-                row = df.loc[idx]
-                raw_candidates = builder.build_candidates(
-                    row, self.cfg, specs=self._enabled_signal_specs
+            vec_specs = [
+                spec for spec in self._enabled_signal_specs if vectorized.is_vectorizable(spec)
+            ]
+            fallback_specs = [
+                spec for spec in self._enabled_signal_specs if spec not in vec_specs
+            ]
+            matrices = vectorized.build_signal_matrices(df, self.cfg, vec_specs)
+            if is_vector_pass:
+                iter_policies = getattr(self.tier_mgr, "policies", None)
+                policies = list(iter_policies()) if callable(iter_policies) else []
+                if not policies:
+                    policies = [self.tier_mgr.get(0)]
+                for mat in matrices:
+                    allowed = None
+                    for policy in policies:
+                        if not policy.permits(
+                            kind=mat["name"], squad=mat["squad"], recipe=mat["recipe"]
+                        ):
+                            continue
+                        mask = (
+                            (mat["raw_score"] >= policy.min_raw_score)
+                            & (mat["rr_ratio"] >= policy.min_rr_ratio)
+                            & (mat["expected_edge"] >= policy.min_edge)
+                        )
+                        allowed = mask if allowed is None else (allowed | mask)
+                    if allowed is None:
+                        mat["valid_mask"] = pd.Series(False, index=df.index)
+                    else:
+                        mat["valid_mask"] = mat["valid_mask"] & allowed
+
+            payloads_long = self._select_topk_payloads(df, matrices, "long")
+            payloads_short = self._select_topk_payloads(df, matrices, "short")
+            idx_to_pos = {idx: pos for pos, idx in enumerate(df.index)}
+
+            if fallback_specs:
+                fallback_mask = vectorized.prefilter_signal_mask(
+                    df, self.cfg, specs=fallback_specs
                 )
-                if not raw_candidates:
-                    continue
-                planned: list[schemas.Candidate] = []
-                for candidate in raw_candidates:
-                    cand_with_plan = self._candidate_with_plan(pair, candidate, row, None)
-                    if cand_with_plan:
-                        planned.append(cand_with_plan)
-                if not planned:
-                    continue
-                if is_vector_pass:
-                    planned = [
-                        cand for cand in planned
-                        if self._candidate_allowed_any_tier(cand)
-                    ]
+                for idx in df.index[fallback_mask]:
+                    row = df.loc[idx]
+                    raw_candidates = builder.build_candidates(
+                        row, self.cfg, specs=fallback_specs
+                    )
+                    if not raw_candidates:
+                        continue
+                    planned: list[schemas.Candidate] = []
+                    for candidate in raw_candidates:
+                        cand_with_plan = self._candidate_with_plan(
+                            pair, candidate, row, None
+                        )
+                        if cand_with_plan:
+                            planned.append(cand_with_plan)
                     if not planned:
                         continue
-                grouped = self._trim_candidate_pool(self._group_candidates_by_direction(planned))
-                if not grouped.get("long") and not grouped.get("short"):
-                    continue
-                self._apply_entry_signal(df, idx, grouped)
+                    if is_vector_pass:
+                        planned = [
+                            cand
+                            for cand in planned
+                            if self._candidate_allowed_any_tier(cand)
+                        ]
+                        if not planned:
+                            continue
+                    grouped = self._trim_candidate_pool(
+                        self._group_candidates_by_direction(planned)
+                    )
+                    pos = idx_to_pos.get(idx)
+                    if pos is None:
+                        continue
+                    if grouped.get("long"):
+                        extra = [self._candidate_to_payload(c) for c in grouped["long"]]
+                        combined = payloads_long[pos] + extra
+                        combined.sort(
+                            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
+                            reverse=True,
+                        )
+                        payloads_long[pos] = combined[: self._candidate_pool_limit]
+                    if grouped.get("short"):
+                        extra = [self._candidate_to_payload(c) for c in grouped["short"]]
+                        combined = payloads_short[pos] + extra
+                        combined.sort(
+                            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
+                            reverse=True,
+                        )
+                        payloads_short[pos] = combined[: self._candidate_pool_limit]
+
+            for pos, idx in enumerate(df.index):
+                if payloads_long[pos] or payloads_short[pos]:
+                    self._apply_entry_payloads(
+                        df, idx, payloads_long[pos], payloads_short[pos]
+                    )
         elif is_vector_pass:
             for idx in df.index:
                 row = df.loc[idx]

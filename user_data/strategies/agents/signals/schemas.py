@@ -26,6 +26,7 @@ class Candidate:
     squad: str
     sl_pct: float
     tp_pct: float
+    timeframe: Optional[str]
     exit_profile: Optional[str] = None
     recipe: Optional[str] = None
     plan_timeframe: Optional[str] = None

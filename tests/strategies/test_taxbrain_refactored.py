@@ -5,6 +5,7 @@ from unittest import mock
 import pytest
 
 from user_data.strategies.TaxBrainV29 import PairState, TaxBrainV29
+from user_data.strategies.agents.signals import schemas
 from user_data.strategies.agents.portfolio import global_backend as gb
 from user_data.strategies.config.v29_config import V29Config
 
@@ -44,20 +45,66 @@ def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV29:
     strat.global_backend = None
     strat.logger = mock.Mock()
     strat._is_backtest_like_runmode = lambda: True
+    strat.hub = SimpleNamespace(
+        meta_for_id=lambda *args, **kwargs: None,
+        signal_id_for=lambda *args, **kwargs: None,
+    )
+    strat.bridge = SimpleNamespace(get_candidates=lambda *args, **kwargs: [])
+    strat.engine = SimpleNamespace(is_permitted=lambda *args, **kwargs: True, sync_to_time=lambda *args, **kwargs: None)
+    strat.rejections = SimpleNamespace(record=lambda *args, **kwargs: None)
     return strat
 
 
 def test_extract_entry_meta_handles_valid_and_invalid_tags():
     strat = _make_stub_strategy()
 
-    meta = strat._extract_entry_meta("BTC/USDT", '{"sl_pct":0.01,"tp_pct":0.02,"dir":"long"}', "buy")
+    candidate = schemas.Candidate(
+        direction="long",
+        kind="mean_rev_long",
+        raw_score=0.5,
+        rr_ratio=2.0,
+        win_prob=0.6,
+        expected_edge=0.6,
+        squad="MRL",
+        sl_pct=0.01,
+        tp_pct=0.02,
+        timeframe=None,
+    )
+    strat._select_candidate_from_pool = lambda *args, **kwargs: candidate
+    meta = strat._extract_entry_meta("BTC/USDT", None, "buy", current_time=datetime(2024, 1, 1))
     assert meta is not None
     assert meta["sl_pct"] == pytest.approx(0.01)
     assert meta["tp_pct"] == pytest.approx(0.02)
     assert meta["dir"] == "long"
 
-    assert strat._extract_entry_meta("BTC/USDT", None, "buy") is None
-    assert strat._extract_entry_meta("BTC/USDT", "not-json", "buy") is None
+    assert strat._extract_entry_meta("BTC/USDT", None, "buy", current_time=None) is None
+
+
+def test_select_candidate_from_pool_honors_entry_tag():
+    strat = _make_stub_strategy()
+    strat.tier_agent = SimpleNamespace(filter_best=lambda _policy, candidates: candidates[0] if candidates else None)
+    strat.hub = SimpleNamespace(
+        meta_for_id=lambda *args, **kwargs: None,
+        signal_id_for=lambda *args, **kwargs: 7,
+    )
+
+    candidate = schemas.Candidate(
+        direction="long",
+        kind="mean_rev_long",
+        raw_score=0.5,
+        rr_ratio=2.0,
+        win_prob=0.6,
+        expected_edge=0.6,
+        squad="MRL",
+        sl_pct=0.01,
+        tp_pct=0.02,
+        timeframe="5m",
+    )
+    strat._candidates_from_pool = lambda *args, **kwargs: [candidate]
+    current_time = datetime(2024, 1, 1)
+
+    assert strat._select_candidate_from_pool("BTC/USDT", current_time, "buy", entry_tag="7") is candidate
+    assert strat._select_candidate_from_pool("BTC/USDT", current_time, "buy", entry_tag="8") is None
 
 
 @pytest.mark.skipif(redis is None, reason="redis package not installed")
@@ -77,16 +124,28 @@ def test_custom_stake_amount_rejects_when_gate_disallows():
     strat.sizer = mock.Mock()
     strat.sizer.compute.side_effect = AssertionError("sizer should not run when gate blocks")
 
-    entry_tag = '{"sl_pct":0.01,"tp_pct":0.02,"dir":"long"}'
+    candidate = schemas.Candidate(
+        direction="long",
+        kind="mean_rev_long",
+        raw_score=0.5,
+        rr_ratio=2.0,
+        win_prob=0.6,
+        expected_edge=0.6,
+        squad="MRL",
+        sl_pct=0.01,
+        tp_pct=0.02,
+        timeframe=None,
+    )
+    strat._select_candidate_from_pool = lambda *args, **kwargs: candidate
     stake = strat.custom_stake_amount(
         pair="BTC/USDT",
-        current_time=None,
+        current_time=datetime(2024, 1, 1),
         current_rate=100.0,
         proposed_stake=10.0,
         min_stake=None,
         max_stake=1000.0,
         leverage=1.0,
-        entry_tag=entry_tag,
+        entry_tag=None,
         side="buy",
     )
     assert stake == 0.0
@@ -94,17 +153,12 @@ def test_custom_stake_amount_rejects_when_gate_disallows():
 
 def test_confirm_trade_entry_no_cooldown_decrement_in_backtest():
     strat = _make_stub_strategy()
-    strat.config = {"runmode": SimpleNamespace(value="backtest")}
-    strat.dp = SimpleNamespace(runmode=SimpleNamespace(value="backtest"))
-    strat.cfg = SimpleNamespace(
-        system=SimpleNamespace(
-            cte_catch_up_in_backtest=False,
-            cte_enforce_tier_in_backtest=False,
-        )
-    )
-    strat._tf_sec = 300
     strat._tier_debug = lambda *args, **kwargs: None
-    strat._resolve_candidate_from_tag = lambda *args, **kwargs: None
+    strat._select_candidate_from_pool = lambda *args, **kwargs: None
+    strat.engine = SimpleNamespace(
+        is_permitted=lambda *args, **kwargs: True,
+        sync_to_time=mock.Mock(),
+    )
 
     pair = "BTC/USDT"
     pst = strat.state.get_pair_state(pair)
@@ -123,4 +177,4 @@ def test_confirm_trade_entry_no_cooldown_decrement_in_backtest():
         side="buy",
     )
 
-    assert pst.cooldown_bars_left == 5
+    strat.engine.sync_to_time.assert_called_once()

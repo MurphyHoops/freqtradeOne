@@ -299,6 +299,7 @@ def build_signal_matrices(df: pd.DataFrame, cfg, specs: Sequence[Any]) -> list[D
                 "name": spec.name,
                 "direction": spec.direction,
                 "squad": spec.squad,
+                "timeframe": spec.timeframe,
                 "exit_profile": exit_profile_name,
                 "recipe": recipe.name if recipe else None,
                 "plan_timeframe": getattr(profile, "atr_timeframe", None),

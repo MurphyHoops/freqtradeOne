@@ -302,6 +302,7 @@ def build_candidates(
                 tp_pct=tp,
                 exit_profile=exit_profile,
                 recipe=recipe_name,
+                timeframe=spec.timeframe,
                 plan_timeframe=plan.plan_timeframe,
                 plan_atr_pct=plan.plan_atr_pct,
             )

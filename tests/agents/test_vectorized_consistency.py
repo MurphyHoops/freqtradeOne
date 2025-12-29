@@ -125,8 +125,10 @@ def test_vectorized_and_nonvectorized_match(monkeypatch, tmp_path):
     non_vectorized_strat.dp = _RunmodeDP(fake.BACKTEST)
 
     df = _base_frame()
-    vec_df = vectorized_strat.populate_entry_trend(df.copy(), {"pair": "BTC/USDT"})
-    non_df = non_vectorized_strat.populate_entry_trend(df.copy(), {"pair": "BTC/USDT"})
+    vec_df = vectorized_strat.populate_indicators(df.copy(), {"pair": "BTC/USDT"})
+    vec_df = vectorized_strat.populate_entry_trend(vec_df, {"pair": "BTC/USDT"})
+    non_df = non_vectorized_strat.populate_indicators(df.copy(), {"pair": "BTC/USDT"})
+    non_df = non_vectorized_strat.populate_entry_trend(non_df, {"pair": "BTC/USDT"})
 
     assert vec_df[["enter_long", "enter_short"]].equals(non_df[["enter_long", "enter_short"]])
     assert vec_df["enter_tag"].fillna("").tolist() == non_df["enter_tag"].fillna("").tolist()
@@ -155,7 +157,8 @@ def test_vectorized_skips_when_informative_unmerged(monkeypatch, tmp_path):
     monkeypatch.setattr(vectorized, "prefilter_signal_mask", _no_vectorized)
 
     df = _base_frame()
-    strategy.populate_entry_trend(df.copy(), {"pair": "BTC/USDT"})
+    out = strategy.populate_indicators(df.copy(), {"pair": "BTC/USDT"})
+    strategy.populate_entry_trend(out, {"pair": "BTC/USDT"})
 
 
 def test_build_signal_matrices_matches_builder():
@@ -253,8 +256,10 @@ def test_informative_merge_matches_aligned_rows(monkeypatch, tmp_path):
     merged_df = base_df.copy()
     merged_strat._merge_informative_columns_into_base(merged_df, "BTC/USDT")
 
-    merged_out = merged_strat.populate_entry_trend(merged_df.copy(), {"pair": "BTC/USDT"})
-    aligned_out = aligned_strat.populate_entry_trend(base_df.copy(), {"pair": "BTC/USDT"})
+    merged_out = merged_strat.populate_indicators(merged_df.copy(), {"pair": "BTC/USDT"})
+    merged_out = merged_strat.populate_entry_trend(merged_out, {"pair": "BTC/USDT"})
+    aligned_out = aligned_strat.populate_indicators(base_df.copy(), {"pair": "BTC/USDT"})
+    aligned_out = aligned_strat.populate_entry_trend(aligned_out, {"pair": "BTC/USDT"})
 
     assert merged_out[["enter_long", "enter_short"]].equals(aligned_out[["enter_long", "enter_short"]])
     assert merged_out["enter_tag"].fillna("").tolist() == aligned_out["enter_tag"].fillna("").tolist()

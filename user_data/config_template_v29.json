@@ -16,6 +16,8 @@
     "market_sensor_enabled": true,
     "market_sensor_in_backtest": false,
     "debug_prints": false,
+    "rejection_log_enabled": false,
+    "rejection_stats_enabled": true,
     "cte_enforce_tier_in_backtest": true,
     "cte_catch_up_in_backtest": true
   },

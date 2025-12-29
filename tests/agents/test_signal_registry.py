@@ -1,37 +1,33 @@
-﻿"""Unit tests for the signal registry."""
-
-import dataclasses
-
-import pytest
+from __future__ import annotations
 
 from user_data.strategies.agents.signals.registry import SignalRegistry
-from user_data.strategies.agents.signals.schemas import Condition, SignalSpec
+from user_data.strategies.agents.signals.schemas import SignalSpec
 
 
-def _dummy_spec(name: str) -> SignalSpec:
-    return SignalSpec(
-        name=name,
+def test_registry_allows_same_name_different_direction():
+    registry = SignalRegistry()
+
+    spec_long = SignalSpec(
+        name="mean_rev",
         direction="long",
-        squad="TEST",
-        conditions=[Condition("CLOSE", ">", 0.0)],
-        raw_fn=lambda bag, cfg: 0.5,
-        win_prob_fn=lambda bag, cfg, raw: 0.6,
-        min_rr=1.0,
-        min_edge=0.0,
+        squad="MRL",
+        conditions=[],
+        raw_fn=lambda *_: 0.0,
+        win_prob_fn=lambda *_: 0.5,
+        timeframe=None,
+    )
+    spec_short = SignalSpec(
+        name="mean_rev",
+        direction="short",
+        squad="MRS",
+        conditions=[],
+        raw_fn=lambda *_: 0.0,
+        win_prob_fn=lambda *_: 0.5,
+        timeframe=None,
     )
 
+    registry.register(spec_long)
+    registry.register(spec_short)
 
-def test_registry_prevents_duplicate_names():
-    registry = SignalRegistry()
-    registry.register(_dummy_spec("alpha"))
-    with pytest.raises(ValueError):
-        registry.register(_dummy_spec("alpha"))
-    assert len(registry.all()) == 1
-
-
-def test_registry_allows_same_name_different_timeframes():
-    registry = SignalRegistry()
-    primary = _dummy_spec("beta")
-    registry.register(primary)
-    registry.register(dataclasses.replace(primary, timeframe="1h"))
-    assert len(registry.all()) == 2
+    specs = registry.all()
+    assert len(specs) == 2

@@ -5,7 +5,6 @@
 from __future__ import annotations
 from typing import Optional, Any, Dict
 import talib.abstract as ta
-import json
 import sys
 import time
 import uuid
@@ -138,11 +137,18 @@ from user_data.strategies.config.v29_config import V29Config, apply_overrides
 from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
 from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
 from user_data.strategies.agents.portfolio.sizer import SizerAgent
-from user_data.strategies.agents.signals.builder import (
-
-    collect_factor_requirements,
-    collect_indicator_requirements,
+from user_data.strategies.core.engine import (
+    ActiveTradeMeta,
+    PairState,
+    GateResult,
+    TreasuryState,
+    GlobalState,
+    Engine,
 )
+from user_data.strategies.core.bridge import ZeroCopyBridge
+from user_data.strategies.core.hub import SignalHub
+from user_data.strategies.core.rejections import RejectTracker, RejectReason
+from user_data.strategies.vectorized.matrix_engine import MatrixEngine
 from user_data.strategies.agents.signals import builder, indicators, schemas, factors, vectorized
 from user_data.strategies.agents.portfolio.risk import RiskAgent
 from user_data.strategies.agents.portfolio.reservation import ReservationAgent
@@ -170,466 +176,12 @@ except Exception:  # pragma: no cover
     def evaluate_sl_override(ctx: Dict[str, Any], base_sl_pct: float | None) -> Optional[float]:
         return None
 
-# 让所有内置入场信号完成“注册”
-
-from user_data.strategies.agents.signals import builtin_signals as _signals  # noqa: F401
-
 class _NoopStateStore:
     """No-op persistence adapter used during backtests/hyperopt to keep state ephemeral."""
     def save(self) -> None:  # pragma: no cover - trivial
         return
     def load_if_exists(self) -> None:  # pragma: no cover - trivial
         return
-
-@dataclass
-class ActiveTradeMeta:
-    """ActiveTradeMeta 用于记录在市订单在 TaxBrainV29 流程中的关键元数据，方便执行、退出与风控代理在不同 hook 间共享统一视图。
-    Attributes:
-        sl_pct: 建仓时设定的止损百分比（通常为负值，代表最大亏损距离）。
-        tp_pct: 建仓时设定的止盈百分比。
-        direction: 信号方向，取值为 'long' 或 'short'。
-        entry_bar_tick: 建仓发生时的全局 bar_tick 序号，用于与 CycleAgent 对齐。
-        entry_price: 建仓价格，供执行/退出时计算盈亏。
-        bucket: 极坐标场标记，long/short。
-        icu_bars_left: ICU 强制回收剩余 bar 数，None 表示当前不受 ICU 约束。
-    """
-    sl_pct: float
-    tp_pct: float
-    direction: str
-    entry_bar_tick: int
-    entry_price: float
-    bucket: str
-    icu_bars_left: Optional[int]
-    exit_profile: Optional[str] = None
-    recipe: Optional[str] = None
-    plan_timeframe: Optional[str] = None
-    plan_atr_pct: Optional[float] = None
-    tier_name: Optional[str] = None
-
-@dataclass
-class PairState:
-    """PairState 汇聚单个交易对的即时状态，用于信号评估、财政拨款与风险检查之间的信息同步。
-
-    Attributes:
-        closs: 连续亏损计数，驱动 TierPolicy 的升降级与冷却时长。
-        local_loss: 累计局部亏损金额，用于疼痛加权财政拨款。
-        cooldown_bars_left: 当前剩余冷却 bar 数，>0 时禁止开新仓。
-        last_dir: 最近一次信号方向，None 表示暂无有效信号。
-        last_score: 最近一次信号期望收益（edge）数值。
-        last_squad: 最近一次信号所属 squad（MRL/PBL/TRS 等）。
-        last_sl_pct: 最近一次信号建议的止损百分比。
-        last_tp_pct: 最近一次信号建议的止盈百分比。
-        last_atr_pct: 最近一次记录的 ATR 百分比，供早锁盈估算使用。
-        active_trades: 当前在市的交易字典，键为 trade_id，值为 ActiveTradeMeta。
-    """
-    closs: int = 0
-    local_loss: float = 0.0
-    cooldown_bars_left: int = 0
-    last_dir: Optional[str] = None
-    last_score: float = 0.0
-    last_kind: Optional[str] = None
-    last_squad: Optional[str] = None
-    last_sl_pct: float = 0.0
-    last_tp_pct: float = 0.0
-    last_atr_pct: float = 0.0
-    last_exit_profile: Optional[str] = None
-    last_recipe: Optional[str] = None
-    active_trades: Dict[str, ActiveTradeMeta] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class GateResult:
-    """Normalized gatekeeping outcome used by custom_stake_amount."""
-
-    allowed: bool
-    thresholds: Dict[str, Any] = field(default_factory=dict)
-    reason: str = ""
-    debt: Optional[float] = None
-    closs: Optional[int] = None
-
-    @classmethod
-    def from_mapping(cls, payload: Dict[str, Any], default_closs: Optional[int]) -> "GateResult":
-        thresholds = payload.get("thresholds") if isinstance(payload, dict) else {}
-        return cls(
-            allowed=bool(payload.get("allowed", True)) if isinstance(payload, dict) else True,
-            thresholds=thresholds if isinstance(thresholds, dict) else {},
-            reason=str(payload.get("reason", "")) if isinstance(payload, dict) else "",
-            debt=payload.get("debt") if isinstance(payload, dict) else None,
-            closs=payload.get("closs", default_closs) if isinstance(payload, dict) else default_closs,
-        )
-
-@dataclass
-class TreasuryState:
-    """TreasuryState 持久化极坐标场的拨款参数以及财政周期起点。"""
-
-    k_long: float = 0.0
-    k_short: float = 0.0
-    theta: float = 0.0
-    final_r: float = 0.0
-    available: float = 0.0
-    bias: float = 0.0
-    volatility: float = 1.0
-    cycle_start_tick: int = 0
-    cycle_start_equity: float = 0.0
-
-    def to_snapshot(self) -> Dict[str, Any]:
-        """导出财政子模块的可序列化快照数据，供 StateStore 写入磁盘。"""
-
-        return {
-            "k_long": self.k_long,
-            "k_short": self.k_short,
-            "theta": self.theta,
-            "final_r": self.final_r,
-            "available": self.available,
-            "bias": self.bias,
-            "volatility": self.volatility,
-            "cycle_start_tick": self.cycle_start_tick,
-            "cycle_start_equity": self.cycle_start_equity,
-        }
-
-    def restore_snapshot(self, payload: Dict[str, Any]) -> None:
-        """从 StateStore 读取的字典中恢复财政拨款状态。"""
-
-        self.k_long = float(payload.get("k_long", 0.0))
-        self.k_short = float(payload.get("k_short", 0.0))
-        self.theta = float(payload.get("theta", 0.0))
-        self.final_r = float(payload.get("final_r", 0.0))
-        self.available = float(payload.get("available", 0.0))
-        self.bias = float(payload.get("bias", 0.0))
-        self.volatility = float(payload.get("volatility", 1.0))
-        self.cycle_start_tick = int(payload.get("cycle_start_tick", 0))
-        self.cycle_start_equity = float(payload.get("cycle_start_equity", 0.0))
-
-class GlobalState:
-    """GlobalState 负责维护 TaxBrainV29 的组合级状态，包括债务池、各交易对风险、财政拨款以及 bar_tick 进度。
-    该容器为多个代理提供读写接口，并承担快照持久化与恢复的职责。
-    """
-
-    def __init__(self, cfg: V29Config, backend: Optional[GlobalRiskBackend] = None) -> None:
-        """初始化全局状态容器。
-        Args:
-            cfg: 当前加载的 V29Config，用于读取 CAP、税率等参数。
-        """
-        self.cfg = cfg
-        self.backend = backend
-        self.per_pair: Dict[str, PairState] = {}
-        self.debt_pool: float = 0.0
-        self.trade_risk_ledger: Dict[str, float] = {}
-        self.pair_risk_open: Dict[str, float] = {}
-        self.treasury = TreasuryState()
-        self.bar_tick: int = 0
-        self.current_cycle_ts: Optional[float] = None
-        self.last_finalized_bar_ts: Optional[float] = None
-        self.reported_pairs_for_current_cycle: set[str] = set()
-        self.last_finalize_walltime: float = time.time()
-
-        # === Nominal position ledgers (amount * price, leverage-agnostic) ===
-        self.trade_stake_ledger: Dict[str, float] = {}
-        self.pair_stake_open: Dict[str, float] = {}
-
-    def _canonical_pair(self, pair: str | None) -> str:
-        if not pair:
-            return ""
-        return str(pair).split(":")[0]
-
-    def get_pair_state(self, pair: str) -> PairState:
-        """获取指定交易对的 PairState，如不存在则初始化默认实例。
-        Args:
-            pair: 交易对名称，例如 'BTC/USDT'。
-        Returns:
-            PairState: 可供调用方修改的状态对象。
-        """
-        key = self._canonical_pair(pair)
-        if key not in self.per_pair:
-            self.per_pair[key] = PairState()
-        return self.per_pair[key]
-
-    def get_total_open_risk(self) -> float:
-        """汇总所有交易对当前在市风险，用于组合 CAP 控制。
-        Returns:
-            float: 当前组合层面的风险敞口总和。
-        """
-        return sum(self.pair_risk_open.values())
-
-    def get_dynamic_portfolio_cap_pct(self, equity: float) -> float:
-        """根据当前权益与债务压力计算组合 VaR 上限占比。
-        Args:
-            equity: 当前账户权益。
-        Returns:
-            float: 调整后的组合 CAP 百分比；债务率过高或 equity<=0 时会自动折减。
-        """
-        risk_cfg = getattr(self.cfg, "risk", self.cfg)
-        base = risk_cfg.portfolio_cap_pct_base
-        if equity <= 0:
-            return base * 0.5
-        if (self.debt_pool / equity) > risk_cfg.drawdown_threshold_pct:
-            return base * 0.5
-        return base
-
-    def per_pair_cap_room(self, pair: str, equity: float, tier_pol, reserved: float) -> float:
-        """计算指定交易对在单票 CAP 约束下剩余可分配的风险空间。
-        Args:
-            pair: 交易对名称。
-            equity: 当前账户权益。
-            tier_pol: 对应 CLOSS 等级的 TierPolicy。
-            reserved: 当前交易对已预约的风险额度。
-        Returns:
-            float: 在 CAP 范围内仍可追加的风险额度。
-        """
-        key = self._canonical_pair(pair)
-        cap = tier_pol.per_pair_risk_cap_pct * equity
-        used = self.pair_risk_open.get(key, 0.0) + reserved
-        return max(0.0, cap - used)
-
-    def record_trade_open(
-        self,
-        pair: str,
-        trade_id: str,
-        real_risk: float,
-        sl_pct: float,
-        tp_pct: float,
-        direction: str,
-        bucket: str,
-        entry_price: float,
-        tier_pol,
-        exit_profile: Optional[str] = None,
-        recipe: Optional[str] = None,
-        plan_timeframe: Optional[str] = None,
-        plan_atr_pct: Optional[float] = None,
-        tier_name: Optional[str] = None,
-        stake_nominal: Optional[float] = None,  # nominal position size (amount * price)
-    ) -> None:
-        """记录新建仓的风险占用，并创建 ActiveTradeMeta 以便执行与退出逻辑后续引用。
-        Args:
-            pair: 交易对名称。
-            trade_id: Freqtrade 分配的交易标识。
-            real_risk: 根据止损距离计算出的真实风险敞口。
-            sl_pct: 建仓时的止损百分比。
-            tp_pct: 建仓时的止盈百分比。
-            direction: 方向标识 'long' 或 'short'。
-            bucket: 当前订单使用的拨款桶（long/short）。
-            entry_price: 建仓价格。
-            tier_pol: 所属 TierPolicy，用于初始化 ICU 倒计时与冷却时长。
-        """
-        pst = self.get_pair_state(pair)
-        pair_key = self._canonical_pair(pair)
-        tier_name = tier_name or (getattr(tier_pol, "name", None) if tier_pol else None)
-        # 记录的风险应为含杠杆的实际损失额
-        self.trade_risk_ledger[trade_id] = float(real_risk)
-        self.pair_risk_open[pair_key] = self.pair_risk_open.get(
-            pair_key, 0.0) + float(real_risk)
-        
-        # === Derive nominal stake from risk/sl_pct and accumulate per-pair exposure ===
-        if stake_nominal is None:
-            if sl_pct and sl_pct > 0:
-                stake_nominal = real_risk / sl_pct
-            else:
-                stake_nominal = 0.0
-
-        stake_nominal = float(max(stake_nominal or 0.0, 0.0))
-        self.trade_stake_ledger[trade_id] = stake_nominal
-        self.pair_stake_open[pair_key] = self.pair_stake_open.get(pair_key, 0.0) + stake_nominal
-
-        icu_left = tier_pol.icu_force_exit_bars if tier_pol.icu_force_exit_bars > 0 else None
-        pst.active_trades[trade_id] = ActiveTradeMeta(
-            sl_pct=float(sl_pct),
-            tp_pct=float(tp_pct),
-            direction=str(direction),
-            entry_bar_tick=self.bar_tick,
-            entry_price=float(entry_price),
-            bucket=str(bucket),
-            icu_bars_left=icu_left,
-            exit_profile=exit_profile,
-            recipe=recipe,
-            plan_timeframe=plan_timeframe,
-            plan_atr_pct=float(plan_atr_pct) if plan_atr_pct is not None else None,
-            tier_name=tier_name,
-        )
-        pst.cooldown_bars_left = max(
-            pst.cooldown_bars_left, tier_pol.cooldown_bars)
-
-    def record_trade_close(self, pair: str, trade_id: str, profit_abs: float, tier_mgr) -> None:
-            """
-            在平仓时回收风险、更新债务池。
-            逻辑修正：
-            1. Max Tier 之前的亏损：只增加 pst.local_loss，不增加 self.debt_pool。
-            2. Max Tier 及之后的亏损：增加 self.debt_pool，并清空 pst.local_loss。
-            3. 盈利：优先偿还 pst.local_loss，剩余的(excess)用于偿还 self.debt_pool。
-            """
-            pst = self.get_pair_state(pair)
-            pair_key = self._canonical_pair(pair)
-
-            # 1) 回收风险/保证金账本 (保持原样)
-            was_risk = self.trade_risk_ledger.pop(trade_id, 0.0)
-            self.pair_risk_open[pair_key] = max(0.0, self.pair_risk_open.get(pair_key, 0.0) - was_risk)
-            if self.pair_risk_open.get(pair_key, 0.0) <= 1e-12:
-                self.pair_risk_open[pair_key] = 0.0
-
-            was_stake = self.trade_stake_ledger.pop(trade_id, 0.0)
-            self.pair_stake_open[pair_key] = max(0.0, self.pair_stake_open.get(pair_key, 0.0) - was_stake)
-            if self.pair_stake_open.get(pair_key, 0.0) <= 1e-12:
-                self.pair_stake_open[pair_key] = 0.0
-
-            # 2) 从活跃订单中移除 (保持原样)
-            pst.active_trades.pop(trade_id, None)
-            prev_closs = pst.closs
-
-            # 3) 获取最大亏损等级
-            routing_map = getattr(tier_mgr, "_routing_map", None) or {}
-            max_closs = max(routing_map.keys()) if routing_map else 3
-
-            # A) 盈利处理逻辑 (Profit Handling)
-            if profit_abs >= 0:
-                excess_profit = pst.local_loss - profit_abs
-                pst.local_loss = 0
-                self.debt_pool =max(0, self.debt_pool + excess_profit)
-
-                if self.backend:
-                    if excess_profit>0:
-                        self.backend.add_loss(excess_profit)
-                    else:
-                        self.backend.repay_loss(0 - excess_profit)
-                        
-                # 4. 重置连续亏损计数和冷却
-                pst.closs = 0
-                pol = tier_mgr.get(pst.closs)
-                pst.cooldown_bars_left = max(pst.cooldown_bars_left, pol.cooldown_bars_after_win)
-                return
-
-            # B) 亏损处理逻辑 (Loss Handling)
-            loss = abs(profit_abs)
-
-            # 情况 1: 达到了 Max Tier (熔断/清算)
-            # 只有在这里，亏损才会进入中央债务 (Central Debt)
-            if prev_closs >= max_closs:
-                # 增加中央债务
-                self.debt_pool += loss + pst.local_loss # 本地债务给中央
-                if self.backend and loss > 0:
-                    self.backend.add_loss(loss + pst.local_loss)
-                
-                # Max Tier 触发后，本地债务清空 (Reset Local)
-                # 这意味着之前的累积局部亏损被"原谅"或视为沉没成本，重新开始
-                pst.local_loss = 0.0 
-                
-                # 重置 closs 为 0 (或者你可以选择保持在 max，取决于你想让它继续冷却多久)
-                # 这里通常重置为 0 让它重新开始，或者保留高 closs 让它进入很长的冷却
-                pst.closs = 0 
-                
-                pol = tier_mgr.get(pst.closs)
-                pst.cooldown_bars_left = max(pst.cooldown_bars_left, pol.cooldown_bars)
-                return
-
-            # 情况 2: 普通亏损 (Before Max Tier)
-            pst.local_loss += loss
-
-            # 升级 closs
-            pst.closs = prev_closs + 1
-            pol = tier_mgr.get(pst.closs)
-            pst.cooldown_bars_left = max(pst.cooldown_bars_left, pol.cooldown_bars)
-
-    def to_snapshot(self) -> Dict[str, Any]:
-        """序列化全局状态为字典，便于持久化或调试。
-        Returns:
-            Dict[str, Any]: 包含债务池、各交易对状态与财政信息的快照。
-        """
-        per_pair_snap: Dict[str, Any] = {}
-        for pair, pst in self.per_pair.items():
-            per_pair_snap[pair] = {
-                "closs": pst.closs,
-                "local_loss": pst.local_loss,
-                "cooldown_bars_left": pst.cooldown_bars_left,
-                "last_dir": pst.last_dir,
-                "last_score": pst.last_score,
-                "last_kind": pst.last_kind,
-                "last_squad": pst.last_squad,
-                "last_sl_pct": pst.last_sl_pct,
-                "last_tp_pct": pst.last_tp_pct,
-                "last_atr_pct": pst.last_atr_pct,
-                "last_exit_profile": pst.last_exit_profile,
-                "last_recipe": pst.last_recipe,
-                "active_trades": {
-                    tid: {
-                        "sl_pct": meta.sl_pct,
-                        "tp_pct": meta.tp_pct,
-                        "direction": meta.direction,
-                        "entry_bar_tick": meta.entry_bar_tick,
-                        "entry_price": meta.entry_price,
-                        "bucket": meta.bucket,
-                        "icu_bars_left": meta.icu_bars_left,
-                        "exit_profile": meta.exit_profile,
-                        "recipe": meta.recipe,
-                    }
-                    for tid, meta in pst.active_trades.items()
-                },
-            }
-        return {
-            "debt_pool": self.debt_pool,
-            "per_pair": per_pair_snap,
-            "trade_risk_ledger": self.trade_risk_ledger,
-            "pair_risk_open": self.pair_risk_open,
-            "treasury": self.treasury.to_snapshot(),
-            "bar_tick": self.bar_tick,
-            "current_cycle_ts": self.current_cycle_ts,
-            "last_finalized_bar_ts": self.last_finalized_bar_ts,
-            "last_finalize_walltime": self.last_finalize_walltime,
-        }
-
-    def restore_snapshot(self, payload: Dict[str, Any]) -> None:
-        """从 `to_snapshot` 生成的字典恢复全局状态，用于断点续跑或崩溃恢复。
-        Args:
-            payload: 先前保存的状态字典。
-        """
-        self.debt_pool = float(payload.get("debt_pool", 0.0))
-        self.trade_risk_ledger = {k: float(v) for k, v in payload.get(
-            "trade_risk_ledger", {}).items()}
-        self.pair_risk_open = {k: float(v) for k, v in payload.get(
-            "pair_risk_open", {}).items()}
-        self.bar_tick = int(payload.get("bar_tick", 0))
-        self.current_cycle_ts = payload.get("current_cycle_ts")
-        self.last_finalized_bar_ts = payload.get("last_finalized_bar_ts")
-        self.last_finalize_walltime = float(
-            payload.get("last_finalize_walltime", time.time()))
-        self.per_pair = {}
-        for pair, pst_payload in payload.get("per_pair", {}).items():
-            pst = PairState(
-                closs=int(pst_payload.get("closs", 0)),
-                local_loss=float(pst_payload.get("local_loss", 0.0)),
-                cooldown_bars_left=int(
-                    pst_payload.get("cooldown_bars_left", 0)),
-                last_dir=pst_payload.get("last_dir"),
-                last_score=float(pst_payload.get("last_score", 0.0)),
-                last_kind=pst_payload.get("last_kind"),
-                last_squad=pst_payload.get("last_squad"),
-                last_sl_pct=float(pst_payload.get("last_sl_pct", 0.0)),
-                last_tp_pct=float(pst_payload.get("last_tp_pct", 0.0)),
-                last_atr_pct=float(pst_payload.get("last_atr_pct", 0.0)),
-                last_exit_profile=pst_payload.get("last_exit_profile"),
-                last_recipe=pst_payload.get("last_recipe"),
-            )
-            for tid, meta_payload in pst_payload.get("active_trades", {}).items():
-                pst.active_trades[tid] = ActiveTradeMeta(
-                    sl_pct=float(meta_payload.get("sl_pct", 0.0)),
-                    tp_pct=float(meta_payload.get("tp_pct", 0.0)),
-                    direction=str(meta_payload.get("direction", "")),
-                    entry_bar_tick=int(meta_payload.get("entry_bar_tick", 0)),
-                    entry_price=float(meta_payload.get("entry_price", 0.0)),
-                    bucket=str(meta_payload.get("bucket", "long")),
-                    icu_bars_left=(
-                        int(meta_payload["icu_bars_left"])
-                        if meta_payload.get("icu_bars_left") is not None
-                        else None
-                    ),
-                    exit_profile=meta_payload.get("exit_profile"),
-                    recipe=meta_payload.get("recipe"),
-                )
-            self.per_pair[pair] = pst
-        self.treasury.restore_snapshot(payload.get("treasury", {}))
-
-    def reset_cycle_after_restore(self) -> None:
-        """在完成 StateStore 恢复后重置周期追踪计数，使后续 finalize 流程重新对齐当前时间。"""
-        self.current_cycle_ts = None
-        self.reported_pairs_for_current_cycle = set()
-        self.last_finalize_walltime = time.time()
 
 class EquityProvider:
     """EquityProvider 封装权益读写接口，供 CycleAgent、SizerAgent 等组件查询或更新账户权益。"""
@@ -702,11 +254,10 @@ class TaxBrainV29(IStrategy):
             self.__class__.startup_candle_count = self.cfg.system.startup_candle_count
         except Exception:
             pass
-        extra_signal_factors = getattr(self.cfg, "extra_signal_factors", None)
-        self._factor_requirements = collect_factor_requirements(
-            extra_signal_factors)
-        self._indicator_requirements = collect_indicator_requirements(
-            extra_signal_factors)
+        self.hub = SignalHub(self.cfg)
+        self.hub.discover()
+        self._factor_requirements = self.hub.factor_requirements
+        self._indicator_requirements = self.hub.indicator_requirements
         self.__class__._indicator_requirements_map = self._indicator_requirements
         config_timeframes = tuple(
             getattr(self.cfg, "informative_timeframes", ()))
@@ -772,6 +323,11 @@ class TaxBrainV29(IStrategy):
         self.reservation = ReservationAgent(self.cfg, analytics=self.analytics, backend=self.global_backend)
         self.treasury_agent = TreasuryAgent(self.cfg, self.tier_mgr, backend=self.global_backend)
         self.risk_agent = RiskAgent(self.cfg, self.reservation, self.tier_mgr, backend=self.global_backend)
+        system_cfg = getattr(self.cfg, "system", None)
+        self.rejections = RejectTracker(
+            log_enabled=bool(getattr(system_cfg, "rejection_log_enabled", False)) if system_cfg else False,
+            stats_enabled=bool(getattr(system_cfg, "rejection_stats_enabled", True)) if system_cfg else True,
+        )
         self.exit_facade = ExitFacade(self.cfg, self.tier_mgr) if ExitFacade else None
         if self.exit_facade:
             self.exit_facade.attach_strategy(self)
@@ -818,6 +374,23 @@ class TaxBrainV29(IStrategy):
         self._candidate_pool_limit = int(
             max(1, getattr(self.cfg, "candidate_pool_max_per_side", 4))
         )
+        self.bridge = ZeroCopyBridge(self)
+        self.matrix_engine = MatrixEngine(self, self.hub, self.bridge)
+        self.engine = Engine(
+            cfg=self.cfg,
+            state=self.state,
+            eq_provider=self.eq_provider,
+            treasury_agent=self.treasury_agent,
+            reservation=self.reservation,
+            risk_agent=self.risk_agent,
+            analytics=self.analytics,
+            persist=self.persist,
+            tier_mgr=self.tier_mgr,
+            tf_sec=self._tf_sec,
+            is_backtest_like=self._is_backtest_like_runmode,
+            rejections=self.rejections,
+        )
+        self.cycle_agent.engine = self.engine
 
     def set_dataprovider(self, dp):
         """
@@ -904,17 +477,7 @@ class TaxBrainV29(IStrategy):
         return tuple(ordered)
 
     def _collect_enabled_signal_specs(self) -> list:
-        enabled = {
-            name
-            for name in (
-                getattr(getattr(self.cfg, "strategy", None), "enabled_signals", getattr(self.cfg, "enabled_signals", ())) or ()
-            )
-            if name
-        }
-        specs = list(builder.REGISTRY.all())
-        if not enabled:
-            return specs
-        return [spec for spec in specs if spec.name in enabled]
+        return self.hub.enabled_specs
 
     @staticmethod
     def _timeframe_suffix_token(timeframe: Optional[str]) -> str:
@@ -1222,6 +785,7 @@ class TaxBrainV29(IStrategy):
                 self._gc_informative_cache(whitelist)
             finally:
                 self._informative_gc_last_ts = now_ts
+        df = self.matrix_engine.inject_features(df, pair)
         return df
 
     def get_informative_row(self, pair: str, timeframe: str) -> Optional[pd.Series]:
@@ -1416,48 +980,6 @@ class TaxBrainV29(IStrategy):
             limited[direction] = ordered[: self._candidate_pool_limit]
         return limited
 
-    @staticmethod
-    def _dump_entry_payload(payload: dict) -> str:
-        try:
-            return json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
-        except Exception:
-            return json.dumps(payload)
-
-    def _apply_entry_signal(
-        self, df: pd.DataFrame, idx, candidates_by_dir: dict[str, list[schemas.Candidate]]
-    ) -> None:
-        has_long = bool(candidates_by_dir.get("long"))
-        has_short = bool(candidates_by_dir.get("short"))
-        df.at[idx, "enter_long"] = 1 if has_long else 0
-        df.at[idx, "enter_short"] = 1 if has_short else 0
-        if not has_long and not has_short:
-            df.at[idx, "enter_tag"] = None
-            return
-        payload = {
-            "version": 2,
-            "candidates": {
-                "long": [
-                    self._candidate_to_payload(cand) for cand in candidates_by_dir.get("long", [])
-                ],
-                "short": [
-                    self._candidate_to_payload(cand) for cand in candidates_by_dir.get("short", [])
-                ],
-            },
-        }
-        df.at[idx, "enter_tag"] = self._dump_entry_payload(payload)
-
-    def _apply_entry_payloads(
-        self, df: pd.DataFrame, idx, long_payloads: list[dict], short_payloads: list[dict]
-    ) -> None:
-        if not long_payloads and not short_payloads:
-            df.at[idx, "enter_tag"] = None
-            return
-        payload = {
-            "version": 2,
-            "candidates": {"long": long_payloads, "short": short_payloads},
-        }
-        df.at[idx, "enter_tag"] = self._dump_entry_payload(payload)
-
     def _select_topk_payloads(
         self, df: pd.DataFrame, matrices: list[dict], direction: str
     ) -> list[list[dict]]:
@@ -1556,163 +1078,32 @@ class TaxBrainV29(IStrategy):
 
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         pair = metadata["pair"]
-        system_cfg = getattr(self.cfg, "system", None)
+        if df is None or df.empty:
+            return df
 
-        df["enter_long"] = 0
-        df["enter_short"] = 0
-        df["enter_tag"] = None
-        runmode = getattr(self.dp, "runmode", None)
-        is_vector_pass = (RunMode and runmode in {
-                          RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.PLOT})
-        vectorized_bt = bool(getattr(system_cfg, "vectorized_entry_backtest", False)) if system_cfg else False
-        merge_info = bool(getattr(system_cfg, "merge_informative_into_base", False)) if system_cfg else False
-        # Guardrail: when informative timeframes are not merged into base, disable vectorized prefilter
-        # to keep backtest entry results aligned with the per-row informative path.
-        informative_requires_merge = bool(self._informative_timeframes and not merge_info)
-        use_vector_prefilter = bool(is_vector_pass and vectorized_bt and not informative_requires_merge)
-        aligned_info = {} if use_vector_prefilter else self._aligned_informative_for_df(pair, df)
-        pst_snapshot = self.state.get_pair_state(pair)
-        history_window = 200
-        close_series = df.get("close", pd.Series(dtype=float))
-        adx_series = df.get("adx", pd.Series(dtype=float))
+        if "enter_long" not in df.columns:
+            df["enter_long"] = 0
+        if "enter_short" not in df.columns:
+            df["enter_short"] = 0
+        if "enter_tag" not in df.columns:
+            df["enter_tag"] = None
 
-        if use_vector_prefilter:
-            timeframes = (None, *getattr(self, "_informative_timeframes", ()))
-            if self._derived_factor_columns_missing(df, timeframes):
-                vectorized.add_derived_factor_columns(df, timeframes)
-            df["LOSS_TIER_STATE"] = pst_snapshot.closs
-            vec_specs = [
-                spec for spec in self._enabled_signal_specs if vectorized.is_vectorizable(spec)
-            ]
-            fallback_specs = [
-                spec for spec in self._enabled_signal_specs if spec not in vec_specs
-            ]
-            matrices = vectorized.build_signal_matrices(df, self.cfg, vec_specs)
-            if is_vector_pass:
-                iter_policies = getattr(self.tier_mgr, "policies", None)
-                policies = list(iter_policies()) if callable(iter_policies) else []
-                if not policies:
-                    policies = [self.tier_mgr.get(0)]
-                for mat in matrices:
-                    allowed = None
-                    for policy in policies:
-                        if not policy.permits(
-                            kind=mat["name"], squad=mat["squad"], recipe=mat["recipe"]
-                        ):
-                            continue
-                        mask = (
-                            (mat["raw_score"] >= policy.min_raw_score)
-                            & (mat["rr_ratio"] >= policy.min_rr_ratio)
-                            & (mat["expected_edge"] >= policy.min_edge)
-                        )
-                        allowed = mask if allowed is None else (allowed | mask)
-                    if allowed is None:
-                        mat["valid_mask"] = pd.Series(False, index=df.index)
-                    else:
-                        mat["valid_mask"] = mat["valid_mask"] & allowed
-
-            payloads_long = self._select_topk_payloads(df, matrices, "long")
-            payloads_short = self._select_topk_payloads(df, matrices, "short")
-            idx_to_pos = {idx: pos for pos, idx in enumerate(df.index)}
-
-            if fallback_specs:
-                fallback_mask = vectorized.prefilter_signal_mask(
-                    df, self.cfg, specs=fallback_specs
-                )
-                for idx in df.index[fallback_mask]:
-                    row = df.loc[idx]
-                    raw_candidates = builder.build_candidates(
-                        row, self.cfg, specs=fallback_specs
-                    )
-                    if not raw_candidates:
-                        continue
-                    planned: list[schemas.Candidate] = []
-                    for candidate in raw_candidates:
-                        cand_with_plan = self._candidate_with_plan(
-                            pair, candidate, row, None
-                        )
-                        if cand_with_plan:
-                            planned.append(cand_with_plan)
-                    if not planned:
-                        continue
-                    if is_vector_pass:
-                        planned = [
-                            cand
-                            for cand in planned
-                            if self._candidate_allowed_any_tier(cand)
-                        ]
-                        if not planned:
-                            continue
-                    grouped = self._trim_candidate_pool(
-                        self._group_candidates_by_direction(planned)
-                    )
-                    pos = idx_to_pos.get(idx)
-                    if pos is None:
-                        continue
-                    if grouped.get("long"):
-                        extra = [self._candidate_to_payload(c) for c in grouped["long"]]
-                        combined = payloads_long[pos] + extra
-                        combined.sort(
-                            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
-                            reverse=True,
-                        )
-                        payloads_long[pos] = combined[: self._candidate_pool_limit]
-                    if grouped.get("short"):
-                        extra = [self._candidate_to_payload(c) for c in grouped["short"]]
-                        combined = payloads_short[pos] + extra
-                        combined.sort(
-                            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
-                            reverse=True,
-                        )
-                        payloads_short[pos] = combined[: self._candidate_pool_limit]
-            long_mask = pd.Series([bool(p) for p in payloads_long], index=df.index)
-            short_mask = pd.Series([bool(p) for p in payloads_short], index=df.index)
+        if "_signal_id_long" in df.columns:
+            long_mask = pd.to_numeric(df["_signal_id_long"], errors="coerce").fillna(0) > 0
             df.loc[long_mask, "enter_long"] = 1
+        if "_signal_id_short" in df.columns:
+            short_mask = pd.to_numeric(df["_signal_id_short"], errors="coerce").fillna(0) > 0
             df.loc[short_mask, "enter_short"] = 1
-            payload_positions = [
-                pos for pos, (longs, shorts) in enumerate(zip(payloads_long, payloads_short))
-                if longs or shorts
-            ]
-            for pos in payload_positions:
-                idx = df.index[pos]
-                self._apply_entry_payloads(df, idx, payloads_long[pos], payloads_short[pos])
-        elif is_vector_pass:
-            for idx in df.index:
-                df.at[idx, "LOSS_TIER_STATE"] = pst_snapshot.closs
-                row = df.loc[idx]
-                inf_rows = self._informative_rows_for_index(aligned_info, idx)
-                raw_candidates = builder.build_candidates(
-                    row,
-                    self.cfg,
-                    informative=inf_rows,
-                    specs=self._enabled_signal_specs,
-                )
-                if not raw_candidates:
-                    continue
-                planned: list[schemas.Candidate] = []
-                for candidate in raw_candidates:
-                    cand_with_plan = self._candidate_with_plan(pair, candidate, row, inf_rows)
-                    if cand_with_plan:
-                        planned.append(cand_with_plan)
-                if not planned:
-                    continue
-                if is_vector_pass:
-                    planned = [
-                        cand for cand in planned
-                        if self._candidate_allowed_any_tier(cand)
-                    ]
-                    if not planned:
-                        continue
-                grouped = self._trim_candidate_pool(self._group_candidates_by_direction(planned))
-                if not grouped.get("long") and not grouped.get("short"):
-                    continue
-                self._apply_entry_signal(df, idx, grouped)
 
-                # pst_snapshot = advance_state(pst_snapshot, sig, row)
+        if "_signal_id" in df.columns:
+            df["enter_tag"] = df["_signal_id"].apply(
+                lambda x: str(int(x)) if pd.notna(x) and x > 0 else None
+            )
 
         actual_state = self.state.get_pair_state(pair)
         last_idx = df.index[-1]
         df.at[last_idx, "LOSS_TIER_STATE"] = actual_state.closs
+        aligned_info = self.bridge.align_informative(df, pair)
         last_row = df.loc[last_idx]
         last_inf_rows = self._informative_rows_for_index(aligned_info, last_idx)
         last_candidate = self._eval_entry_on_row(
@@ -1722,11 +1113,6 @@ class TaxBrainV29(IStrategy):
         )
         if last_candidate:
             last_candidate = self._candidate_with_plan(pair, last_candidate, last_row, last_inf_rows)
-        if not is_vector_pass and last_candidate:
-            grouped = self._trim_candidate_pool(
-                self._group_candidates_by_direction([last_candidate])
-            )
-            self._apply_entry_signal(df, last_idx, grouped)
         self._update_last_signal(pair, last_candidate, last_row)
         try:
             if last_candidate and getattr(self, "global_backend", None):
@@ -1782,119 +1168,49 @@ class TaxBrainV29(IStrategy):
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                             time_in_force: str, current_time: datetime,
                             entry_tag: str | None, side: str, **kwargs) -> bool:
-        runmode_cfg = self.config.get("runmode", None)
-        runmode_token = str(
-            getattr(runmode_cfg, "value", runmode_cfg) or "").lower()
-        dp_runmode = getattr(self.dp, "runmode", None)
-        dp_mode_token = str(
-            getattr(dp_runmode, "value", dp_runmode) or "").lower()
-        backtest_modes = {"runmode.backtest",
-                          "backtest", "hyperopt", "runmode.hyperopt"}
-        is_backtest_mode = any(
-            token in backtest_modes for token in (runmode_token, dp_mode_token) if token)
+        self.engine.sync_to_time(current_time)
+
         pst = self.state.get_pair_state(pair)
         tier_pol = self.tier_mgr.get(pst.closs)
         try:
             self._tier_debug(
-                f"cte called pair={pair} runmode_token={runmode_token} dp_token={dp_mode_token} backtest={is_backtest_mode} closs={pst.closs}"
+                f"cte called pair={pair} closs={pst.closs}"
             )
         except Exception:
             pass
-        # 冷却期一律禁止开新仓
-        # Backtest cooldown advancement happens only via _backtest_catch_up.
-        # print(f"pst.closs_{pst.closs}")
-        if pst.cooldown_bars_left > 0:
+
+        if not self.engine.is_permitted(pair, {"side": side, "time": current_time}):
             return False
 
-        # 若当前 tier 配置了 single_position_only，则有仓位时禁止再开
-        if tier_pol and getattr(tier_pol, "single_position_only", False) and pst.active_trades:
-            return False
+        candidate_from_pool: Optional[schemas.Candidate] = self._select_candidate_from_pool(
+            pair, current_time, side, entry_tag
+        )
 
-        # 实盘 / 干跑：仍用“最新一拍”的 _last_signal 语义
-        requested_dir = "long" if side.lower() in ("buy", "long") else "short"
-        payload = None
-        candidate_from_tag: Optional[schemas.Candidate] = None
-        if entry_tag:
+        if not candidate_from_pool:
             try:
-                payload = json.loads(entry_tag)
+                if getattr(self, "rejections", None):
+                    context = {"side": side}
+                    if entry_tag:
+                        context["entry_tag"] = entry_tag
+                    self.rejections.record(
+                        RejectReason.NO_CANDIDATE,
+                        pair=pair,
+                        context=context,
+                    )
             except Exception:
-                payload = None
-            if isinstance(payload, dict):
-                candidate_from_tag = self._resolve_candidate_from_tag(pair, payload, side)
-            elif payload is not None:
-                normalized = self._normalize_entry_meta(payload, side)
-                if normalized and pair not in self._pending_entry_meta:
-                    self._pending_entry_meta[pair] = normalized
-
-        if is_backtest_mode:
-            system_cfg = getattr(self.cfg, "system", None)
-            if system_cfg and getattr(system_cfg, "cte_catch_up_in_backtest", False):
-                self._backtest_catch_up(current_time)
-            pst = self.state.get_pair_state(pair)
-            tier_pol = self.tier_mgr.get(pst.closs)
-            try:
-                self._tier_debug(
-                    f"cte precheck pair={pair} candidate_present={bool(candidate_from_tag)} entry_tag_present={bool(entry_tag)}"
-                )
-                if not candidate_from_tag:
-                    tier_name = getattr(tier_pol, "name", None) if tier_pol else None
-                    try:
-                        self.logger.info(
-                            f"[tier] bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} reason=no_candidate"
-                        )
-                    except Exception:
-                        pass
-                    self._tier_debug(
-                        f"bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} reason=no_candidate"
-                    )
-                    return False
-                if system_cfg and getattr(system_cfg, "cte_enforce_tier_in_backtest", False):
-                    if not self._candidate_allowed_by_policy(tier_pol, candidate_from_tag):
-                        tier_name = getattr(tier_pol, "name", None) if tier_pol else None
-                        try:
-                            self.logger.info(
-                                f"[tier] bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} reason=tier_policy"
-                            )
-                        except Exception:
-                            pass
-                        self._tier_debug(
-                            f"bt-entry-skip pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} reason=tier_policy"
-                        )
-                        return False
-                if pair not in self._pending_entry_meta:
-                    self._pending_entry_meta[pair] = self._candidate_meta_from_candidate(candidate_from_tag)
-                tier_name = getattr(tier_pol, "name", None) if tier_pol else None
-                try:
-                    self.logger.info(
-                        f"[tier] bt-entry pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} sl={getattr(candidate_from_tag, 'sl_pct', None)} tp={getattr(candidate_from_tag, 'tp_pct', None)}"
-                    )
-                except Exception:
-                    pass
-                self._tier_debug(
-                    f"bt-entry pair={pair} closs={pst.closs} tier={tier_name} recipe={getattr(candidate_from_tag, 'recipe', None)} kind={getattr(candidate_from_tag, 'kind', None)} sl={getattr(candidate_from_tag, 'sl_pct', None)} tp={getattr(candidate_from_tag, 'tp_pct', None)}"
-                )
-                return True
-            except Exception as exc:
-                self._tier_debug(f"bt-entry-error pair={pair} err={exc}")
-                return False
-
-        sig = self._last_signal.get(pair)
-        if not sig or sig.direction != requested_dir:
+                pass
             return False
-        self._pending_entry_meta[pair] = {
-            "sl_pct": sig.sl_pct,
-            "tp_pct": sig.tp_pct,
-            "dir": sig.direction,
-            "exit_profile": sig.exit_profile,
-            "recipe": sig.recipe,
-            "plan_timeframe": getattr(sig, "plan_timeframe", None),
-            "atr_pct": getattr(sig, "plan_atr_pct", None),
-        }
         return True
 
     @staticmethod
     def _dir_from_side(side: str) -> str:
         return "long" if str(side).lower() in ("buy", "long") else "short"
+
+    def _signal_id_for_candidate(self, candidate: schemas.Candidate) -> Optional[int]:
+        try:
+            return self.hub.signal_id_for(candidate.kind, candidate.timeframe, candidate.direction)
+        except Exception:
+            return None
 
     def _candidate_meta_from_candidate(self, candidate: schemas.Candidate) -> dict[str, Any]:
         return {
@@ -1962,48 +1278,78 @@ class TaxBrainV29(IStrategy):
             normalized['atr_pct'] = None
         return normalized
 
-    def _resolve_candidate_from_tag(
-        self, pair: str, payload: Dict[str, Any], side: str
-    ) -> Optional[schemas.Candidate]:
-        candidates_pool = payload.get("candidates")
-        if not isinstance(candidates_pool, dict):
-            return None
+    def _candidates_from_pool(
+        self, pair: str, current_time: datetime, side: str
+    ) -> list[schemas.Candidate]:
         direction = self._dir_from_side(side)
-        raw_list = candidates_pool.get(direction) or []
-        if not raw_list:
-            return None
+        raw_candidates = self.bridge.get_candidates(pair, current_time, side)
+        if not raw_candidates:
+            return []
         hydrated: list[schemas.Candidate] = []
-        for raw in raw_list:
-            try:
-                plan_atr_val = raw.get("plan_atr_pct")
-                plan_atr = None
-                if plan_atr_val not in (None, ""):
-                    plan_atr = float(plan_atr_val)
-                hydrated.append(
-                    schemas.Candidate(
-                        direction=direction,
-                        kind=str(raw["kind"]),
-                        raw_score=float(raw["raw_score"]),
-                        rr_ratio=float(raw["rr_ratio"]),
-                        win_prob=float(raw.get("win_prob", 0.0)),
-                        expected_edge=float(raw["expected_edge"]),
-                        squad=str(raw["squad"]),
-                        sl_pct=float(raw["sl_pct"]),
-                        tp_pct=float(raw["tp_pct"]),
-                        exit_profile=raw.get("exit_profile"),
-                        recipe=raw.get("recipe"),
-                        plan_timeframe=raw.get("plan_timeframe"),
-                        plan_atr_pct=plan_atr,
-                    )
-                )
-            except (KeyError, TypeError, ValueError):
+        for raw in raw_candidates:
+            meta = self.hub.meta_for_id(int(raw.get("signal_id", 0)))
+            if not meta:
                 continue
+            raw_score = float(raw.get("raw_score", float("nan")))
+            rr_ratio = float(raw.get("rr_ratio", float("nan")))
+            expected_edge = float(raw.get("expected_edge", float("nan")))
+            sl_pct = float(raw.get("sl_pct", float("nan")))
+            tp_pct = float(raw.get("tp_pct", float("nan")))
+            if not all(map(math.isfinite, (raw_score, rr_ratio, expected_edge, sl_pct, tp_pct))):
+                continue
+            hydrated.append(
+                schemas.Candidate(
+                    direction=direction,
+                    kind=meta.name,
+                    raw_score=raw_score,
+                    rr_ratio=rr_ratio,
+                    win_prob=expected_edge,
+                    expected_edge=expected_edge,
+                    squad=str(meta.squad),
+                    sl_pct=sl_pct,
+                    tp_pct=tp_pct,
+                    exit_profile=meta.exit_profile,
+                    recipe=meta.recipe,
+                    timeframe=meta.timeframe,
+                    plan_timeframe=meta.plan_timeframe,
+                    plan_atr_pct=float(raw.get("plan_atr_pct"))
+                    if raw.get("plan_atr_pct") is not None
+                    else None,
+                )
+            )
+        return hydrated
+
+    def _select_candidate_from_pool(
+        self, pair: str, current_time: datetime, side: str, entry_tag: Optional[str] = None
+    ) -> Optional[schemas.Candidate]:
+        hydrated = self._candidates_from_pool(pair, current_time, side)
         if not hydrated:
             return None
+        tag_id = None
+        if entry_tag:
+            try:
+                tag_id = int(entry_tag)
+            except Exception:
+                tag_id = None
+        if tag_id:
+            hydrated = [
+                cand for cand in hydrated if self._signal_id_for_candidate(cand) == tag_id
+            ]
+            if not hydrated:
+                return None
         pst = self.state.get_pair_state(pair)
         tier_pol = self.tier_mgr.get(pst.closs)
         best = self.tier_agent.filter_best(tier_pol, hydrated)
         if best is None:
+            try:
+                if getattr(self, "rejections", None):
+                    self.rejections.record(
+                        RejectReason.TIER_REJECT,
+                        pair=pair,
+                        context={"closs": pst.closs, "side": side},
+                    )
+            except Exception:
+                pass
             try:
                 tier_name = getattr(tier_pol, "name", None) if tier_pol else None
                 recipes = [getattr(h, "recipe", None) for h in hydrated]
@@ -2033,44 +1379,14 @@ class TaxBrainV29(IStrategy):
         return True
 
     def _extract_entry_meta(
-        self, pair: str, entry_tag: Optional[str], side: str
+        self, pair: str, entry_tag: Optional[str], side: str, current_time: Optional[datetime] = None
     ) -> Optional[Dict[str, Any]]:
-        meta: Optional[Dict[str, Any]] = None
-        parsed = None
-        if entry_tag:
-            try:
-                parsed = json.loads(entry_tag)
-            except Exception:
-                parsed = None
-            if isinstance(parsed, dict) and "candidates" in parsed:
-                selected = self._resolve_candidate_from_tag(pair, parsed, side)
-                if selected:
-                    meta = self._normalize_entry_meta(self._candidate_meta_from_candidate(selected), side)
-            elif parsed is not None:
-                meta = self._normalize_entry_meta(parsed, side)
-
-        if meta is None:
-            cached = self._pending_entry_meta.get(pair)
-            if cached is not None:
-                meta = self._normalize_entry_meta(cached, side)
-
-        if meta is None:
-            sig = self._last_signal.get(pair)
-            if sig:
-                meta = self._normalize_entry_meta(
-                    {
-                        "sl_pct": float(sig.sl_pct),
-                        "tp_pct": float(sig.tp_pct),
-                        "dir": sig.direction,
-                        "exit_profile": sig.exit_profile,
-                        "recipe": sig.recipe,
-                        "plan_timeframe": getattr(sig, "plan_timeframe", None),
-                        "atr_pct": getattr(sig, "plan_atr_pct", None),
-                        "score": getattr(sig, "raw_score", getattr(sig, "expected_edge", None)),
-                    },
-                    side,
-                )
-        return meta
+        if current_time is None:
+            return None
+        selected = self._select_candidate_from_pool(pair, current_time, side, entry_tag)
+        if not selected:
+            return None
+        return self._normalize_entry_meta(self._candidate_meta_from_candidate(selected), side)
 
     def _format_gatekeeper_detail(self, result: GateResult, score: float) -> str:
         thresholds = result.thresholds or {}
@@ -2202,9 +1518,9 @@ class TaxBrainV29(IStrategy):
         # 1. 先处理可能遗漏的退出（保持原样）
         # self._reconcile_missed_exits(pair)
 
-        # ==================== 【修复开始】手动喂信号 ====================
-        # 解析 Freqtrade 传入的 entry_tag (JSON 字符串)，必须在 _backtest_catch_up 之前
-        meta = self._extract_entry_meta(pair, entry_tag, side)
+        # ==================== 手动喂信号 ====================
+        # 从特征池读取候选元数据，必须在引擎 step 之前
+        meta = self._extract_entry_meta(pair, entry_tag, side, current_time=current_time)
 
         # 仅在回测/Hyperopt 模式下，且成功解析出 meta 时执行状态注入
         if self._is_backtest_like_runmode() and meta:
@@ -2230,14 +1546,38 @@ class TaxBrainV29(IStrategy):
 
         # 2. 时光机倒带：补齐债务衰减、冷却，并重新运行 Treasury.plan()
         # 此时 Treasury 已经能看到上面注入的 last_score    
-        self._backtest_catch_up(current_time)
+        self.engine.sync_to_time(current_time)
+
+        if not self.engine.is_permitted(pair, {"side": side, "time": current_time}):
+            return 0.0
 
         # 3. 后续标准流程（保持原样）
         if not meta:
+            try:
+                if getattr(self, "rejections", None):
+                    context = {"side": side}
+                    if entry_tag:
+                        context["entry_tag"] = entry_tag
+                    self.rejections.record(
+                        RejectReason.NO_CANDIDATE,
+                        pair=pair,
+                        context=context,
+                    )
+            except Exception:
+                pass
             return 0.0
 
         gate_result = self._check_gatekeeping(pair, meta)
         if not gate_result.allowed:
+            try:
+                if getattr(self, "rejections", None):
+                    self.rejections.record(
+                        RejectReason.GATEKEEP,
+                        pair=pair,
+                        context={"side": side, "reason": gate_result.reason},
+                    )
+            except Exception:
+                pass
             return 0.0
 
         sl = float(meta.get("sl_pct", 0.0))
@@ -2264,6 +1604,15 @@ class TaxBrainV29(IStrategy):
             score=score_val,
         )
         if stake <= 0 or risk <= 0:
+            try:
+                if getattr(self, "rejections", None):
+                    self.rejections.record(
+                        RejectReason.SIZER,
+                        pair=pair,
+                        context={"side": side},
+                    )
+            except Exception:
+                pass
             return 0.0
 
         reserved = self._reserve_risk_resources(
@@ -2278,6 +1627,15 @@ class TaxBrainV29(IStrategy):
             meta=meta,
         )
         if not reserved:
+            try:
+                if getattr(self, "rejections", None):
+                    self.rejections.record(
+                        RejectReason.RESERVATION,
+                        pair=pair,
+                        context={"side": side},
+                    )
+            except Exception:
+                pass
             return 0.0
         return float(stake)
 
@@ -2323,7 +1681,7 @@ class TaxBrainV29(IStrategy):
                 return
 
             if self._is_backtest_like_runmode() and current_time:
-                self._backtest_catch_up(current_time)
+                self.engine.sync_to_time(current_time)
 
             profit_abs = getattr(trade, "close_profit_abs", 0.0)
             if profit_abs is None or profit_abs == 0.0:
@@ -2767,105 +2125,6 @@ class TaxBrainV29(IStrategy):
                     return "atr_entry_tp"
 
         return None
-
-    def _backtest_catch_up(self, current_time: datetime) -> None:
-        """
-
-        在回测模式下模拟时间推进，驱动债务衰减和财政周期更新。
-
-        修复了 populate_indicators 导致的“未来时间”阻断逻辑运行的问题。
-
-        """
-        if current_time is None:
-            return
-        if not self._is_backtest_like_runmode():
-            return
-
-        # 获取当前回测时间戳
-        now_ts = current_time.timestamp()
-        last_ts = self.state.last_finalized_bar_ts
-
-        # ==================== [核心修复] 时间重置逻辑 ====================
-        # 1. last_ts 为 None: 说明刚启动，从未记录过。
-        # 2. last_ts > now_ts: 说明 last_ts 被 populate_indicators 设为了数据集的末尾时间(未来)，
-        #    而当前回测指针(now_ts)刚从过去开始跑。此时产生了时间倒挂。
-        # 3. 时间差距过大: 如果上次时间是 1970 (0.0)，也需要重置。
-        if last_ts is None or last_ts > now_ts or last_ts == 0.0:
-            # 将上次结算时间重置为“当前时间 - 1个周期”，确保本次能触发逻辑
-            self.state.last_finalized_bar_ts = now_ts - self._tf_sec
-            last_ts = self.state.last_finalized_bar_ts
-            
-            # 可选：如果是刚开始回测，初始化财政周期的起始时间
-            if self.state.treasury.cycle_start_tick == 0:
-                self.state.treasury.cycle_start_tick = self.state.bar_tick
-                self.state.treasury.cycle_start_equity = self.eq_provider.get_equity()
-
-        # ==================== 标准步进逻辑 ====================
-        
-        delta_seconds = now_ts - last_ts
-        
-        # 只有当时间流逝超过设定的 timeframe (例如5分钟) 才推进状态
-        if delta_seconds < self._tf_sec:
-            return
-
-        # 计算过去了多少个 K 线周期
-        bars_passed = int(delta_seconds // self._tf_sec)
-        
-        # 更新 Bar 计数
-        self.state.bar_tick += bars_passed
-        
-        # [重要] 推进 last_finalized_bar_ts，保持步调一致
-        # 不直接设为 now_ts 是为了避免 K 线时间对齐误差累积
-        self.state.last_finalized_bar_ts += (bars_passed * self._tf_sec)
-
-        # --- 以下为业务逻辑 (债务衰减 / 冷却 / 财政计划) ---
-
-        decay_rate = getattr(getattr(self.cfg, "risk", None), "pain_decay_per_bar", 0.999)
-        
-        # 1. 中央债务池自然衰减
-        if self.state.debt_pool > 0:
-            self.state.debt_pool *= (decay_rate ** bars_passed)
-            # 防止无限趋近 0 但不归零
-            if self.state.debt_pool < 1.0: 
-                self.state.debt_pool = 0.0
-
-        # 2. 交易对冷却时间减少
-        for pst in self.state.per_pair.values():
-            if pst.cooldown_bars_left > 0:
-                pst.cooldown_bars_left = max(0, pst.cooldown_bars_left - bars_passed)
-
-        # 3. 财政周期 (Treasury Cycle) 检查
-        cycle_len = int(self.cfg.cycle_len_bars)
-        start_tick = self.state.treasury.cycle_start_tick
-        
-        if (self.state.bar_tick - start_tick) >= cycle_len:
-            equity = self.eq_provider.get_equity()
-            
-            # 如果配置了“盈利周期清空债务”，执行清债
-            if (equity - self.state.treasury.cycle_start_equity) >= 0 and self.cfg.risk.clear_debt_on_profitable_cycle:
-                self.state.debt_pool = 0.0
-                for pst in self.state.per_pair.values():
-                    pst.local_loss = 0.0
-                    pst.closs = 0
-            
-            # 重置周期起始点
-            self.state.treasury.cycle_start_tick = self.state.bar_tick
-            self.state.treasury.cycle_start_equity = equity
-
-        # 4. 重新计算财政拨款 (Re-Plan)'
-        # 注意：这里会利用修正后的债务池数据和权益数据
-        try:
-            snapshot = self.cycle_agent._build_snapshot()
-            plan = self.treasury_agent.plan(snapshot, self.eq_provider.get_equity())
-            self.state.treasury.k_long = plan.k_long
-            self.state.treasury.k_short = plan.k_short
-            self.state.treasury.theta = plan.theta
-            self.state.treasury.final_r = plan.final_r
-            self.state.treasury.available = plan.available
-            self.state.treasury.bias = plan.bias
-            self.state.treasury.volatility = plan.volatility
-        except Exception:
-            pass
 
     def _log_full_exit_state(
         self,

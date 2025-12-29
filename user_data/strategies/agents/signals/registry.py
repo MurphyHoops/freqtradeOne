@@ -17,7 +17,7 @@ class SignalRegistry:
     """维护信号规格的简单容器。"""
 
     def __init__(self) -> None:
-        self._specs: Dict[Tuple[str, Optional[str]], SignalSpec] = {}
+        self._specs: Dict[Tuple[str, Optional[str], str], SignalSpec] = {}
 
     def register(self, spec: SignalSpec) -> None:
         """注册新的信号规格。
@@ -28,9 +28,11 @@ class SignalRegistry:
             ValueError: 当重复注册相同名称的信号时抛出。
         """
 
-        key = (spec.name, spec.timeframe)
+        key = (spec.name, spec.timeframe, spec.direction)
         if key in self._specs:
-            raise ValueError(f"Signal already registered: {spec.name} @ {spec.timeframe or 'primary'}")
+            raise ValueError(
+                f"Signal already registered: {spec.name} @ {spec.timeframe or 'primary'} ({spec.direction})"
+            )
         self._specs[key] = spec
 
     def all(self) -> List[SignalSpec]:

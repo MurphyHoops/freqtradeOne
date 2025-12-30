@@ -42,6 +42,7 @@ class SignalHub:
     def discover(self) -> None:
         system_cfg = getattr(self._cfg, "system", None)
         allow_reload = bool(getattr(system_cfg, "plugin_allow_reload", False)) if system_cfg else False
+        auto_discover = bool(getattr(system_cfg, "auto_discover_plugins", True)) if system_cfg else True
         if self._discovered and not allow_reload:
             return
         if allow_reload:
@@ -66,9 +67,32 @@ class SignalHub:
             for signal_name in sorted(enabled_signals):
                 module_name = SIGNAL_PLUGIN_MAP.get(signal_name)
                 if not module_name:
-                    logger.warning("Signal plugin not found for: %s", signal_name)
-                    if strict:
-                        raise ValueError(f"Signal plugin not found for: {signal_name}")
+                    fallback_path = plugin_root / "signals" / f"{signal_name}.py"
+                    if fallback_path.exists():
+                        abs_path = str(fallback_path.resolve())
+                        if abs_path in _LOADED_PLUGINS:
+                            continue
+                        module_name = f"user_data.strategies.plugins.signals.{signal_name}"
+                        spec = importlib.util.spec_from_file_location(module_name, str(fallback_path))
+                        if spec and spec.loader:
+                            module = importlib.util.module_from_spec(spec)
+                            try:
+                                spec.loader.exec_module(module)  # type: ignore[call-arg]
+                                _LOADED_PLUGINS.add(abs_path)
+                            except Exception as exc:
+                                if isinstance(exc, ValueError) and "Signal already registered" in str(exc):
+                                    raise
+                                logger.warning("Signal plugin load failed: %s (%s)", fallback_path, exc, exc_info=exc)
+                                if strict:
+                                    raise
+                        else:
+                            logger.warning("Signal plugin load failed (no loader): %s", fallback_path)
+                            if strict:
+                                raise ValueError(f"Signal plugin not found for: {signal_name}")
+                    else:
+                        logger.warning("Signal plugin not found for: %s", signal_name)
+                        if strict:
+                            raise ValueError(f"Signal plugin not found for: {signal_name}")
                     continue
                 module_key = f"module:{module_name}"
                 if module_key in _LOADED_PLUGINS:
@@ -82,9 +106,11 @@ class SignalHub:
                     logger.warning("Signal plugin load failed: %s (%s)", module_name, exc, exc_info=exc)
                     if strict:
                         raise
-        if plugin_root.exists():
+        if plugin_root.exists() and auto_discover:
             for path in sorted(plugin_root.rglob("*.py")):
                 if path.name.startswith("__"):
+                    continue
+                if "recipes" in path.parts:
                     continue
                 if enabled_signals and "signals" in path.parts:
                     continue

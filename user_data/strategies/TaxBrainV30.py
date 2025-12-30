@@ -105,8 +105,17 @@ class TaxBrainV30(IStrategy):
         self.cfg = apply_overrides(base_cfg, config.get("strategy_params", {}))
         self.timeframe = self.cfg.system.timeframe
         self.startup_candle_count = self.cfg.system.startup_candle_count
-        self.stoploss = self.cfg.trading.sizing.enforce_leverage * -0.2
-        self.minimal_roi = {"0": 0.50 * self.cfg.trading.sizing.enforce_leverage}
+        stoploss_val = getattr(self.cfg, "stoploss", None)
+        try:
+            stoploss_val = float(stoploss_val)
+        except (TypeError, ValueError):
+            stoploss_val = float(self.cfg.trading.sizing.enforce_leverage) * -0.2
+        self.stoploss = stoploss_val
+        minimal_roi = getattr(self.cfg, "minimal_roi", None)
+        if isinstance(minimal_roi, dict):
+            self.minimal_roi = dict(minimal_roi)
+        else:
+            self.minimal_roi = {"0": 0.50 * float(self.cfg.trading.sizing.enforce_leverage)}
         try:
             self.__class__.timeframe = self.cfg.system.timeframe
             self.__class__.startup_candle_count = self.cfg.system.startup_candle_count
@@ -296,8 +305,9 @@ class TaxBrainV30(IStrategy):
         sensor_enabled = bool(getattr(system_cfg, "market_sensor_enabled", True)) if system_cfg else True
         sensor_backtest = bool(getattr(system_cfg, "market_sensor_in_backtest", False)) if system_cfg else False
         if sensor_enabled and (not self._is_backtest_like_runmode() or sensor_backtest):
-            sensor_pairs = [("BTC/USDT", self.timeframe), ("ETH/USDT", self.timeframe)]
-            for sp in sensor_pairs:
+            sensor_pairs = getattr(system_cfg, "sensor_pairs", ("BTC/USDT", "ETH/USDT")) if system_cfg else ()
+            for pair in sensor_pairs:
+                sp = (pair, self.timeframe)
                 if sp not in seen:
                     seen.add(sp)
                     pairs.append(sp)

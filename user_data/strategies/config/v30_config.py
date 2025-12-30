@@ -9,7 +9,11 @@ via configuration. Besides the defaults, :func:`apply_overrides` helps align a
 from __future__ import annotations
 
 from dataclasses import InitVar, dataclass, field, fields, replace, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
+import importlib.util
+import logging
+import sys
 
 from ..agents.exits.profiles import ExitProfile
 
@@ -133,6 +137,8 @@ class SystemConfig:
     debug_prints: bool = False  # Enable verbose prints in strategy hooks.
     plugin_load_strict: bool = False  # Raise if any plugin fails to load.
     plugin_allow_reload: bool = False  # Allow dev-only plugin reload (clears registry before load).
+    auto_discover_plugins: bool = True  # Scan plugin folders for recipes/aux modules.
+    sensor_pairs: Tuple[str, ...] = ("BTC/USDT", "ETH/USDT")  # Pairs to fetch for market sensor.
     rejection_log_enabled: bool = False  # Emit structured rejection logs.
     rejection_stats_enabled: bool = True  # Track rejection counters in memory.
 
@@ -210,6 +216,7 @@ def _coerce_exit_profiles(raw: Mapping[str, Any] | Dict[str, ExitProfile]) -> Di
 class StrategyConfig:
     """Strategy-level components such as signals, tiers and exits."""
 
+    enabled_recipes: Tuple[str, ...] = field(default_factory=tuple)  # Optional recipe allowlist; derives enabled_signals when set.
     enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)  # Which signals are active; drop entries to disable.
     exit_profile_version: str = DEFAULT_PROFILE_VERSION  # Semantic version tag for exit profiles; metadata only when using inline defaults.
     exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)  # Exit profile definitions; can be fully overridden in config.
@@ -364,6 +371,82 @@ DEFAULT_TIER_ROUTING_MAP: Dict[int, str] = {
     6: "T3p_ICU",
 }
 
+
+def _coerce_strategy_spec(payload: Any, name: str) -> StrategySpec:
+    if isinstance(payload, StrategySpec):
+        if payload.name != name:
+            return replace(payload, name=name)
+        return payload
+    if isinstance(payload, Mapping):
+        spec_fields = {f.name for f in fields(StrategySpec)}
+        data = {k: v for k, v in payload.items() if k in spec_fields}
+        data["name"] = name
+        return StrategySpec(**data)
+    raise TypeError(f"Invalid STRATEGY_SPEC payload for recipe '{name}'")
+
+
+def _is_default_strategies_map(strategies: Mapping[str, StrategySpec]) -> bool:
+    if set(strategies.keys()) != set(DEFAULT_STRATEGIES.keys()):
+        return False
+    for name, spec in strategies.items():
+        if not isinstance(spec, StrategySpec):
+            return False
+        if spec != DEFAULT_STRATEGIES.get(name):
+            return False
+    return True
+
+
+def _discover_recipe_plugins(system_cfg: SystemConfig) -> Dict[str, StrategySpec]:
+    if not system_cfg.auto_discover_plugins:
+        return {}
+    plugin_root = Path(__file__).resolve().parents[1] / "plugins" / "recipes"
+    if not plugin_root.exists():
+        return {}
+    logger = logging.getLogger(__name__)
+    strict = bool(getattr(system_cfg, "plugin_load_strict", False))
+    out: Dict[str, StrategySpec] = {}
+    for path in sorted(plugin_root.glob("*.py")):
+        if path.name.startswith("__"):
+            continue
+        recipe_name = path.stem
+        module_name = f"user_data.strategies.plugins.recipes.{recipe_name}"
+        module = sys.modules.get(module_name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(module_name, str(path))
+            if not spec or not spec.loader:
+                msg = f"Recipe plugin load failed (no loader): {path}"
+                logger.warning(msg)
+                if strict:
+                    raise ValueError(msg)
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)  # type: ignore[call-arg]
+            except Exception as exc:
+                sys.modules.pop(module_name, None)
+                logger.warning("Recipe plugin load failed: %s (%s)", path, exc, exc_info=exc)
+                if strict:
+                    raise
+                continue
+        payload = getattr(module, "STRATEGY_SPEC", None)
+        if payload is None:
+            msg = f"Recipe plugin missing STRATEGY_SPEC: {path}"
+            logger.warning(msg)
+            if strict:
+                raise ValueError(msg)
+            sys.modules.pop(module_name, None)
+            continue
+        try:
+            out[recipe_name] = _coerce_strategy_spec(payload, recipe_name)
+        except Exception as exc:
+            logger.warning("Recipe plugin invalid STRATEGY_SPEC: %s (%s)", path, exc, exc_info=exc)
+            if strict:
+                raise
+            sys.modules.pop(module_name, None)
+            continue
+    return out
+
 @dataclass
 class V30Config:
     """V30 strategy parameters (signals/strategy/tier binding).
@@ -379,6 +462,9 @@ class V30Config:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)  # Signal/tier/exit wiring.
     informative_timeframes: tuple[str, ...] = ()  # Extra informative timeframes; add e.g. ("1h","4h") to enable multi-tf signals.
     sensor: SensorConfig = field(default_factory=SensorConfig)
+
+    stoploss: Optional[float] = None  # Default stoploss (price space), derived if omitted.
+    minimal_roi: Optional[Dict[str, float]] = None  # Default minimal ROI mapping, derived if omitted.
 
     cycle_len_bars: int = 288  # Bars per cycle for debt reset checks; lower = more frequent cycle accounting.
     # Early lock / breakeven guards
@@ -436,6 +522,17 @@ class V30Config:
         if not strategy_profiles:
             strategy_profiles = default_profiles_factory()
         strategies = dict(getattr(strat_cfg, "strategies", {}) or {})
+        plugin_strategies = _discover_recipe_plugins(self.system) if self.system else {}
+        base_strategies = dict(DEFAULT_STRATEGIES)
+        if plugin_strategies:
+            base_strategies.update(plugin_strategies)
+        if strategies:
+            if _is_default_strategies_map(strategies):
+                strategies = dict(base_strategies)
+            else:
+                strategies = dict(strategies)
+        else:
+            strategies = dict(base_strategies)
         tiers = dict(getattr(strat_cfg, "tiers", {}) or {})
         tier_fields = {f.name for f in fields(TierSpec)}
         normalized_tiers: dict[str, TierSpec] = {}
@@ -482,13 +579,45 @@ class V30Config:
                     f"Tier '{tier_name}' references unknown exit profile '{spec.default_exit_profile}'"
                 )
 
+        enabled_recipes = tuple(name for name in getattr(strat_cfg, "enabled_recipes", ()) or () if name)
+        enabled_signals = tuple(getattr(strat_cfg, "enabled_signals", ()) or ())
+        if enabled_recipes:
+            missing_recipes = [name for name in enabled_recipes if name not in strategies]
+            if missing_recipes:
+                raise ValueError(f"enabled_recipes references unknown recipes: {missing_recipes}")
+            seen_entries: list[str] = []
+            for recipe_name in enabled_recipes:
+                for entry in strategies[recipe_name].entries:
+                    if entry and entry not in seen_entries:
+                        seen_entries.append(entry)
+            enabled_signals = tuple(seen_entries)
+
         self.strategy = replace(
             strat_cfg,
             exit_profiles=strategy_profiles,
             strategies=strategies,
             tiers=tiers,
             tier_routing=tier_routing,
+            enabled_recipes=enabled_recipes,
+            enabled_signals=enabled_signals,
         )
+
+        if getattr(self, "stoploss", None) is None:
+            self.stoploss = float(self.trading.sizing.enforce_leverage) * -0.2
+        else:
+            self.stoploss = float(self.stoploss)
+        if getattr(self, "minimal_roi", None) is None:
+            self.minimal_roi = {"0": 0.50 * float(self.trading.sizing.enforce_leverage)}
+        else:
+            roi = getattr(self, "minimal_roi") or {}
+            self.minimal_roi = dict(roi)
+
+        for tier_name, spec in tiers.items():
+            for recipe_name in spec.allowed_recipes:
+                if recipe_name not in strategies:
+                    raise ValueError(
+                        f"Tier '{tier_name}' references unknown recipe '{recipe_name}'"
+                    )
 
     @property
     def strategy_recipes(self) -> Tuple[StrategySpec, ...]:
@@ -649,6 +778,10 @@ def apply_overrides(cfg: V30Config, strategy_params: Optional[Mapping[str, Any]]
             continue
         if hasattr(cfg, key):
             setattr(cfg, key, value)
+    if "stoploss" not in normalized:
+        cfg.stoploss = float(cfg.trading.sizing.enforce_leverage) * -0.2
+    if "minimal_roi" not in normalized:
+        cfg.minimal_roi = {"0": 0.50 * float(cfg.trading.sizing.enforce_leverage)}
     return cfg
 
 

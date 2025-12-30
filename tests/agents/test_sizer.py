@@ -28,7 +28,7 @@ class DummyState:
         self._pair_state = pair_state
         self.pair_risk_open = {"TEST/USDT": 0.0}
         self.pair_stake_open = {"TEST/USDT": 0.0}
-        self.treasury = types.SimpleNamespace(fast_alloc_risk={}, slow_alloc_risk={})
+        self.treasury = types.SimpleNamespace(k_long=0.0, k_short=0.0)
 
     def get_pair_state(self, pair: str) -> DummyPairState:
         return self._pair_state
@@ -129,11 +129,10 @@ def test_sizer_suppresses_baseline_when_stressed():
     tier_mgr = DummyTierMgr(policy)
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
 
-    stake, risk, bucket = sizer.compute("TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000)
+    stake, risk, _ = sizer.compute("TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000)
 
     assert stake == pytest.approx(0.0)
     assert risk == pytest.approx(0.0)
-    assert bucket == "slow"
 
 
 def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
@@ -164,11 +163,10 @@ def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
     sizer.set_dataprovider(DummyDataProvider(6.0))
 
-    stake, risk, bucket = sizer.compute(
+    stake, risk, _ = sizer.compute(
         "TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000
     )
 
-    assert bucket == "slow"
     assert stake == pytest.approx(6.0)
     assert risk == pytest.approx(0.12)
 
@@ -202,10 +200,9 @@ def test_sizer_target_recovery_uses_local_loss():
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
     sizer.set_dataprovider(DummyDataProvider(50.0))
 
-    stake, risk, bucket = sizer.compute("TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000)
+    stake, risk, _ = sizer.compute("TEST/USDT", sl_pct=0.02, tp_pct=0.04, direction="long", min_stake=None, max_stake=1_000_000)
 
     expected_nominal = 50.0 + (pair_state.local_loss * policy.recovery_factor) / 0.02
-    assert bucket == "slow"
     assert stake == pytest.approx(expected_nominal, rel=1e-3)
     assert risk == pytest.approx(expected_nominal * 0.02, rel=1e-3)
 
@@ -238,7 +235,7 @@ def test_sizer_respects_caps_and_minmax():
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
     sizer.set_dataprovider(DummyDataProvider(50.0))
 
-    stake, risk, bucket = sizer.compute(
+    stake, risk, _ = sizer.compute(
         "TEST/USDT",
         sl_pct=0.05,
         tp_pct=0.10,
@@ -247,7 +244,6 @@ def test_sizer_respects_caps_and_minmax():
         max_stake=200.0,
     )
 
-    assert bucket == "slow"
     assert stake == pytest.approx(800.0)
     assert risk == pytest.approx(40.0)
 
@@ -277,7 +273,7 @@ def test_sizer_caps_with_proposed_stake():
     tier_mgr = DummyTierMgr(policy)
     sizer = SizerAgent(state, reservation, equity, cfg, tier_mgr)
 
-    stake, risk, bucket = sizer.compute(
+    stake, risk, _ = sizer.compute(
         "TEST/USDT",
         sl_pct=0.02,
         tp_pct=0.04,
@@ -287,6 +283,5 @@ def test_sizer_caps_with_proposed_stake():
         proposed_stake=100.0,
     )
 
-    assert bucket == "slow"
     assert stake == pytest.approx(100.0)
     assert risk == pytest.approx(2.0)

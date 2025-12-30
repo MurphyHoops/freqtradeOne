@@ -137,7 +137,7 @@ def _normalize_required(required: Optional[Iterable[str]]) -> Set[str]:
         if not item:
             continue
         normalized.add(str(item).strip().upper())
-    return normalized or set(DEFAULT_INDICATORS)
+    return normalized
 
 
 def _duplicate_ohlc_columns(df: pd.DataFrame, suffix: str) -> None:

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 from user_data.strategies.agents.signals import builder as req
+from user_data.strategies.agents.signals.registry import FACTOR_REGISTRY
 from user_data.strategies.agents.signals.schemas import Condition, SignalSpec
 from user_data.strategies.config.v30_config import V30Config
+from user_data.strategies.core import strategy_helpers
 
 
 def _spec(
@@ -66,3 +69,43 @@ def test_collect_factor_requirements_respects_enabled_signals(monkeypatch):
 
     assert None in factor_map and "RSI" in factor_map[None]
     assert "4h" not in factor_map  # skip is not enabled
+
+
+def test_collect_indicator_requirements_from_derived_factor(monkeypatch):
+    FACTOR_REGISTRY.reset()
+    try:
+        FACTOR_REGISTRY.register_derived(
+            "DERIVED_TEST",
+            fn=lambda *_: 0.0,
+            indicators=("RSI",),
+        )
+        spec = _spec(
+            "demo",
+            [Condition("DERIVED_TEST", ">", 0.0)],
+            timeframe="1h",
+        )
+        monkeypatch.setattr(req.REGISTRY, "all", lambda: [spec])
+
+        indicator_map = req.collect_indicator_requirements()
+        assert "1h" in indicator_map and "RSI" in indicator_map["1h"]
+    finally:
+        FACTOR_REGISTRY.reset()
+
+
+def test_informative_required_columns_include_derived_required_factors():
+    FACTOR_REGISTRY.reset()
+    try:
+        FACTOR_REGISTRY.register_derived(
+            "DERIVED_REQ",
+            fn=lambda *_: 0.0,
+            required_factors=("EMA_FAST", "EMA_SLOW"),
+        )
+        strategy = SimpleNamespace(
+            _factor_requirements={"1h": {"DERIVED_REQ"}},
+            _indicator_requirements={"1h": set()},
+        )
+        cols = strategy_helpers.informative_required_columns(strategy, "1h")
+        assert "ema_fast" in cols
+        assert "ema_slow" in cols
+    finally:
+        FACTOR_REGISTRY.reset()

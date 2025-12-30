@@ -231,12 +231,12 @@ class GlobalState:
             return
 
         loss = abs(profit_abs)
+        if loss > 0:
+            self.debt_pool += loss
+            if self.backend:
+                self.backend.atomic_update_debt(loss)
 
         if prev_closs >= max_closs:
-            self.debt_pool += loss + pst.local_loss
-            if self.backend and loss > 0:
-                self.backend.atomic_update_debt(loss + pst.local_loss)
-
             pst.local_loss = 0.0
             pst.closs = 0
 

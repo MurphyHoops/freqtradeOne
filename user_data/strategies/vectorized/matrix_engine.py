@@ -12,8 +12,7 @@ try:
 except Exception:  # pragma: no cover
     RunMode = None
 
-from ..agents.signals import builder, indicators, schemas, vectorized
-from ..core import math_ops
+from ..agents.signals import builder, factors, indicators, schemas, vectorized
 from ..core import strategy_helpers as helpers
 from .pool_buffer import PoolBuffer, PoolSchema
 
@@ -35,16 +34,14 @@ class MatrixEngine:
             df = indicators.compute_indicators(df, self._strategy.cfg, required=base_needs)
         except Exception:
             pass
-        if "close" in df.columns:
-            try:
-                df["hurst"] = math_ops.calculate_hurst_vec(df["close"])
-            except Exception:
-                df["hurst"] = np.nan
-        if "adx" in df.columns:
-            try:
-                df["adx_zsig"] = math_ops.calculate_adx_zsig_vec(df["adx"])
-            except Exception:
-                df["adx_zsig"] = np.nan
+        factors.ensure_regime_columns(df, force=True)
+
+        factor_reqs = getattr(self._strategy, "_factor_requirements", {}) or {}
+        derived_required: Dict[Optional[str], set[str]] = {}
+        for tf, reqs in factor_reqs.items():
+            derived = {name for name in reqs if factors.is_derived_factor(name)}
+            if derived:
+                derived_required[tf] = derived
 
         runmode = getattr(getattr(self._strategy, "dp", None), "runmode", None)
         is_vector_pass = False
@@ -78,8 +75,7 @@ class MatrixEngine:
             try:
                 helpers.merge_informative_columns_into_base(self._strategy, self._bridge, df, pair)
                 timeframes = (None, *getattr(self._strategy, "_informative_timeframes", ()))
-                if self._strategy._derived_factor_columns_missing(df, timeframes):
-                    vectorized.add_derived_factor_columns(df, timeframes)
+                vectorized.add_derived_factor_columns(df, timeframes, required=derived_required)
             except Exception:
                 pass
         informative_rows: Dict[str, pd.Series] = {}
@@ -139,8 +135,7 @@ class MatrixEngine:
 
         if use_vector_prefilter:
             timeframes = (None, *getattr(self._strategy, "_informative_timeframes", ()))
-            if self._strategy._derived_factor_columns_missing(df, timeframes):
-                vectorized.add_derived_factor_columns(df, timeframes)
+            vectorized.add_derived_factor_columns(df, timeframes, required=derived_required)
             df["LOSS_TIER_STATE"] = pst_snapshot.closs
 
             vec_specs = [

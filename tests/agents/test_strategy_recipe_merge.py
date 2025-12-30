@@ -64,3 +64,66 @@ def test_enabled_recipes_requires_known_recipe():
                 "enabled_recipes": ("MissingRecipe",),
             }
         )
+
+
+def test_tier_routing_requires_known_tier():
+    spec = StrategySpec(
+        name="CustomOnly",
+        entries=("custom_signal",),
+        exit_profile="ATRtrail_v1",
+    )
+    tier = TierSpec(
+        name="T0",
+        allowed_recipes=("CustomOnly",),
+        default_exit_profile="ATRtrail_v1",
+    )
+    with pytest.raises(ValueError):
+        V30Config(
+            strategy={
+                "strategies": {"CustomOnly": spec},
+                "tiers": {"T0": tier},
+                "tier_routing": {"loss_tier_map": {0: "MissingTier"}},
+            }
+        )
+
+
+def test_tier_routing_requires_default_exit_profile():
+    spec = StrategySpec(
+        name="CustomOnly",
+        entries=("custom_signal",),
+        exit_profile="ATRtrail_v1",
+    )
+    tier = TierSpec(
+        name="T0",
+        allowed_recipes=("CustomOnly",),
+        default_exit_profile=None,
+    )
+    with pytest.raises(ValueError):
+        V30Config(
+            strategy={
+                "strategies": {"CustomOnly": spec},
+                "tiers": {"T0": tier},
+                "tier_routing": {"loss_tier_map": {0: "T0"}},
+            }
+        )
+
+
+def test_tier_requires_known_recipe():
+    spec = StrategySpec(
+        name="CustomOnly",
+        entries=("custom_signal",),
+        exit_profile="ATRtrail_v1",
+    )
+    tier = TierSpec(
+        name="T0",
+        allowed_recipes=("MissingRecipe",),
+        default_exit_profile="ATRtrail_v1",
+    )
+    with pytest.raises(ValueError):
+        V30Config(
+            strategy={
+                "strategies": {"CustomOnly": spec},
+                "tiers": {"T0": tier},
+                "tier_routing": {"loss_tier_map": {0: "T0"}},
+            }
+        )

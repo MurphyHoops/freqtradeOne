@@ -10,7 +10,7 @@ import sys
 
 from ..config.v30_config import V30Config, entries_to_recipe
 from ..agents.signals import builder
-from ..agents.signals.registry import REGISTRY
+from ..agents.signals.registry import FACTOR_REGISTRY, REGISTRY
 from ..plugins.signals import SIGNAL_PLUGIN_MAP
 
 _LOADED_PLUGINS: set[str] = set()
@@ -48,12 +48,14 @@ class SignalHub:
         if allow_reload:
             _LOADED_PLUGINS.clear()
             REGISTRY.reset()
+            FACTOR_REGISTRY.reset()
             self._discovered = False
             for name in list(sys.modules):
                 if name.startswith("user_data.strategies.plugins."):
                     sys.modules.pop(name, None)
         logger = logging.getLogger(__name__)
         strict = bool(getattr(system_cfg, "plugin_load_strict", False)) if system_cfg else False
+        FACTOR_REGISTRY.set_strict(strict)
         enabled_signals = {
             name
             for name in (
@@ -76,10 +78,12 @@ class SignalHub:
                         spec = importlib.util.spec_from_file_location(module_name, str(fallback_path))
                         if spec and spec.loader:
                             module = importlib.util.module_from_spec(spec)
+                            sys.modules[module_name] = module
                             try:
                                 spec.loader.exec_module(module)  # type: ignore[call-arg]
                                 _LOADED_PLUGINS.add(abs_path)
                             except Exception as exc:
+                                sys.modules.pop(module_name, None)
                                 if isinstance(exc, ValueError) and "Signal already registered" in str(exc):
                                     raise
                                 logger.warning("Signal plugin load failed: %s (%s)", fallback_path, exc, exc_info=exc)
@@ -103,16 +107,83 @@ class SignalHub:
                 except Exception as exc:
                     if isinstance(exc, ValueError) and "Signal already registered" in str(exc):
                         raise
+                    sys.modules.pop(module_name, None)
                     logger.warning("Signal plugin load failed: %s (%s)", module_name, exc, exc_info=exc)
                     if strict:
                         raise
         if plugin_root.exists() and auto_discover:
+            factor_root = plugin_root / "factors"
+            if factor_root.exists():
+                for path in sorted(factor_root.glob("*.py")):
+                    if path.name.startswith("__"):
+                        continue
+                    abs_path = str(path.resolve())
+                    if abs_path in _LOADED_PLUGINS:
+                        continue
+                    factor_name = path.stem.upper()
+                    module_name = f"user_data.strategies.plugins.factors.{path.stem}"
+                    spec = importlib.util.spec_from_file_location(module_name, str(path))
+                    if not spec or not spec.loader:
+                        msg = f"Factor plugin load failed (no loader): {path}"
+                        logger.warning(msg)
+                        if strict:
+                            raise ValueError(msg)
+                        continue
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
+                    try:
+                        spec.loader.exec_module(module)  # type: ignore[call-arg]
+                    except Exception as exc:
+                        sys.modules.pop(module_name, None)
+                        logger.warning("Factor plugin load failed: %s (%s)", path, exc, exc_info=exc)
+                        if strict:
+                            raise
+                        continue
+                    try:
+                        if (
+                            factor_name in FACTOR_REGISTRY.base_specs()
+                            or factor_name in FACTOR_REGISTRY.derived_specs()
+                        ):
+                            _LOADED_PLUGINS.add(abs_path)
+                            continue
+                        column = getattr(module, "COLUMN", None)
+                        compute_logic = getattr(module, "compute_logic", None)
+                        if compute_logic is None:
+                            compute_logic = getattr(module, "COMPUTE_LOGIC", None)
+                        indicators = getattr(module, "INDICATORS", None)
+                        required = getattr(module, "REQUIRED_FACTORS", None)
+                        vector_fn = getattr(module, "VECTOR_FN", None)
+                        vector_column = getattr(module, "VECTOR_COLUMN", None)
+                        if callable(compute_logic):
+                            FACTOR_REGISTRY.register_derived(
+                                factor_name,
+                                fn=compute_logic,
+                                indicators=indicators,
+                                required_factors=required,
+                                vector_fn=vector_fn,
+                                vector_column=vector_column,
+                            )
+                        elif column is not None:
+                            FACTOR_REGISTRY.register_base(
+                                factor_name,
+                                column=str(column),
+                                indicators=indicators,
+                            )
+                    except Exception as exc:
+                        sys.modules.pop(module_name, None)
+                        logger.warning("Factor plugin registration failed: %s (%s)", path, exc, exc_info=exc)
+                        if strict:
+                            raise
+                        continue
+                    _LOADED_PLUGINS.add(abs_path)
             for path in sorted(plugin_root.rglob("*.py")):
                 if path.name.startswith("__"):
                     continue
                 if "recipes" in path.parts:
                     continue
                 if enabled_signals and "signals" in path.parts:
+                    continue
+                if "factors" in path.parts:
                     continue
                 abs_path = str(path.resolve())
                 if abs_path in _LOADED_PLUGINS:
@@ -122,10 +193,12 @@ class SignalHub:
                 spec = importlib.util.spec_from_file_location(module_name, str(path))
                 if spec and spec.loader:
                     module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
                     try:
                         spec.loader.exec_module(module)  # type: ignore[call-arg]
                         _LOADED_PLUGINS.add(abs_path)
                     except Exception as exc:
+                        sys.modules.pop(module_name, None)
                         if isinstance(exc, ValueError) and "Signal already registered" in str(exc):
                             raise
                         logger.warning("Signal plugin load failed: %s (%s)", path, exc, exc_info=exc)

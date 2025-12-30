@@ -10,7 +10,6 @@ import pandas as pd
 
 from .registry import REGISTRY
 from . import factors
-from ...core import math_ops
 
 
 class _SeriesCache:
@@ -30,47 +29,41 @@ class _SeriesCache:
         return series
 
 
-def _suffix_token(timeframe: Optional[str]) -> str:
-    token = (timeframe or "").strip()
-    return token.replace("/", "_") if token else ""
+def add_derived_factor_columns(
+    df: pd.DataFrame,
+    timeframes: Iterable[Optional[str]],
+    required: Optional[Dict[Optional[str], set[str]]] = None,
+) -> None:
+    """Add derived factor columns for given timeframes."""
 
-
-def _col_name(base: str, timeframe: Optional[str]) -> str:
-    suffix = _suffix_token(timeframe)
-    return f"{base}_{suffix}" if suffix else base
-
-
-def add_derived_factor_columns(df: pd.DataFrame, timeframes: Iterable[Optional[str]]) -> None:
-    """Add derived factor columns (delta_close_emafast_pct, ema_trend) for given timeframes."""
-
+    if df is None or df.empty:
+        return
+    derived_specs = factors.derived_factor_specs()
     for tf in timeframes:
-        close_col = _col_name("close", tf)
-        ema_fast_col = _col_name("ema_fast", tf)
-        ema_slow_col = _col_name("ema_slow", tf)
-        delta_col = _col_name("delta_close_emafast_pct", tf)
-        trend_col = _col_name("ema_trend", tf)
-
-        if close_col in df.columns and ema_fast_col in df.columns:
-            df[delta_col] = df[close_col] / df[ema_fast_col] - 1.0
-
-        if ema_fast_col in df.columns and ema_slow_col in df.columns:
-            fast = df[ema_fast_col]
-            slow = df[ema_slow_col]
-            df[trend_col] = np.where(fast > slow, 1.0, np.where(fast < slow, -1.0, 0.0))
+        needed = None
+        if required is not None:
+            needed = {name for name in required.get(tf, set()) if factors.is_derived_factor(name)}
+        for base, spec in derived_specs.items():
+            if needed is not None and base not in needed:
+                continue
+            if not spec.vector_column or not spec.vector_fn:
+                continue
+            col = factors.vector_column_for_factor(base, tf)
+            if not col or col in df.columns:
+                continue
+            try:
+                series = spec.vector_fn(df, tf)
+            except Exception:
+                continue
+            if series is None:
+                continue
+            df[col] = series
 
 
 def factor_series(df: pd.DataFrame, base: str, timeframe: Optional[str]) -> Optional[pd.Series]:
     """Return a Series for the requested factor name/timeframe, or None if missing."""
 
-    derived_map = {
-        "DELTA_CLOSE_EMAFAST_PCT": "delta_close_emafast_pct",
-        "EMA_TREND": "ema_trend",
-    }
-    if base in derived_map:
-        col = _col_name(derived_map[base], timeframe)
-        return df[col] if col in df.columns else None
-
-    col = factors.column_for_factor(base, timeframe)
+    col = factors.vector_column_for_factor(base, timeframe)
     if not col:
         return None
     return df[col] if col in df.columns else None
@@ -100,6 +93,9 @@ def prefilter_signal_mask(df: pd.DataFrame, cfg, specs: Optional[Iterable] = Non
             if op is None:
                 continue
             base, tf = factors.factor_components_with_default(cond.factor, spec.timeframe)
+            if not factors.factor_vectorizable(base):
+                spec_mask = pd.Series(True, index=df.index)
+                break
             series = cache.get(base, tf)
             if op in ("<", "<=", ">", ">=", "=="):
                 value = getattr(cond, "value", None)
@@ -140,6 +136,9 @@ def is_vectorizable(spec) -> bool:
         return False
     for cond in spec.conditions:
         if getattr(cond, "fn", None) is not None:
+            return False
+        base, _ = factors.factor_components_with_default(cond.factor, spec.timeframe)
+        if not factors.factor_vectorizable(base):
             return False
     return True
 
@@ -221,16 +220,7 @@ def build_signal_matrices(df: pd.DataFrame, cfg, specs: Sequence[Any]) -> list[D
 
     if df is None or df.empty:
         return []
-    if "hurst" not in df.columns and "close" in df.columns:
-        try:
-            df["hurst"] = math_ops.calculate_hurst_vec(df["close"])
-        except Exception:
-            df["hurst"] = np.nan
-    if "adx_zsig" not in df.columns and "adx" in df.columns:
-        try:
-            df["adx_zsig"] = math_ops.calculate_adx_zsig_vec(df["adx"])
-        except Exception:
-            df["adx_zsig"] = np.nan
+    factors.ensure_regime_columns(df, force=False)
     cache = _SeriesCache(df)
     profiles = getattr(getattr(cfg, "strategy", None), "exit_profiles", getattr(cfg, "exit_profiles", {})) or {}
     default_profile = getattr(

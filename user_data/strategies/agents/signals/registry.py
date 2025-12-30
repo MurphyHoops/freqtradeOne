@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .schemas import SignalSpec
@@ -47,6 +48,67 @@ class SignalRegistry:
 
 
 REGISTRY = SignalRegistry()
+
+
+class FactorRegistry:
+    """Maintain base/derived factor specs registered by plugins."""
+
+    def __init__(self) -> None:
+        self._base_specs: Dict[str, Dict[str, Any]] = {}
+        self._derived_specs: Dict[str, Dict[str, Any]] = {}
+        self._strict = True
+
+    def set_strict(self, strict: bool) -> None:
+        self._strict = bool(strict)
+
+    def register_base(self, name: str, *, column: str, indicators: Iterable[str] | None = None) -> None:
+        key = str(name).upper()
+        payload = {
+            "column": str(column),
+            "indicators": tuple(indicators or ()),
+        }
+        if key in self._base_specs:
+            if self._strict:
+                raise ValueError(f"Factor already registered: {key}")
+            logging.getLogger(__name__).warning("Factor already registered, overriding: %s", key)
+        self._base_specs[key] = payload
+
+    def register_derived(
+        self,
+        name: str,
+        *,
+        fn: Callable[[Any, Optional[str]], float],
+        indicators: Iterable[str] | None = None,
+        required_factors: Iterable[str] | None = None,
+        vector_fn: Optional[Callable[..., Any]] = None,
+        vector_column: Optional[str] = None,
+    ) -> None:
+        key = str(name).upper()
+        payload = {
+            "fn": fn,
+            "indicators": tuple(indicators or ()),
+            "required_factors": tuple(required_factors or ()),
+            "vector_fn": vector_fn,
+            "vector_column": vector_column,
+        }
+        if key in self._derived_specs:
+            if self._strict:
+                raise ValueError(f"Factor already registered: {key}")
+            logging.getLogger(__name__).warning("Factor already registered, overriding: %s", key)
+        self._derived_specs[key] = payload
+
+    def base_specs(self) -> Dict[str, Dict[str, Any]]:
+        return dict(self._base_specs)
+
+    def derived_specs(self) -> Dict[str, Dict[str, Any]]:
+        return dict(self._derived_specs)
+
+    def reset(self) -> None:
+        self._base_specs.clear()
+        self._derived_specs.clear()
+
+
+FACTOR_REGISTRY = FactorRegistry()
 
 
 def register_signal(
@@ -94,6 +156,38 @@ def register_signal(
                 origin=getattr(fn, "__module__", None),
             )
             REGISTRY.register(spec)
+        return fn
+
+    return decorator
+
+
+def register_factor(
+    *,
+    name: str,
+    column: Optional[str] = None,
+    indicators: Optional[Iterable[str]] = None,
+    required_factors: Optional[Iterable[str]] = None,
+    compute_logic: Optional[Callable[[Any, Optional[str]], float]] = None,
+    vector_fn: Optional[Callable[..., Any]] = None,
+    vector_column: Optional[str] = None,
+):
+    """Decorator for factor plug-ins to register base or derived factors."""
+
+    def decorator(fn: Callable[..., Any]):
+        if column:
+            FACTOR_REGISTRY.register_base(name, column=column, indicators=indicators)
+            return fn
+        derived_fn = compute_logic or fn
+        if derived_fn is None:
+            raise ValueError("Derived factor requires compute_logic or function body")
+        FACTOR_REGISTRY.register_derived(
+            name,
+            fn=derived_fn,
+            indicators=indicators,
+            required_factors=required_factors,
+            vector_fn=vector_fn,
+            vector_column=vector_column,
+        )
         return fn
 
     return decorator

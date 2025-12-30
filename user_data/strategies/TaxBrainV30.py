@@ -105,11 +105,14 @@ class TaxBrainV30(IStrategy):
         self.cfg = apply_overrides(base_cfg, config.get("strategy_params", {}))
         self.timeframe = self.cfg.system.timeframe
         self.startup_candle_count = self.cfg.system.startup_candle_count
+        stoploss_default = float(self.cfg.trading.sizing.enforce_leverage) * -0.2
         stoploss_val = getattr(self.cfg, "stoploss", None)
         try:
             stoploss_val = float(stoploss_val)
         except (TypeError, ValueError):
-            stoploss_val = float(self.cfg.trading.sizing.enforce_leverage) * -0.2
+            stoploss_val = stoploss_default
+        if not math.isfinite(stoploss_val):
+            stoploss_val = stoploss_default
         self.stoploss = stoploss_val
         minimal_roi = getattr(self.cfg, "minimal_roi", None)
         if isinstance(minimal_roi, dict):
@@ -282,6 +285,9 @@ class TaxBrainV30(IStrategy):
         if frame is None or frame.empty:
             return frame
         return frame
+
+    def _merge_informative_columns_into_base(self, df: pd.DataFrame, pair: str) -> None:
+        helpers.merge_informative_columns_into_base(self, self.bridge, df, pair)
 
     @staticmethod
     def _derived_factor_columns_missing(df: pd.DataFrame, timeframes: Iterable[Optional[str]]) -> bool:
@@ -846,48 +852,6 @@ class TaxBrainV30(IStrategy):
         if tp_pct is None or tp_pct <= 0:
             return None
         return float(tp_pct)
-
-    def _router_sl_tp_pct(
-        self,
-        pair: str,
-        trade,
-        current_time: datetime,
-        current_profit: float,
-    ) -> tuple[Optional[float], Optional[float]]:
-        if EXIT_ROUTER is None or SLContext is None or TPContext is None:
-            return None, None
-        try:
-            sl_ctx = SLContext(
-                pair=pair,
-                trade=trade,
-                now=current_time,
-                profit=float(current_profit or 0.0),
-                dp=self.dp,
-                cfg=self.cfg,
-                state=self.state,
-                strategy=self,
-            )
-            sl_pct = EXIT_ROUTER.sl_best(sl_ctx, base_sl_pct=None)
-        except Exception:
-            sl_pct = None
-        try:
-            tp_ctx = TPContext(
-                pair=pair,
-                trade=trade,
-                now=current_time,
-                profit=float(current_profit or 0.0),
-                dp=self.dp,
-                cfg=self.cfg,
-                state=self.state,
-                strategy=self,
-            )
-            tp_pct = EXIT_ROUTER.tp_best(tp_ctx, base_tp_pct=None)
-        except Exception:
-            tp_pct = None
-        return (
-            float(sl_pct) if sl_pct and sl_pct > 0 else None,
-            float(tp_pct) if tp_pct and tp_pct > 0 else None,
-        )
 
     def _get_current_atr_abs(
         self,

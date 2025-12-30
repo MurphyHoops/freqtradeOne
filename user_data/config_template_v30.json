@@ -50,6 +50,9 @@
   },
   "strategy": {
     "_comment": "Signals, tiers, exits",
+    "_comment_priority": "Override priority: strategy_params > config.json > plugins > defaults.",
+    "_comment_enabled_recipes": "When enabled_recipes is non-empty, enabled_signals is derived from recipe entries.",
+    "enabled_recipes": [],
     "enabled_signals": [
       "newbars_breakout_long_5m",
       "newbars_breakdown_short_5m",

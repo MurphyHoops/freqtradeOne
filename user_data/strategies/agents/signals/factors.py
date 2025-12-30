@@ -8,13 +8,14 @@ import math
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING, TypeAlias
 
 from ...core import math_ops
+from .registry import FACTOR_REGISTRY
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    FactorBankType = "FactorBank"
+    FactorBankType: TypeAlias = "FactorBank"
 else:
-    FactorBankType = Any
+    FactorBankType: TypeAlias = Any
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,37 @@ class BaseFactorSpec:
 class DerivedFactorSpec:
     indicators: tuple[str, ...]
     fn: Callable[[FactorBankType, Optional[str]], float]
+    required_factors: tuple[str, ...] = ()
+    vector_fn: Optional[Callable[[pd.DataFrame, Optional[str]], Optional[pd.Series]]] = None
+    vector_column: Optional[str] = None
+
+
+def _suffix_token(timeframe: Optional[str]) -> str:
+    token = (timeframe or "").strip()
+    return token.replace("/", "_") if token else ""
+
+
+def _vector_col_name(base: str, timeframe: Optional[str]) -> str:
+    suffix = _suffix_token(timeframe)
+    return f"{base}_{suffix}" if suffix else base
+
+
+def _vector_delta_close_emafast(df: pd.DataFrame, timeframe: Optional[str]) -> Optional[pd.Series]:
+    close_col = _vector_col_name("close", timeframe)
+    ema_fast_col = _vector_col_name("ema_fast", timeframe)
+    if close_col not in df.columns or ema_fast_col not in df.columns:
+        return None
+    return df[close_col] / df[ema_fast_col] - 1.0
+
+
+def _vector_ema_trend(df: pd.DataFrame, timeframe: Optional[str]) -> Optional[pd.Series]:
+    ema_fast_col = _vector_col_name("ema_fast", timeframe)
+    ema_slow_col = _vector_col_name("ema_slow", timeframe)
+    if ema_fast_col not in df.columns or ema_slow_col not in df.columns:
+        return None
+    fast = df[ema_fast_col]
+    slow = df[ema_slow_col]
+    return np.where(fast > slow, 1.0, np.where(fast < slow, -1.0, 0.0))
 
 
 # column references assume indicator columns use lowercase naming.
@@ -73,12 +105,88 @@ DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {
     "DELTA_CLOSE_EMAFAST_PCT": DerivedFactorSpec(
         indicators=("EMA_FAST",),
         fn=_delta_close_emafast,
+        required_factors=("CLOSE", "EMA_FAST"),
+        vector_fn=_vector_delta_close_emafast,
+        vector_column="delta_close_emafast_pct",
     ),
     "EMA_TREND": DerivedFactorSpec(
         indicators=("EMA_FAST", "EMA_SLOW"),
         fn=_ema_trend,
+        required_factors=("EMA_FAST", "EMA_SLOW"),
+        vector_fn=_vector_ema_trend,
+        vector_column="ema_trend",
     ),
 }
+
+
+def _registry_base_specs() -> Dict[str, BaseFactorSpec]:
+    specs: Dict[str, BaseFactorSpec] = {}
+    for name, payload in FACTOR_REGISTRY.base_specs().items():
+        column = payload.get("column")
+        if not column:
+            continue
+        indicators = payload.get("indicators") or ()
+        specs[str(name).upper()] = BaseFactorSpec(
+            indicators=tuple(indicators),
+            column=str(column),
+        )
+    return specs
+
+
+def _registry_derived_specs() -> Dict[str, DerivedFactorSpec]:
+    specs: Dict[str, DerivedFactorSpec] = {}
+    for name, payload in FACTOR_REGISTRY.derived_specs().items():
+        fn = payload.get("fn")
+        if not callable(fn):
+            continue
+        indicators = payload.get("indicators") or ()
+        required = payload.get("required_factors") or ()
+        specs[str(name).upper()] = DerivedFactorSpec(
+            indicators=tuple(indicators),
+            fn=fn,
+            required_factors=tuple(required),
+            vector_fn=payload.get("vector_fn"),
+            vector_column=payload.get("vector_column"),
+        )
+    return specs
+
+
+def base_factor_specs() -> Dict[str, BaseFactorSpec]:
+    specs = dict(BASE_FACTOR_SPECS)
+    specs.update(_registry_base_specs())
+    return specs
+
+
+def derived_factor_specs() -> Dict[str, DerivedFactorSpec]:
+    specs = dict(DERIVED_FACTOR_SPECS)
+    specs.update(_registry_derived_specs())
+    return specs
+
+
+def get_base_factor_spec(base: str) -> Optional[BaseFactorSpec]:
+    return base_factor_specs().get(base)
+
+
+def get_derived_factor_spec(base: str) -> Optional[DerivedFactorSpec]:
+    return derived_factor_specs().get(base)
+
+
+def is_derived_factor(base: str) -> bool:
+    return get_derived_factor_spec(base) is not None
+
+
+def factor_vectorizable(base: str) -> bool:
+    if get_base_factor_spec(base) is not None:
+        return True
+    derived = get_derived_factor_spec(base)
+    return bool(derived and derived.vector_column)
+
+
+def vector_column_for_factor(base: str, timeframe: Optional[str]) -> Optional[str]:
+    derived = get_derived_factor_spec(base)
+    if derived and derived.vector_column:
+        return _vector_col_name(derived.vector_column, timeframe)
+    return column_for_factor(base, timeframe)
 
 DEFAULT_BAG_FACTORS = ("ATR", "ATR_PCT", "CLOSE")
 
@@ -161,13 +269,31 @@ def calculate_regime_factor(
         return 1.0
 
 
+def ensure_regime_columns(df: pd.DataFrame, *, force: bool = False) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if (force or "hurst" not in df.columns) and "close" in df.columns:
+        try:
+            df["hurst"] = math_ops.calculate_hurst_vec(df["close"])
+        except Exception:
+            df["hurst"] = np.nan
+    if (force or "adx_zsig" not in df.columns) and "adx" in df.columns:
+        try:
+            df["adx_zsig"] = math_ops.calculate_adx_zsig_vec(df["adx"])
+        except Exception:
+            df["adx_zsig"] = np.nan
+    return df
+
+
 def factor_dependencies(factor: str) -> Set[str]:
     """Return indicator names required for given factor base name."""
 
-    if factor in BASE_FACTOR_SPECS:
-        return set(BASE_FACTOR_SPECS[factor].indicators)
-    if factor in DERIVED_FACTOR_SPECS:
-        return set(DERIVED_FACTOR_SPECS[factor].indicators)
+    base_spec = get_base_factor_spec(factor)
+    if base_spec:
+        return set(base_spec.indicators)
+    derived_spec = get_derived_factor_spec(factor)
+    if derived_spec:
+        return set(derived_spec.indicators)
     return set()
 
 
@@ -179,7 +305,7 @@ def parse_factor_name(name: str) -> tuple[str, Optional[str]]:
 
 
 def column_for_factor(base: str, timeframe: Optional[str]) -> Optional[str]:
-    spec = BASE_FACTOR_SPECS.get(base)
+    spec = get_base_factor_spec(base)
     if not spec:
         return None
     if timeframe:
@@ -265,9 +391,9 @@ class FactorBank:
 
     # internal helpers ---------------------------------------------------
     def _compute(self, base: str, timeframe: Optional[str]) -> float:
-        if base in DERIVED_FACTOR_SPECS:
-            spec = DERIVED_FACTOR_SPECS[base]
-            return spec.fn(self, timeframe)
+        derived_spec = get_derived_factor_spec(base)
+        if derived_spec:
+            return derived_spec.fn(self, timeframe)
         column = column_for_factor(base, timeframe)
         if column is None:
             raise KeyError(base)
@@ -280,10 +406,10 @@ class FactorBank:
         if (
             timeframe
             and (value is None or math.isnan(value))
-            and base in BASE_FACTOR_SPECS
-            and not BASE_FACTOR_SPECS[base].indicators
+            and (base_spec := get_base_factor_spec(base))
+            and not base_spec.indicators
         ):
-            fallback_col = BASE_FACTOR_SPECS[base].column
+            fallback_col = base_spec.column
             value = _safe_get(row, fallback_col)
         return value
 
@@ -293,7 +419,15 @@ __all__ = [
     "BASE_FACTOR_SPECS",
     "DERIVED_FACTOR_SPECS",
     "DEFAULT_BAG_FACTORS",
+    "base_factor_specs",
+    "derived_factor_specs",
+    "get_base_factor_spec",
+    "get_derived_factor_spec",
+    "is_derived_factor",
+    "factor_vectorizable",
+    "vector_column_for_factor",
     "calculate_regime_factor",
+    "ensure_regime_columns",
     "factor_dependencies",
     "parse_factor_name",
     "apply_timeframe_to_factor",

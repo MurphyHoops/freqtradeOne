@@ -375,10 +375,12 @@ class SizerAgent:
         sizing_cfg = getattr(getattr(self.cfg, "trading", None), "sizing", getattr(self.cfg, "sizing", None))
         mult = float(getattr(sizing_cfg, "min_stake_multiplier", 1.0) or 1.0) if sizing_cfg else 1.0
         max_seed_cap = float(getattr(sizing_cfg, "initial_max_nominal_cap", 0.0) or 0.0) if sizing_cfg else 0.0
+        initial_mode = str(getattr(sizing_cfg, "initial_size_mode", "static") or "static").lower() if sizing_cfg else "static"
+        static_nominal = float(getattr(sizing_cfg, "static_initial_nominal", 0.0) or 0.0) if sizing_cfg else 0.0
 
         exchange_min = 5.0
         rate = float(current_rate or getattr(ctx, "current_rate", 0.0) or 0.0)
-        if self.dp and rate > 0:
+        if self.dp:
             try:
                 market = None
                 if hasattr(self.dp, "market"):
@@ -396,7 +398,7 @@ class SizerAgent:
                             candidates.append(mc)
                     except Exception:
                         pass
-                if min_amount is not None:
+                if min_amount is not None and rate > 0:
                     try:
                         ma = float(min_amount)
                         if ma > 0:
@@ -414,7 +416,15 @@ class SizerAgent:
             except Exception:
                 pass
 
-        base_nominal = max(exchange_min * mult, 0.0)
+        dynamic_nominal = max(exchange_min * mult, exchange_min)
+        static_nominal = max(static_nominal, exchange_min)
+        if initial_mode == "dynamic":
+            base_nominal = dynamic_nominal
+        elif initial_mode == "hybrid":
+            base_nominal = max(static_nominal, dynamic_nominal)
+        else:
+            base_nominal = static_nominal
+        base_nominal = max(base_nominal, 0.0)
         if max_seed_cap > 0 and base_nominal > max_seed_cap:
             self._log_debug(
                 f"FILTERED: {ctx.pair} min_req {base_nominal:.6f} > cap {max_seed_cap}"

@@ -63,7 +63,7 @@ def ensure_informative_method(cls, timeframe: str) -> None:
             dataframe,
             self.cfg,
             suffix=None,
-            required=needs or set(),
+            required=needs,
             duplicate_ohlc=True,
         )
 
@@ -81,17 +81,19 @@ def register_informative_methods(strategy) -> None:
 def informative_required_columns(strategy, timeframe: str) -> list[str]:
     required: set[str] = set()
     factors_needed = strategy._factor_requirements.get(timeframe, set())
-    derived_base_cols = {
-        "DELTA_CLOSE_EMAFAST_PCT": {"close", "ema_fast"},
-        "EMA_TREND": {"ema_fast", "ema_slow"},
-    }
     for base in factors_needed:
         base = str(base).upper()
-        if base in factors.BASE_FACTOR_SPECS:
-            required.add(factors.BASE_FACTOR_SPECS[base].column)
-        elif base in factors.DERIVED_FACTOR_SPECS:
-            required.update(derived_base_cols.get(base, set()))
-            for indicator_name in factors.DERIVED_FACTOR_SPECS[base].indicators:
+        base_spec = factors.get_base_factor_spec(base)
+        if base_spec:
+            required.add(base_spec.column)
+            continue
+        derived_spec = factors.get_derived_factor_spec(base)
+        if derived_spec:
+            for dep in derived_spec.required_factors:
+                dep_spec = factors.get_base_factor_spec(str(dep).upper())
+                if dep_spec:
+                    required.add(dep_spec.column)
+            for indicator_name in derived_spec.indicators:
                 spec = indicators.INDICATOR_SPECS.get(str(indicator_name).upper())
                 if spec:
                     required.update(spec.columns)
@@ -106,11 +108,13 @@ def informative_required_columns(strategy, timeframe: str) -> list[str]:
 def derived_factor_columns_missing(df: pd.DataFrame, timeframes: Iterable[Optional[str]]) -> bool:
     if df is None or df.empty:
         return False
+    derived_specs = factors.derived_factor_specs()
     for tf in timeframes:
-        suffix = (tf or "").strip().replace("/", "_")
-        for base in ("delta_close_emafast_pct", "ema_trend"):
-            col = f"{base}_{suffix}" if suffix else base
-            if col not in df.columns:
+        for base, spec in derived_specs.items():
+            if not spec.vector_column:
+                continue
+            col = factors.vector_column_for_factor(base, tf)
+            if col and col not in df.columns:
                 return True
     return False
 

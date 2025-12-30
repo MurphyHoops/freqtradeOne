@@ -61,19 +61,15 @@ def _vector_ema_trend(df: pd.DataFrame, timeframe: Optional[str]) -> Optional[pd
     return np.where(fast > slow, 1.0, np.where(fast < slow, -1.0, 0.0))
 
 
+CORE_FACTOR_NAMES: Set[str] = {"HURST", "ADX_ZSIG", "ATR", "CLOSE"}
+CORE_INDICATORS: Set[str] = {"ADX", "ATR"}
+
 # column references assume indicator columns use lowercase naming.
 BASE_FACTOR_SPECS: Dict[str, BaseFactorSpec] = {
     "CLOSE": BaseFactorSpec(indicators=(), column="close"),
-    "EMA_FAST": BaseFactorSpec(indicators=("EMA_FAST",), column="ema_fast"),
-    "EMA_SLOW": BaseFactorSpec(indicators=("EMA_SLOW",), column="ema_slow"),
-    "RSI": BaseFactorSpec(indicators=("RSI",), column="rsi"),
     "ATR": BaseFactorSpec(indicators=("ATR",), column="atr"),
-    "ATR_PCT": BaseFactorSpec(indicators=("ATR",), column="atr_pct"),
-    "ADX": BaseFactorSpec(indicators=("ADX",), column="adx"),
     "HURST": BaseFactorSpec(indicators=(), column="hurst"),
     "ADX_ZSIG": BaseFactorSpec(indicators=(), column="adx_zsig"),
-    "NEWBARS_HIGH": BaseFactorSpec(indicators=("NEWHBARS",), column="newbars_high"),
-    "NEWBARS_LOW": BaseFactorSpec(indicators=("NEWHBARS",), column="newbars_low"),
 }
 
 
@@ -101,22 +97,7 @@ def _ema_trend(fb: FactorBankType, timeframe: Optional[str]) -> float:
     return 0.0
 
 
-DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {
-    "DELTA_CLOSE_EMAFAST_PCT": DerivedFactorSpec(
-        indicators=("EMA_FAST",),
-        fn=_delta_close_emafast,
-        required_factors=("CLOSE", "EMA_FAST"),
-        vector_fn=_vector_delta_close_emafast,
-        vector_column="delta_close_emafast_pct",
-    ),
-    "EMA_TREND": DerivedFactorSpec(
-        indicators=("EMA_FAST", "EMA_SLOW"),
-        fn=_ema_trend,
-        required_factors=("EMA_FAST", "EMA_SLOW"),
-        vector_fn=_vector_ema_trend,
-        vector_column="ema_trend",
-    ),
-}
+DERIVED_FACTOR_SPECS: Dict[str, DerivedFactorSpec] = {}
 
 
 def _registry_base_specs() -> Dict[str, BaseFactorSpec]:

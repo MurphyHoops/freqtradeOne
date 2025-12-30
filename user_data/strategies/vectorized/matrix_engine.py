@@ -29,7 +29,8 @@ class MatrixEngine:
             return df
 
         system_cfg = getattr(self._strategy.cfg, "system", None)
-        base_needs = getattr(self._strategy, "_indicator_requirements", {}).get(None)
+        base_needs = set(getattr(self._strategy, "_indicator_requirements", {}).get(None) or ())
+        base_needs.update(getattr(factors, "CORE_INDICATORS", set()))
         try:
             df = indicators.compute_indicators(df, self._strategy.cfg, required=base_needs)
         except Exception:

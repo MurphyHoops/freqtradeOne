@@ -9,7 +9,7 @@ import importlib.util
 import sys
 
 from ..config.v30_config import V30Config, entries_to_recipe
-from ..agents.signals import builder
+from ..agents.signals import builder, factors
 from ..agents.signals.registry import FACTOR_REGISTRY, REGISTRY
 from ..plugins.signals import SIGNAL_PLUGIN_MAP
 
@@ -139,41 +139,15 @@ class SignalHub:
                         if strict:
                             raise
                         continue
-                    try:
-                        if (
-                            factor_name in FACTOR_REGISTRY.base_specs()
-                            or factor_name in FACTOR_REGISTRY.derived_specs()
-                        ):
-                            _LOADED_PLUGINS.add(abs_path)
-                            continue
-                        column = getattr(module, "COLUMN", None)
-                        compute_logic = getattr(module, "compute_logic", None)
-                        if compute_logic is None:
-                            compute_logic = getattr(module, "COMPUTE_LOGIC", None)
-                        indicators = getattr(module, "INDICATORS", None)
-                        required = getattr(module, "REQUIRED_FACTORS", None)
-                        vector_fn = getattr(module, "VECTOR_FN", None)
-                        vector_column = getattr(module, "VECTOR_COLUMN", None)
-                        if callable(compute_logic):
-                            FACTOR_REGISTRY.register_derived(
-                                factor_name,
-                                fn=compute_logic,
-                                indicators=indicators,
-                                required_factors=required,
-                                vector_fn=vector_fn,
-                                vector_column=vector_column,
-                            )
-                        elif column is not None:
-                            FACTOR_REGISTRY.register_base(
-                                factor_name,
-                                column=str(column),
-                                indicators=indicators,
-                            )
-                    except Exception as exc:
-                        sys.modules.pop(module_name, None)
-                        logger.warning("Factor plugin registration failed: %s (%s)", path, exc, exc_info=exc)
+                    if (
+                        factor_name not in FACTOR_REGISTRY.base_specs()
+                        and factor_name not in FACTOR_REGISTRY.derived_specs()
+                    ):
+                        msg = f"Factor plugin did not register via @register_factor: {path}"
+                        logger.warning(msg)
                         if strict:
-                            raise
+                            raise ValueError(msg)
+                        sys.modules.pop(module_name, None)
                         continue
                     _LOADED_PLUGINS.add(abs_path)
             for path in sorted(plugin_root.rglob("*.py")):
@@ -249,8 +223,24 @@ class SignalHub:
             )
 
         extra = getattr(self._cfg, "extra_signal_factors", None)
-        self._factor_requirements = builder.collect_factor_requirements(extra, self._cfg)
-        self._indicator_requirements = builder.collect_indicator_requirements(extra, self._cfg)
+        factor_map = builder.collect_factor_requirements(extra, self._cfg)
+        core_factors = factors.CORE_FACTOR_NAMES
+        if core_factors:
+            filtered: Dict[Optional[str], set[str]] = {}
+            for tf, reqs in factor_map.items():
+                keep = {name for name in reqs if name not in core_factors}
+                if keep:
+                    filtered[tf] = keep
+            factor_map = filtered
+        indicator_map: Dict[Optional[str], set[str]] = {}
+        for tf, reqs in factor_map.items():
+            for factor in reqs:
+                deps = factors.factor_dependencies(factor)
+                if not deps:
+                    continue
+                indicator_map.setdefault(tf, set()).update(deps)
+        self._factor_requirements = factor_map
+        self._indicator_requirements = indicator_map
 
     @property
     def factor_requirements(self) -> Dict[Optional[str], set[str]]:

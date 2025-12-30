@@ -30,26 +30,31 @@ def _spec(
 
 
 def test_collect_factor_and_indicator_requirements(monkeypatch):
-    spec = _spec(
-        "demo",
-        [Condition("RSI", ">", 10.0), Condition("EMA_TREND", "==", 1.0)],
-        timeframe="1h",
-        required=("EMA_FAST",),
-    )
-    monkeypatch.setattr(req.REGISTRY, "all", lambda: [spec])
+    FACTOR_REGISTRY.reset()
+    try:
+        FACTOR_REGISTRY.register_base("RSI", column="rsi", indicators=("RSI",))
+        spec = _spec(
+            "demo",
+            [Condition("RSI", ">", 10.0), Condition("EMA_TREND", "==", 1.0)],
+            timeframe="1h",
+            required=("EMA_FAST",),
+        )
+        monkeypatch.setattr(req.REGISTRY, "all", lambda: [spec])
 
-    factor_map = req.collect_factor_requirements()
-    assert None in factor_map
-    assert "CLOSE" in factor_map[None]  # default bag included
-    assert "1h" in factor_map and "RSI" in factor_map["1h"]
-    assert "EMA_TREND" in factor_map["1h"]
-    assert "EMA_FAST" in factor_map["1h"]  # 来自 required_factors
+        factor_map = req.collect_factor_requirements()
+        assert None in factor_map
+        assert "CLOSE" in factor_map[None]  # default bag included
+        assert "1h" in factor_map and "RSI" in factor_map["1h"]
+        assert "EMA_TREND" in factor_map["1h"]
+        assert "EMA_FAST" in factor_map["1h"]  # 来自 required_factors
 
-    indicator_map = req.collect_indicator_requirements()
-    assert "1h" in indicator_map and "RSI" in indicator_map["1h"]
+        indicator_map = req.collect_indicator_requirements()
+        assert "1h" in indicator_map and "RSI" in indicator_map["1h"]
 
-    tfs = req.required_timeframes()
-    assert "1h" in tfs
+        tfs = req.required_timeframes()
+        assert "1h" in tfs
+    finally:
+        FACTOR_REGISTRY.reset()
 
 
 def test_collect_factor_requirements_honors_extra(monkeypatch):
@@ -95,6 +100,8 @@ def test_collect_indicator_requirements_from_derived_factor(monkeypatch):
 def test_informative_required_columns_include_derived_required_factors():
     FACTOR_REGISTRY.reset()
     try:
+        FACTOR_REGISTRY.register_base("EMA_FAST", column="ema_fast", indicators=("EMA_FAST",))
+        FACTOR_REGISTRY.register_base("EMA_SLOW", column="ema_slow", indicators=("EMA_SLOW",))
         FACTOR_REGISTRY.register_derived(
             "DERIVED_REQ",
             fn=lambda *_: 0.0,

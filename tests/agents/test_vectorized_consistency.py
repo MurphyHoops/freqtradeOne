@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pandas as pd
@@ -85,7 +86,9 @@ def _patch_runmode(monkeypatch):
 
 
 def _ensure_signals_loaded():
-    hub = SignalHub(V30Config())
+    cfg = V30Config()
+    cfg.system = replace(cfg.system, plugin_allow_reload=True)
+    hub = SignalHub(cfg)
     hub.discover()
 
 

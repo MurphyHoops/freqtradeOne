@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 
 
-from user_data.strategies.config.v29_config import ExitProfile, StrategyRecipe, V29Config
+from user_data.strategies.config.v30_config import ExitProfile, StrategyRecipe, V30Config
 from user_data.strategies.agents.signals import build_candidates
 from user_data.strategies.agents.signals import builder as builder_module
 from user_data.strategies.agents.signals import factors as factors_module
@@ -39,7 +39,7 @@ def _row(**kwargs):
 
 
 def _ensure_signals_loaded():
-    hub = SignalHub(V29Config())
+    hub = SignalHub(V30Config())
     hub.discover()
 
 
@@ -49,7 +49,7 @@ def _ensure_signals_loaded():
 def test_builder_emits_long_candidates_when_conditions_met():
     _ensure_signals_loaded()
 
-    cfg = V29Config()
+    cfg = V30Config()
 
     row = _row(close=90.0, ema_fast=110.0, ema_slow=95.0, rsi=5.0, adx=45.0)
 
@@ -76,7 +76,7 @@ def test_builder_emits_long_candidates_when_conditions_met():
 def test_builder_emits_short_candidate_for_trend_short():
     _ensure_signals_loaded()
 
-    cfg = V29Config()
+    cfg = V30Config()
 
     row = _row(close=130.0, ema_fast=80.0, ema_slow=120.0, rsi=60.0, adx=60.0)
 
@@ -99,7 +99,7 @@ def test_builder_emits_short_candidate_for_trend_short():
 def test_builder_returns_empty_when_base_factors_nan():
     _ensure_signals_loaded()
 
-    cfg = V29Config()
+    cfg = V30Config()
 
     row = _row(close=float("nan"))
 
@@ -109,7 +109,7 @@ def test_builder_returns_empty_when_base_factors_nan():
 
 
 def test_hub_only_loads_enabled_signals():
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.system = replace(cfg.system, plugin_allow_reload=True)
     cfg.strategy = replace(cfg.strategy, enabled_signals=("mean_rev_long",))
     hub = SignalHub(cfg)
@@ -121,7 +121,7 @@ def test_hub_only_loads_enabled_signals():
 def test_builder_prefers_regime_columns_over_history(monkeypatch):
     _ensure_signals_loaded()
 
-    cfg = V29Config()
+    cfg = V30Config()
 
     row = _row(close=90.0, ema_fast=110.0, ema_slow=95.0, rsi=5.0, adx=45.0)
     row["hurst"] = 0.8
@@ -148,7 +148,7 @@ def test_builder_prefers_regime_columns_over_history(monkeypatch):
 
 def test_builder_handles_timeframe_specific_spec(monkeypatch):
 
-    cfg = V29Config()
+    cfg = V30Config()
 
     cfg.strategy = replace(
         cfg.strategy,
@@ -247,7 +247,7 @@ def test_builder_handles_timeframe_specific_spec(monkeypatch):
 
 def test_builder_uses_recipe_exit_profile_when_available(monkeypatch):
 
-    cfg = V29Config()
+    cfg = V30Config()
 
     cfg.strategy = replace(
         cfg.strategy,

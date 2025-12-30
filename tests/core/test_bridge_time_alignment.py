@@ -14,7 +14,6 @@ def test_bridge_strict_time_alignment_records_rejection():
     strategy = SimpleNamespace(
         cfg=SimpleNamespace(),
         rejections=tracker,
-        _aligned_informative_for_df=lambda *args, **kwargs: {},
     )
     bridge = ZeroCopyBridge(strategy)
 
@@ -34,7 +33,6 @@ def test_bridge_datetimeindex_bind_df_does_not_crash():
     strategy = SimpleNamespace(
         cfg=SimpleNamespace(),
         rejections=tracker,
-        _aligned_informative_for_df=lambda *args, **kwargs: {},
     )
     bridge = ZeroCopyBridge(strategy)
 
@@ -55,7 +53,6 @@ def test_bridge_get_row_meta_reads_values():
     strategy = SimpleNamespace(
         cfg=SimpleNamespace(),
         rejections=tracker,
-        _aligned_informative_for_df=lambda *args, **kwargs: {},
     )
     bridge = ZeroCopyBridge(strategy)
 

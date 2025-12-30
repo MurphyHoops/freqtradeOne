@@ -24,6 +24,9 @@ class GlobalRiskBackend(Protocol):
     def get_snapshot(self) -> GlobalSnapshot:
         ...
 
+    def atomic_update_debt(self, delta: float) -> float:
+        ...
+
     def add_loss(self, amount: float) -> None:
         ...
 
@@ -64,11 +67,15 @@ class LocalGlobalBackend(GlobalRiskBackend):
             market_volatility=self._market_volatility,
         )
 
+    def atomic_update_debt(self, delta: float) -> float:
+        self._debt_pool = max(0.0, self._debt_pool + float(delta))
+        return self._debt_pool
+
     def add_loss(self, amount: float) -> None:
-        self._debt_pool += float(amount)
+        self.atomic_update_debt(amount)
 
     def repay_loss(self, amount: float) -> None:
-        self._debt_pool = max(0.0, self._debt_pool - float(amount))
+        self.atomic_update_debt(-float(amount))
 
     def set_market_metrics(self, bias: float, volatility: float) -> None:
         self._market_bias = float(max(-1.0, min(1.0, bias)))
@@ -113,7 +120,7 @@ class RedisGlobalBackend(GlobalRiskBackend):
         port: int,
         db: int,
         password: str | None = None,
-        namespace: str = "TB_V29:",
+        namespace: str = "TB_V30:",
     ) -> None:
         if redis is None:
             raise ImportError("redis package is required for RedisGlobalBackend")
@@ -134,12 +141,12 @@ class RedisGlobalBackend(GlobalRiskBackend):
             socket_timeout=0.05,
             socket_connect_timeout=0.05,
         )
-        self._repay_script = self._register_script(
+        self._debt_update_script = self._register_script(
             """
             local key = KEYS[1]
-            local amount = tonumber(ARGV[1])
+            local delta = tonumber(ARGV[1])
             local current = tonumber(redis.call('GET', key) or '0')
-            local new_value = current - amount
+            local new_value = current + delta
             if new_value < 0 then
                 new_value = 0
             end
@@ -217,21 +224,25 @@ class RedisGlobalBackend(GlobalRiskBackend):
             return GlobalSnapshot(debt_pool=0.0, risk_used=0.0, market_bias=0.0, market_volatility=1.0)
 
     def add_loss(self, amount: float) -> None:
-        try:
-            self._client.incrbyfloat(self._key_debt, float(amount))
-            self._invalidate_snapshot_cache()
-        except (redis.RedisError, TimeoutError, Exception) as exc:  # type: ignore
-            self._safe_log_error(f"Redis add_loss failed for amount={amount}", exc)
+        self.atomic_update_debt(float(amount))
 
     def repay_loss(self, amount: float) -> None:
+        self.atomic_update_debt(-float(amount))
+
+    def atomic_update_debt(self, delta: float) -> float:
         try:
-            if self._repay_script:
-                self._repay_script(keys=[self._key_debt], args=[float(amount)])
+            if self._debt_update_script:
+                value = self._debt_update_script(keys=[self._key_debt], args=[float(delta)])
             else:
-                self._client.incrbyfloat(self._key_debt, -float(amount))
+                value = self._client.incrbyfloat(self._key_debt, float(delta))
+                if value < 0:
+                    self._client.set(self._key_debt, 0.0)
+                    value = 0.0
             self._invalidate_snapshot_cache()
+            return float(value)
         except (redis.RedisError, TimeoutError, Exception) as exc:  # type: ignore
-            self._safe_log_error(f"Redis repay_loss failed for amount={amount}", exc)
+            self._safe_log_error(f"Redis atomic_update_debt failed for delta={delta}", exc)
+            return 0.0
 
     def add_risk_usage(self, amount: float, cap_limit: Optional[float] = None) -> bool:
         amount = float(amount)

@@ -1,6 +1,6 @@
-ï»¿"""CycleAgent è¡Œä¸ºçš„å•å…ƒæµ‹è¯•ã€‚
+"""CycleAgent ĞĞÎªµÄµ¥Ôª²âÊÔ¡£
 
-åŒ…å«ç›ˆåˆ©å‘¨æœŸæ¸…å€ºã€é¢„çº¦ TTL æ¨è¿›ä»¥åŠé£é™©æ—¥å¿—å†™å…¥ç­‰è·¯å¾„çš„éªŒè¯ã€‚
+°üº¬Ó¯ÀûÖÜÆÚÇåÕ®¡¢Ô¤Ô¼ TTL ÍÆ½øÒÔ¼°·çÏÕÈÕÖ¾Ğ´ÈëµÈÂ·¾¶µÄÑéÖ¤¡£
 """
 
 import time
@@ -10,12 +10,12 @@ from types import SimpleNamespace
 import pytest
 
 from user_data.strategies.agents.portfolio.cycle import CycleAgent
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 from user_data.strategies.agents.portfolio.treasury import AllocationPlan
 
 
 class DummyPairState:
-    """æœ€å°åŒ–çš„äº¤æ˜“å¯¹çŠ¶æ€å¯¹è±¡ï¼Œç”¨äºæ¨¡æ‹Ÿ CycleAgent æ‰€éœ€å­—æ®µã€‚"""
+    """×îĞ¡»¯µÄ½»Ò×¶Ô×´Ì¬¶ÔÏó£¬ÓÃÓÚÄ£Äâ CycleAgent ËùĞè×Ö¶Î¡£"""
 
     def __init__(self, local_loss: float = 0.0):
         self.cooldown_bars_left = 0
@@ -31,7 +31,7 @@ class DummyPairState:
 
 
 class DummyTreasuryState:
-    """è·Ÿè¸ª fast/slow æ‹¨æ¬¾åŠè´¢æ”¿å‘¨æœŸèµ·ç‚¹ã€‚"""
+    """¸ú×Ù fast/slow ²¦¿î¼°²ÆÕşÖÜÆÚÆğµã¡£"""
 
     def __init__(self):
         self.fast_alloc_risk = {}
@@ -41,7 +41,7 @@ class DummyTreasuryState:
 
 
 class DummyState:
-    """åŠä»¿çœŸçš„ GlobalStateï¼Œä¿ç•™ CycleAgent è®¿é—®çš„æ ¸å¿ƒæ¥å£ã€‚"""
+    """°ë·ÂÕæµÄ GlobalState£¬±£Áô CycleAgent ·ÃÎÊµÄºËĞÄ½Ó¿Ú¡£"""
 
     def __init__(self, debt_pool: float, cap_pct: float, total_open: float, pair_state: DummyPairState):
         self.debt_pool = debt_pool
@@ -57,25 +57,25 @@ class DummyState:
         self.last_finalize_walltime = time.time()
 
     def get_pair_state(self, pair: str) -> DummyPairState:
-        """è¿”å›ï¼ˆæˆ–æ‡’åˆå§‹åŒ–ï¼‰æŒ‡å®šäº¤æ˜“å¯¹çŠ¶æ€ã€‚"""
+        """·µ»Ø£¨»òÀÁ³õÊ¼»¯£©Ö¸¶¨½»Ò×¶Ô×´Ì¬¡£"""
 
         if pair not in self.per_pair:
             self.per_pair[pair] = DummyPairState()
         return self.per_pair[pair]
 
     def get_total_open_risk(self) -> float:
-        """æä¾›ç»„åˆåœ¨å¸‚é£é™©ï¼Œç”¨äº CAP è®¡ç®—ã€‚"""
+        """Ìá¹©×éºÏÔÚÊĞ·çÏÕ£¬ÓÃÓÚ CAP ¼ÆËã¡£"""
 
         return self._total_open
 
     def get_dynamic_portfolio_cap_pct(self, _equity: float) -> float:
-        """æ¨¡æ‹Ÿç»„åˆ CAP ç™¾åˆ†æ¯”ã€‚"""
+        """Ä£Äâ×éºÏ CAP °Ù·Ö±È¡£"""
 
         return self._cap_pct
 
 
 class ReservationStub:
-    """ä»…å®ç° CycleAgent æ‰€éœ€æ¥å£çš„é¢„çº¦æ¡©å¯¹è±¡ã€‚"""
+    """½öÊµÏÖ CycleAgent ËùĞè½Ó¿ÚµÄÔ¤Ô¼×®¶ÔÏó¡£"""
 
     def __init__(self):
         self.total_reserved = 0.0
@@ -100,7 +100,7 @@ class ReservationStub:
 
 
 class TreasuryStub:
-    """è¿”å›å›ºå®šæ‹¨æ¬¾ç»“æœçš„è´¢æ”¿æ¡©ã€‚"""
+    """·µ»Ø¹Ì¶¨²¦¿î½á¹ûµÄ²ÆÕş×®¡£"""
 
     def __init__(self, fast: dict[str, float], slow: dict[str, float]):
         self.fast = fast
@@ -111,7 +111,7 @@ class TreasuryStub:
 
 
 class RiskStub:
-    """è®°å½•è¢«è°ƒç”¨å‚æ•°çš„é£é™©æ¡©ã€‚"""
+    """¼ÇÂ¼±»µ÷ÓÃ²ÎÊıµÄ·çÏÕ×®¡£"""
 
     def __init__(self):
         self.calls = []
@@ -122,7 +122,7 @@ class RiskStub:
 
 
 class AnalyticsStub:
-    """æ”¶é›† finalize ä¸ invariant æ—¥å¿—çš„æ¡©å®ç°ã€‚"""
+    """ÊÕ¼¯ finalize Óë invariant ÈÕÖ¾µÄ×®ÊµÏÖ¡£"""
 
     def __init__(self):
         self.finalize_calls = []
@@ -145,7 +145,7 @@ class AnalyticsStub:
 
 
 class PersistStub:
-    """ç»Ÿè®¡ä¿å­˜æ¬¡æ•°çš„æŒä¹…åŒ–æ¡©ã€‚"""
+    """Í³¼Æ±£´æ´ÎÊıµÄ³Ö¾Ã»¯×®¡£"""
 
     def __init__(self):
         self.saves = 0
@@ -155,7 +155,7 @@ class PersistStub:
 
 
 class EquityStub:
-    """ç®€å•çš„æƒç›Šæä¾›å™¨ï¼Œè¿”å›å›ºå®š equityã€‚"""
+    """¼òµ¥µÄÈ¨ÒæÌá¹©Æ÷£¬·µ»Ø¹Ì¶¨ equity¡£"""
 
     def __init__(self, equity: float):
         self.equity = equity
@@ -165,7 +165,7 @@ class EquityStub:
 
 
 def latest_finalize_entry(analytics: AnalyticsStub):
-    """æ–¹ä¾¿æ–­è¨€æ—¶è·å–æœ€è¿‘ä¸€æ¬¡ finalize æ—¥å¿—ã€‚"""
+    """·½±ã¶ÏÑÔÊ±»ñÈ¡×î½üÒ»´Î finalize ÈÕÖ¾¡£"""
 
     if not analytics.finalize_calls:
         return None
@@ -173,9 +173,9 @@ def latest_finalize_entry(analytics: AnalyticsStub):
 
 
 def test_cycle_finalize_clears_debt_on_profitable_cycle():
-    """éªŒè¯ç›ˆåˆ©å‘¨æœŸè§¦å‘æ¸…å€ºï¼ŒåŒæ—¶è´Ÿç›ˆåˆ©ä¸åº”æ¸…ç©ºå€ºåŠ¡ã€‚"""
+    """ÑéÖ¤Ó¯ÀûÖÜÆÚ´¥·¢ÇåÕ®£¬Í¬Ê±¸ºÓ¯Àû²»Ó¦Çå¿ÕÕ®Îñ¡£"""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.cycle_len_bars = 3
     cfg.risk = replace(cfg.risk, clear_debt_on_profitable_cycle=True, pain_decay_per_bar=1.0)
     state = DummyState(debt_pool=100.0, cap_pct=0.5, total_open=0.0, pair_state=DummyPairState(local_loss=50.0))
@@ -188,7 +188,7 @@ def test_cycle_finalize_clears_debt_on_profitable_cycle():
 
     agent = CycleAgent(cfg, state, reservation, treasury, risk, analytics, persist, tier_mgr=None)
 
-    # å…ˆç§¯ç´¯å¤šä¸ªå‘¨æœŸï¼Œæœ€åä¸€æ¬¡å¸¦æ­£æ”¶ç›Šï¼Œè§¦å‘æ¸…å€ºã€‚
+    # ÏÈ»ıÀÛ¶à¸öÖÜÆÚ£¬×îºóÒ»´Î´øÕıÊÕÒæ£¬´¥·¢ÇåÕ®¡£
     agent.finalize(eq)
     agent.finalize(eq)
     agent.finalize(eq)
@@ -202,10 +202,10 @@ def test_cycle_finalize_clears_debt_on_profitable_cycle():
     assert state.get_pair_state("PAIR/USDT").local_loss == pytest.approx(0.0)
     assert any(call.get("cycle_cleared", False) for call in analytics.finalize_calls)
 
-    # å¼•å…¥æ–°å€ºåŠ¡å¹¶åˆ¶é€ äºæŸå‘¨æœŸï¼Œç¡®è®¤ä¸ä¼šå†æ¬¡æ¸…å€ºã€‚
+    # ÒıÈëĞÂÕ®Îñ²¢ÖÆÔì¿÷ËğÖÜÆÚ£¬È·ÈÏ²»»áÔÙ´ÎÇåÕ®¡£
     state.debt_pool = 50.0
     state.get_pair_state("PAIR/USDT").local_loss = 25.0
-    eq.equity = 1100.0  # é‡è®¾å‘¨æœŸèµ·ç‚¹
+    eq.equity = 1100.0  # ÖØÉèÖÜÆÚÆğµã
     agent.finalize(eq)
     eq.equity = 900.0
     agent.finalize(eq)

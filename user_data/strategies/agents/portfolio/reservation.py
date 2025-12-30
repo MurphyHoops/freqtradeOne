@@ -1,16 +1,12 @@
 ﻿# -*- coding: utf-8 -*-
-"""风险预约池管理模块。
-
-ReservationAgent 负责在下单前锁定名义风险额度，并在成交/撤单/TTL 过期时
-释放额度，确保财务拨款与实际下单保持一致。
-"""
+"""Reservation pool management."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple, TYPE_CHECKING
 
-from ...config.v29_config import V29Config
+from ...config.v30_config import V30Config
 from .global_backend import GlobalRiskBackend
 
 if TYPE_CHECKING:
@@ -19,7 +15,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class ReservationRecord:
-    """描述单条预约的结构信息。"""
+    """Snapshot for a single reservation entry."""
 
     pair: str
     risk: float
@@ -28,14 +24,14 @@ class ReservationRecord:
 
 
 class ReservationAgent:
-    """管理预约、释放与 TTL 推进的风险代理。"""
+    """Manage reservation, release, and TTL advancement."""
 
-    def __init__(self, cfg: V29Config, analytics: Optional["AnalyticsAgent"] = None, backend: Optional[GlobalRiskBackend] = None) -> None:
-        """初始化预约代理。
+    def __init__(self, cfg: V30Config, analytics: Optional["AnalyticsAgent"] = None, backend: Optional[GlobalRiskBackend] = None) -> None:
+        """Initialize reservation agent.
 
         Args:
-            cfg: V29Config，用于读取预约 TTL 等参数。
-            analytics: 可选的 AnalyticsAgent，用于记录预约事件日志。
+            cfg: V30Config for TTL and reservation sizing.
+            analytics: Optional AnalyticsAgent for logging reservation events.
         """
 
         self.cfg = cfg
@@ -48,7 +44,7 @@ class ReservationAgent:
         self._released_ids_since_cycle: set[str] = set()
 
     def reserve(self, pair: str, rid: str, risk: float, bucket: str, record_backend: bool = True) -> None:
-        """为某交易对锁定风险额度。"""
+        """Reserve risk for a single pair."""
 
         if rid in self.reservations:
             return
@@ -64,7 +60,7 @@ class ReservationAgent:
             self.analytics.log_reservation("create", rid, pair, bucket, record.risk)
 
     def release(self, rid: str, event: str = "release") -> Tuple[str, float, str]:
-        """释放预约风险，仅调整预约池不回滚财政（V29.1 修订 #5）。"""
+        """Release reserved risk without rolling back treasury (V30 revision #5)."""
 
         record = self.reservations.pop(rid, None)
         if not record:
@@ -82,7 +78,7 @@ class ReservationAgent:
         return (record.pair, record.risk, record.bucket)
 
     def tick_ttl(self) -> None:
-        """推进预约的 TTL，自动释放过期预约。"""
+        """Advance TTL and expire reservations."""
 
         expired: list[str] = []
         for rid, rec in list(self.reservations.items()):
@@ -94,29 +90,29 @@ class ReservationAgent:
             self.release(rid, event="expire")
 
     def get_total_reserved(self) -> float:
-        """返回组合层面已预约的风险额度。"""
+        """Return total reserved risk for the portfolio."""
 
         return self.reserved_portfolio_risk
 
     def get_pair_reserved(self, pair: str) -> float:
-        """返回指定交易对已被预约的风险。"""
+        """Return reserved risk for a specific pair."""
 
         return self.reserved_pair_risk.get(pair, 0.0)
 
     def get_bucket_reserved(self, bucket: str) -> float:
-        """返回指定拨款桶已被预约的风险。"""
+        """Return reserved risk for a specific bucket."""
 
         return self.reserved_bucket_risk.get(bucket, 0.0)
 
     def drain_recent_releases(self) -> Iterable[str]:
-        """导出自上次调用以来已释放的预约 ID 并清空记录。"""
+        """Return release ids since last call and clear the buffer."""
 
         ids = tuple(self._released_ids_since_cycle)
         self._released_ids_since_cycle.clear()
         return ids
 
     def to_snapshot(self) -> Dict[str, Any]:
-        """构造可持久化的预约池快照。"""
+        """Serialize reservation pool state."""
 
         return {
             "reservations": {
@@ -134,7 +130,7 @@ class ReservationAgent:
         }
 
     def restore_snapshot(self, snap: Optional[dict]) -> None:
-        """从快照恢复预约池状态。"""
+        """Restore reservation pool state from snapshot."""
 
         snap = snap or {}
         self.reservations = {}

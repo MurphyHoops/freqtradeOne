@@ -1,9 +1,9 @@
-"""TaxBrain V29 configuration module.
+"""TaxBrain V30 configuration module.
 
 This module wires the "signals → strategies → tiers → routing" stack into a
 set of immutable data objects so that runtime behaviour can be steered purely
 via configuration. Besides the defaults, :func:`apply_overrides` helps align a
-`V29Config` instance with Freqtrade's ``strategy_params`` overrides.
+`V30Config` instance with Freqtrade's ``strategy_params`` overrides.
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ class SystemConfig:
     redis_host: str = "localhost"  # Redis host when using redis backend.
     redis_port: int = 6379  # Redis port; change if your redis listens elsewhere.
     redis_db: int = 0  # Redis DB index; isolates namespaces.
-    redis_namespace: str = "TB_V29:"  # Redis key prefix; change to avoid collisions.
+    redis_namespace: str = "TB_V30:"  # Redis key prefix; change to avoid collisions.
     timeframe: str = "5m"  # Primary strategy timeframe; higher values slow trading cadence.
     startup_candle_count: int = 210  # Warmup candles required; raise if indicators need longer history.
     dry_run_wallet_fallback: float = 1000.0  # Equity seed for backtests/dry-run when exchange balance unavailable.
@@ -365,8 +365,8 @@ DEFAULT_TIER_ROUTING_MAP: Dict[int, str] = {
 }
 
 @dataclass
-class V29Config:
-    """V29 strategy parameters (signals/strategy/tier binding).
+class V30Config:
+    """V30 strategy parameters (signals/strategy/tier binding).
 
     Notes:
     - Any config field containing `nominal` is a nominal USDT amount (amount * price), leverage-agnostic.
@@ -506,7 +506,7 @@ class V29Config:
             self.strategy = StrategyConfig(strategies=strategies)
 
 
-def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]) -> V29Config:
+def apply_overrides(cfg: V30Config, strategy_params: Optional[Mapping[str, Any]]) -> V30Config:
     """Apply overrides sourced from Freqtrade ``strategy_params``."""
 
     if not strategy_params:
@@ -652,7 +652,7 @@ def apply_overrides(cfg: V29Config, strategy_params: Optional[Mapping[str, Any]]
     return cfg
 
 
-def get_exit_profile(cfg: V29Config, name: str) -> ExitProfile:
+def get_exit_profile(cfg: V30Config, name: str) -> ExitProfile:
     """Fetch a named exit profile, raising for unknown profiles."""
 
     try:
@@ -662,7 +662,7 @@ def get_exit_profile(cfg: V29Config, name: str) -> ExitProfile:
         raise ValueError(f"Unknown exit profile '{name}'") from exc
 
 
-def find_strategy_recipe(cfg: V29Config, recipe_name: str) -> Optional[StrategySpec]:
+def find_strategy_recipe(cfg: V30Config, recipe_name: str) -> Optional[StrategySpec]:
     """Return the requested strategy recipe, if defined."""
 
     for recipe in cfg.strategy_recipes:
@@ -671,7 +671,7 @@ def find_strategy_recipe(cfg: V29Config, recipe_name: str) -> Optional[StrategyS
     return None
 
 
-def entries_to_recipe(cfg: V29Config, entry_kind: str) -> Optional[StrategySpec]:
+def entries_to_recipe(cfg: V30Config, entry_kind: str) -> Optional[StrategySpec]:
     """Locate the first recipe that references the given entry signal."""
 
     for recipe in cfg.strategy_recipes:
@@ -680,7 +680,7 @@ def entries_to_recipe(cfg: V29Config, entry_kind: str) -> Optional[StrategySpec]
     return None
 
 
-def get_strategy(cfg: V29Config, name: str) -> StrategySpec:
+def get_strategy(cfg: V30Config, name: str) -> StrategySpec:
     """Return a declared strategy by name."""
 
     recipe = find_strategy_recipe(cfg, name)
@@ -689,7 +689,7 @@ def get_strategy(cfg: V29Config, name: str) -> StrategySpec:
     raise ValueError(f"Unknown strategy recipe '{name}'")
 
 
-def get_tier_spec(cfg: V29Config, name: str) -> TierSpec:
+def get_tier_spec(cfg: V30Config, name: str) -> TierSpec:
     """Return a tier specification by name."""
 
     try:
@@ -699,7 +699,7 @@ def get_tier_spec(cfg: V29Config, name: str) -> TierSpec:
         raise ValueError(f"Unknown tier '{name}'") from exc
 
 
-def get_tier_for_closs(cfg: V29Config, closs: int) -> TierSpec:
+def get_tier_for_closs(cfg: V30Config, closs: int) -> TierSpec:
     """Resolve the tier spec that should serve a given closs value."""
 
     tier_routing = getattr(getattr(cfg, "strategy", None), "tier_routing", None)
@@ -724,7 +724,7 @@ __all__ = [
     "GatekeepingConfig",
     "TargetRecoveryConfig",
     "SizingAlgoConfig",
-    "V29Config",
+    "V30Config",
     "apply_overrides",
     "entries_to_recipe",
     "find_strategy_recipe",

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
-from ...config.v29_config import V29Config
+from ...config.v30_config import V30Config
 from ..portfolio.tier import TierManager
 from .profiles import ProfilePlan, atr_pct_from_dp, atr_pct_from_rows, compute_plan_from_atr
 from .router import EXIT_ROUTER
@@ -14,7 +14,7 @@ from .router import EXIT_ROUTER
 class ExitFacade:
     """Provide a single entrypoint for ATR sourcing, planning, and routing."""
 
-    def __init__(self, cfg: V29Config, tier_mgr: TierManager, router=EXIT_ROUTER) -> None:
+    def __init__(self, cfg: V30Config, tier_mgr: TierManager, router=EXIT_ROUTER) -> None:
         self.cfg = cfg
         self.tier_mgr = tier_mgr
         self.router = router

@@ -1,4 +1,4 @@
-"""ExitPolicyV29 and TaxBrainV30 exit wiring unit tests."""
+"""ExitPolicyV30 and TaxBrainV30 exit wiring unit tests."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import pytest
 import user_data.strategies.TaxBrainV30 as strat_mod
 from user_data.strategies.core.engine import ActiveTradeMeta, PairState
 from user_data.strategies.TaxBrainV30 import TaxBrainV30
-from user_data.strategies.agents.exits.exit import ExitPolicyV29, ExitTags
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.agents.exits.exit import ExitPolicyV30, ExitTags
+from user_data.strategies.config.v30_config import V30Config
 
 
 class DummyState:
-    """Provide minimal state needed by ExitPolicyV29."""
+    """Provide minimal state needed by ExitPolicyV30."""
 
-    def __init__(self, cfg: V29Config):
+    def __init__(self, cfg: V30Config):
         self.cfg = cfg
         self.per_pair = {}
         self.debt_pool = 0.0
@@ -57,12 +57,12 @@ class DummyTrade:
 
 
 def test_exit_policy_paths():
-    """Validate exit tags emitted by ExitPolicyV29."""
+    """Validate exit tags emitted by ExitPolicyV30."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     state = DummyState(cfg)
     equity = DummyEquity(1000.0)
-    exit_policy = ExitPolicyV29(state, equity, cfg)
+    exit_policy = ExitPolicyV30(state, equity, cfg)
 
     pair = "TEST/USDT"
     pst = state.get_pair_state(pair)

@@ -46,7 +46,7 @@ services:
       - "127.0.0.1:8080:8080"
     command: >
       webserver
-      --config /freqtrade/user_data/configs/v29_backtest.json
+      --config /freqtrade/user_data/configs/v30_backtest.json
 
     restart: unless-stopped
 

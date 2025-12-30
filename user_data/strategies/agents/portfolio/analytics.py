@@ -35,8 +35,8 @@ class AnalyticsAgent:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.date_tag = datetime.now(UTC).strftime("%Y%m%d")
-        self.jsonl_path = self.log_dir / f"v29_analytics.{self.date_tag}.jsonl"
-        self.csv_path = self.log_dir / "v29_analytics.csv"
+        self.jsonl_path = self.log_dir / f"v30_analytics.{self.date_tag}.jsonl"
+        self.csv_path = self.log_dir / "v30_analytics.csv"
         self._csv_headers = [
             "ts",
             "bar_tick",

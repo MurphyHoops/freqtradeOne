@@ -1,9 +1,9 @@
 from user_data.strategies.agents.portfolio.tier import TierManager
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 
 def test_tier_policy_prefers_recipes_over_squads():
-    cfg = V29Config()
+    cfg = V30Config()
     tier_mgr = TierManager(cfg)
     healthy = tier_mgr.get_by_name("T0_healthy")
     recovery = tier_mgr.get_by_name("T12_recovery")

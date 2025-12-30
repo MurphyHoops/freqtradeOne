@@ -57,7 +57,7 @@ def test_redis_backend_repay_clamps_to_zero_and_tracks_risk():
     except Exception:
         pytest.skip("redis server not available")
 
-    namespace = f"TB_V29_TEST:{uuid.uuid4()}:"
+    namespace = f"TB_V30_TEST:{uuid.uuid4()}:"
     debt_key = f"{namespace}GLOBAL_DEBT"
     risk_key = f"{namespace}GLOBAL_RISK_USED"
     backend = RedisGlobalBackend(

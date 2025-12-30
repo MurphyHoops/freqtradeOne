@@ -191,8 +191,8 @@ class MatrixEngine:
                         continue
                     planned: list[schemas.Candidate] = []
                     for candidate in raw_candidates:
-                        cand_with_plan = self._strategy._candidate_with_plan(
-                            pair, candidate, row, None
+                        cand_with_plan = helpers.candidate_with_plan(
+                            self._strategy, pair, candidate, row, None
                         )
                         if cand_with_plan:
                             planned.append(cand_with_plan)
@@ -202,12 +202,13 @@ class MatrixEngine:
                         planned = [
                             cand
                             for cand in planned
-                            if self._strategy._candidate_allowed_any_tier(cand)
+                            if helpers.candidate_allowed_any_tier(self._strategy, cand)
                         ]
                         if not planned:
                             continue
-                    grouped = self._strategy._trim_candidate_pool(
-                        self._strategy._group_candidates_by_direction(planned)
+                    grouped = helpers.trim_candidate_pool(
+                        self._strategy,
+                        helpers.group_candidates_by_direction(planned),
                     )
                     pos = idx_to_pos.get(idx)
                     if pos is None:
@@ -244,18 +245,21 @@ class MatrixEngine:
                     continue
                 planned: list[schemas.Candidate] = []
                 for candidate in raw_candidates:
-                    cand_with_plan = self._strategy._candidate_with_plan(pair, candidate, row, inf_rows)
+                    cand_with_plan = helpers.candidate_with_plan(self._strategy, pair, candidate, row, inf_rows)
                     if cand_with_plan:
                         planned.append(cand_with_plan)
                 if not planned:
                     continue
                 planned = [
                     cand for cand in planned
-                    if self._strategy._candidate_allowed_any_tier(cand)
+                    if helpers.candidate_allowed_any_tier(self._strategy, cand)
                 ]
                 if not planned:
                     continue
-                grouped = self._strategy._trim_candidate_pool(self._strategy._group_candidates_by_direction(planned))
+                grouped = helpers.trim_candidate_pool(
+                    self._strategy,
+                    helpers.group_candidates_by_direction(planned),
+                )
                 pos = df.index.get_loc(idx)
                 if grouped.get("long"):
                     payloads_long[pos] = [self._candidate_to_payload(c) for c in grouped["long"]]
@@ -274,15 +278,18 @@ class MatrixEngine:
             )
             planned: list[schemas.Candidate] = []
             for candidate in raw_candidates:
-                cand_with_plan = self._strategy._candidate_with_plan(pair, candidate, row, inf_rows)
+                cand_with_plan = helpers.candidate_with_plan(self._strategy, pair, candidate, row, inf_rows)
                 if cand_with_plan:
                     planned.append(cand_with_plan)
             policy = self._strategy.tier_mgr.get(pst_snapshot.closs)
             planned = [
                 cand for cand in planned
-                if self._strategy._candidate_allowed_by_policy(policy, cand)
+                if helpers.candidate_allowed_by_policy(policy, cand)
             ]
-            grouped = self._strategy._trim_candidate_pool(self._strategy._group_candidates_by_direction(planned))
+            grouped = helpers.trim_candidate_pool(
+                self._strategy,
+                helpers.group_candidates_by_direction(planned),
+            )
             pos = df.index.get_loc(last_idx)
             if grouped.get("long"):
                 payloads_long[pos] = [self._candidate_to_payload(c) for c in grouped["long"]]

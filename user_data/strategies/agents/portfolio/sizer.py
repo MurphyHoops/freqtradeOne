@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
-from ...config.v29_config import SizingAlgoConfig, V29Config, get_exit_profile
+from ...config.v30_config import SizingAlgoConfig, V30Config, get_exit_profile
 from .schemas import SizingContext
 from .sizing_algos import ALGO_REGISTRY, Caps, SizingInputs
 from .reservation import ReservationAgent
@@ -24,7 +24,7 @@ class SizerAgent:
         state,
         reservation: ReservationAgent,
         eq_provider,
-        cfg: V29Config,
+        cfg: V30Config,
         tier_mgr: TierManager,
         backend: Optional[GlobalRiskBackend] = None,
     ) -> None:
@@ -153,7 +153,7 @@ class SizerAgent:
         if caps.risk_room_nominal <= 0:
             return (0.0, 0.0, bucket)
 
-        # 中央分配债务
+        # Central debt allocation
         score_val = float(ctx.score or 0.0)
         if score_val <= 0:
             try:
@@ -256,7 +256,7 @@ class SizerAgent:
             if c_target_risk_cap_pct > 0 and equity > 0:
                 c_target_risk = min(c_target_risk, equity * c_target_risk_cap_pct)
 
-        # 地方
+        # Local recovery
         local_inputs = SizingInputs(
             ctx=ctx,
             tier=tier_pol,
@@ -287,7 +287,7 @@ class SizerAgent:
         if target_risk + c_target_risk <= 0:
             return (0.0, 0.0, bucket)
  
-        # 汇总
+        # Final aggregation
         nominal_target = (target_risk + c_target_risk) / sl_price_pct if sl_price_pct > 0 else 0.0
         stake_nominal = self._apply_caps(nominal_target, caps, min_entry_nominal)
         if stake_nominal <= 0:
@@ -315,7 +315,7 @@ class SizerAgent:
         return (float(stake_margin), float(risk_final), bucket)
 
     def _resolve_vector_k(self, direction: str) -> Tuple[str, float]:
-        """Map signal方向 to极坐标拨款 K 值."""
+        """Map signal direction to the allocation vector K."""
 
         bucket = direction or "long"
         treasury = getattr(self.state, "treasury", None)

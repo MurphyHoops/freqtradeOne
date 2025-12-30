@@ -6,7 +6,7 @@ from dataclasses import replace
 
 from user_data.strategies.agents.signals import builder as req
 from user_data.strategies.agents.signals.schemas import Condition, SignalSpec
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 
 def _spec(
@@ -59,7 +59,7 @@ def test_collect_factor_requirements_respects_enabled_signals(monkeypatch):
     keep = _spec("keep", [Condition("RSI", ">", 10.0)])
     skip = _spec("skip", [Condition("EMA_FAST", ">", 0.0)], timeframe="4h")
     monkeypatch.setattr(req.REGISTRY, "all", lambda: [keep, skip])
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.strategy = replace(cfg.strategy, enabled_signals=("keep",))
 
     factor_map = req.collect_factor_requirements(cfg=cfg)

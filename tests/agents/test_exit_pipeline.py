@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 from user_data.strategies.agents.exits.facade import ExitFacade
 from user_data.strategies.agents.exits.exit import ExitTags
 from user_data.strategies.agents.exits.rules_threshold import (
@@ -56,7 +56,7 @@ class _DummyStrategy:
 
 
 def test_exit_facade_resolve_trade_plan_default_profile():
-    cfg = V29Config()
+    cfg = V30Config()
     tier_mgr = TierManager(cfg)
     facade = ExitFacade(cfg, tier_mgr)
 
@@ -76,7 +76,7 @@ def test_exit_facade_resolve_trade_plan_default_profile():
 
 
 def test_exit_facade_respects_tier_default_profile(tmp_path):
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.strategy = replace(
         cfg.strategy,
         exit_profiles={
@@ -105,7 +105,7 @@ def test_exit_facade_respects_tier_default_profile(tmp_path):
 
 
 def test_rules_threshold_hard_sl_tp_from_entry():
-    cfg = V29Config()
+    cfg = V30Config()
 
     trade = _DummyTrade(custom={"sl_pct": 0.05, "tp_pct": 0.1})
     strategy = SimpleNamespace(exit_facade=None)
@@ -199,7 +199,7 @@ def _sl_ctx(cfg, trade, strategy, dp=None, profit: float = 0.0, now=None):
 
 
 def test_breakeven_lock_from_profile(monkeypatch):
-    cfg = V29Config()
+    cfg = V30Config()
     profile = SimpleNamespace(
         breakeven_lock_frac_of_tp=0.5,
         trail_mode=None,
@@ -216,7 +216,7 @@ def test_breakeven_lock_from_profile(monkeypatch):
 
 
 def test_percent_trail_rule_tightens_sl():
-    cfg = V29Config()
+    cfg = V30Config()
     profile = SimpleNamespace(
         breakeven_lock_frac_of_tp=None,
         trail_mode="percent",
@@ -233,7 +233,7 @@ def test_percent_trail_rule_tightens_sl():
 
 
 def test_chandelier_trail_uses_price_extremes():
-    cfg = V29Config()
+    cfg = V30Config()
     profile = SimpleNamespace(
         breakeven_lock_frac_of_tp=None,
         trail_mode="chandelier",

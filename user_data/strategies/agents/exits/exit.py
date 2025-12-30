@@ -48,7 +48,7 @@ class ExitTags:
             return False
         return tag in cls.VECTOR_TAGS or tag.startswith(cls.FLIP_PREFIX)
 
-class ExitPolicyV29:
+class ExitPolicyV30:
     def __init__(self, state, eq_provider, cfg, dp=None) -> None:
         self.state = state
         self.eq_provider = eq_provider
@@ -130,5 +130,5 @@ class ExitPolicyV29:
 
         return None
 
-__all__ = ["ExitPolicyV29", "ExitTags"]
+__all__ = ["ExitPolicyV30", "ExitTags"]
 

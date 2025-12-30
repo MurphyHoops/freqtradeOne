@@ -1,12 +1,12 @@
 {
-  "_comment": "Template for TaxBrain V29 nested configuration. Values shown are defaults; adjust per environment.",
+  "_comment": "Template for TaxBrain V30 nested configuration. Values shown are defaults; adjust per environment.",
   "system": {
     "_comment": "Runtime/backend wiring",
     "global_backend_mode": "local",
     "redis_host": "localhost",
     "redis_port": 6379,
     "redis_db": 0,
-    "redis_namespace": "TB_V29:",
+    "redis_namespace": "TB_V30:",
     "timeframe": "5m",
     "startup_candle_count": 210,
     "dry_run_wallet_fallback": 1000.0,

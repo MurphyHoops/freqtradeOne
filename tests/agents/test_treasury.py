@@ -6,7 +6,7 @@ import pytest
 
 from user_data.strategies.agents.portfolio.tier import TierPolicy
 from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 
 class FixedTierManager:
@@ -55,7 +55,7 @@ def base_snapshot() -> dict:
 def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
     """Ensure per-squad selection feeds fast/slow allocations."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.trading = replace(
         cfg.trading,
         treasury=replace(
@@ -126,7 +126,7 @@ def test_treasury_selects_best_per_squad_and_distributes_fast_slow():
 def test_treasury_honours_min_injection_and_cap_trim():
     """Min injection and per-pair caps should still hold."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.trading = replace(
         cfg.trading,
         treasury=replace(

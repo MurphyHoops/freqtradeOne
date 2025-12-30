@@ -1,10 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""交易执行事件的状态协调代理。
-
-ExecutionAgent 在开仓、平仓以及撤单/拒单等生命周期钩子中负责更新
-GlobalState、释放预约名额并同步止损/止盈元数据，确保风险账本与权益
-记录保持一致。
-"""
+"""Execution event coordinator for trades."""
 
 from __future__ import annotations
 
@@ -15,7 +10,7 @@ from .tier import TierManager, TierPolicy
 
 
 class ExecutionAgent:
-    """封装开仓、平仓与撤单事件处理的执行代理。"""
+    """Handle open/close/cancel lifecycle events."""
 
     def __init__(
         self,
@@ -24,13 +19,13 @@ class ExecutionAgent:
         eq_provider,
         cfg,
     ) -> None:
-        """初始化执行代理。
+        """Initialize execution agent.
 
         Args:
-            state: GlobalState 实例，记录在市风险与交易元数据。
-            reservation: ReservationAgent，用于管理风险预约与释放。
-            eq_provider: EquityProvider，负责实时维护权益数值。
-            cfg: V29Config 配置对象，便于读取策略参数。
+            state: GlobalState instance for risk and trade metadata.
+            reservation: ReservationAgent to manage reservations.
+            eq_provider: EquityProvider for live equity updates.
+            cfg: V30Config for sizing parameters.
         """
 
         self.state = state
@@ -46,21 +41,19 @@ class ExecutionAgent:
         pending_meta: Dict[str, Any] | None,
         tier_mgr: "TierManager",
     ) -> bool:
-        """处理开仓成交事件。
+        """Handle open fill events.
 
-        1) 将新仓登记进 GlobalState（含 ActiveTradeMeta）；
-        2) 释放预约名额；
-        3) 把 sl/tp 同步到 trade.custom_data / trade.user_data，供退出与止损逻辑使用。
+        1) Register the new trade in GlobalState (ActiveTradeMeta).
+        2) Release reservation slots.
+        3) Sync sl/tp metadata to trade.custom_data / trade.user_data.
         """
-        # 取 trade_id（兼容不同属性名）
+
         trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
         pst = self.state.get_pair_state(pair)
 
-        # 若已登记则忽略重复回调
         if trade_id in getattr(pst, "active_trades", {}):
             return False
 
-        # None 安全 & 兼容老键 sl/tp
         meta = pending_meta or {}
         sl = float(meta.get("sl_pct", meta.get("sl", 0.0)))
         tp = float(meta.get("tp_pct", meta.get("tp", 0.0)))
@@ -74,13 +67,11 @@ class ExecutionAgent:
         plan_timeframe = meta.get("plan_timeframe")
         plan_atr_pct = meta.get("atr_pct")
 
-        # 正确的方法名：TierManager.get(closs)
         try:
             tier_pol = tier_mgr.get(getattr(pst, "closs", 0))
         except Exception:
             tier_pol = None
 
-        # 计算当前这单的 stake_nominal（pre-leverage）
         stake_nominal = 0.0
         lev = getattr(getattr(self.cfg, "sizing", None), "enforce_leverage", None)
         if lev is None:
@@ -90,7 +81,6 @@ class ExecutionAgent:
             stake_margin = real_risk / sl
             stake_nominal = stake_margin * lev
 
-        # 按 GlobalState.record_trade_open 的签名顺序与命名传参
         self.state.record_trade_open(
             pair=pair,
             trade_id=trade_id,
@@ -106,14 +96,12 @@ class ExecutionAgent:
             plan_timeframe=plan_timeframe,
             plan_atr_pct=plan_atr_pct,
             tier_name=getattr(tier_pol, "name", None) if tier_pol else None,
-            stake_nominal=stake_nominal,  # ★ 新增
+            stake_nominal=stake_nominal,
         )
 
-        # 释放预约风险名额
         if rid:
             self.reservation.release(str(rid))
 
-        # 将 sl/tp 同步写入 trade.custom_data / user_data
         tier_name = getattr(tier_pol, "name", None) if tier_pol else None
         try:
             if hasattr(trade, "set_custom_data"):
@@ -150,7 +138,6 @@ class ExecutionAgent:
 
         return True
 
-
     def on_close_filled(
         self,
         pair: str,
@@ -158,7 +145,7 @@ class ExecutionAgent:
         order,
         tier_mgr: TierManager,
     ) -> bool:
-        """处理平仓成交事件，回收风险并更新权益。"""
+        """Handle close fill events, update risk and equity."""
 
         trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
         if trade_id not in self.state.get_pair_state(pair).active_trades:
@@ -173,7 +160,7 @@ class ExecutionAgent:
         return True
 
     def on_cancel_or_reject(self, pair: str, rid: Optional[str]) -> bool:
-        """在撤单或拒单时仅释放预约风险，不做财政回滚。"""
+        """Release reservation on cancel or reject."""
 
         if not rid:
             return False

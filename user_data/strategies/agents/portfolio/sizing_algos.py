@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, TYPE_CHECKING
 
-from ...config.v29_config import V29Config
+from ...config.v30_config import V30Config
 from .schemas import SizingContext
 from .tier import TierPolicy
 
@@ -63,7 +63,7 @@ class SizingResult:
     recovery_risk: float = 0.0
 
 
-def algo_base_only(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
+def algo_base_only(inputs: SizingInputs, cfg: V30Config) -> SizingResult:
     """Return target risk (U) using only base risk and optional bucket allocation.
 
     Uses base_risk = base_nominal * sl_price_pct; ignores baseline and recovery so
@@ -78,7 +78,7 @@ def algo_base_only(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     return SizingResult(target_risk=max(target_risk, 0.0), reason="BASE_ONLY")
 
 
-def algo_baseline(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
+def algo_baseline(inputs: SizingInputs, cfg: V30Config) -> SizingResult:
     """Return target risk (U) matching legacy BASELINE = base risk plus baseline top-up.
 
     Risk units are account currency; risk derives from nominal via sl_price_pct.
@@ -97,7 +97,7 @@ def algo_baseline(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     return SizingResult(target_risk=max(target_risk, 0.0), reason="BASELINE", recovery_risk=recovery_risk)
 
 
-def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
+def algo_target_recovery(inputs: SizingInputs, cfg: V30Config) -> SizingResult:
     """Return ATR-style TARGET_RECOVERY risk (U), including loss/bucket recovery.
 
     Units:
@@ -151,7 +151,7 @@ def algo_target_recovery(inputs: SizingInputs, cfg: V29Config) -> SizingResult:
     return SizingResult(target_risk=max(target_risk, 0.0), reason="TARGET_RECOVERY", recovery_risk=recovery_risk)
 
 
-AlgoFn = Callable[[SizingInputs, V29Config], SizingResult]
+AlgoFn = Callable[[SizingInputs, V30Config], SizingResult]
 
 ALGO_REGISTRY: Dict[str, AlgoFn] = {
     "BASE_ONLY": algo_base_only,

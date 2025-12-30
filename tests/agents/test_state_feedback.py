@@ -7,11 +7,11 @@ import pytest
 from user_data.strategies.core.engine import GlobalState
 from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
 from user_data.strategies.agents.signals import schemas
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 
 def test_record_trade_close_updates_closs_and_debt():
-    cfg = V29Config()
+    cfg = V30Config()
     state = GlobalState(cfg)
     tier_mgr = TierManager(cfg)
     pair = "BTC/USDT"
@@ -33,7 +33,7 @@ def test_record_trade_close_updates_closs_and_debt():
 
 
 def test_candidate_pool_selection_respects_tier():
-    cfg = V29Config()
+    cfg = V30Config()
     tier_mgr = TierManager(cfg)
     tier_agent = TierAgent()
     candidate_nbx = schemas.Candidate(

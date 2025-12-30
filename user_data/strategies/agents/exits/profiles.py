@@ -2,7 +2,7 @@
 """Schema and helpers for exit profiles.
 
 This module is kept lightweight to avoid circular imports; profile instances live in
-v29_config.py or are supplied via config.json.
+v30_config.py or are supplied via config.json.
 """
 
 from __future__ import annotations

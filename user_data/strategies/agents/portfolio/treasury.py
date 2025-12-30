@@ -1,4 +1,5 @@
-"""极坐标财政大脑：将债务池与市场感知投射到长/短双向拨款 K 值。"""
+﻿# -*- coding: utf-8 -*-
+"""Treasury agent that converts debt pool and market metrics into allocation caps."""
 
 from __future__ import annotations
 
@@ -6,7 +7,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from ...config.v29_config import V29Config
+from ...config.v30_config import V30Config
 from .global_backend import GlobalRiskBackend
 
 
@@ -21,8 +22,8 @@ class AllocationPlan:
     volatility: float = 1.0
 
 
-def _dynamic_portfolio_cap_pct(cfg: V29Config, debt_pool: float, equity: float) -> float:
-    """根据债务压力动态调整组合 VaR 上限比例。"""
+def _dynamic_portfolio_cap_pct(cfg: V30Config, debt_pool: float, equity: float) -> float:
+    """Adjust portfolio cap percentage based on debt pressure."""
 
     risk_cfg = getattr(cfg, "risk", cfg)
     base = risk_cfg.portfolio_cap_pct_base
@@ -34,11 +35,11 @@ def _dynamic_portfolio_cap_pct(cfg: V29Config, debt_pool: float, equity: float) 
 
 
 class TreasuryAgent:
-    """计算 UEOT 极坐标场的 K_long / K_short。"""
+    """Compute UEOT allocation ratios K_long / K_short."""
 
     def __init__(
         self,
-        cfg: V29Config,
+        cfg: V30Config,
         tier_mgr=None,
         backend: Optional[GlobalRiskBackend] = None,
     ) -> None:
@@ -54,7 +55,7 @@ class TreasuryAgent:
         return (bias, vol, debt)
 
     def plan(self, state_snapshot: Dict[str, Any], equity: float) -> AllocationPlan:
-        """计算当前周期的长/短拨款系数。"""
+        """Compute allocation ratios for the current cycle."""
 
         backend_bias, backend_vol, backend_debt = self._extract_backend_snapshot()
 

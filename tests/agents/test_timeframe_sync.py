@@ -4,7 +4,7 @@ from user_data.strategies.TaxBrainV30 import TaxBrainV30
 
 
 def test_timeframe_startup_sync(tmp_path):
-    """实例化后应同步实例与类属性，符合 V29.1 修订 #3。"""
+    """实例化后应同步实例与类属性，符合 V30 修订 #3。"""
 
     params = {
         "strategy_params": {

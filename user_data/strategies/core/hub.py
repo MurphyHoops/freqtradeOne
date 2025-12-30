@@ -8,7 +8,7 @@ import importlib
 import importlib.util
 import sys
 
-from ..config.v29_config import V29Config, entries_to_recipe
+from ..config.v30_config import V30Config, entries_to_recipe
 from ..agents.signals import builder
 from ..agents.signals.registry import REGISTRY
 from ..plugins.signals import SIGNAL_PLUGIN_MAP
@@ -29,7 +29,7 @@ class SignalMeta:
 
 
 class SignalHub:
-    def __init__(self, cfg: V29Config) -> None:
+    def __init__(self, cfg: V30Config) -> None:
         self._cfg = cfg
         self._discovered = False
         self._specs: List[Any] = []

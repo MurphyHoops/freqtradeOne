@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Iterable
 import time
 
-from ..config.v29_config import V29Config
+from ..config.v30_config import V30Config
 from ..agents.portfolio.global_backend import GlobalRiskBackend
 from .rejections import RejectReason
 
@@ -100,7 +100,7 @@ class TreasuryState:
 
 
 class GlobalState:
-    def __init__(self, cfg: V29Config, backend: Optional[GlobalRiskBackend] = None) -> None:
+    def __init__(self, cfg: V30Config, backend: Optional[GlobalRiskBackend] = None) -> None:
         self.cfg = cfg
         self.backend = backend
         self.per_pair: Dict[str, PairState] = {}
@@ -223,10 +223,7 @@ class GlobalState:
             self.debt_pool = max(0, self.debt_pool + excess_profit)
 
             if self.backend:
-                if excess_profit > 0:
-                    self.backend.add_loss(excess_profit)
-                else:
-                    self.backend.repay_loss(0 - excess_profit)
+                self.backend.atomic_update_debt(excess_profit)
 
             pst.closs = 0
             pol = tier_mgr.get(pst.closs)
@@ -238,7 +235,7 @@ class GlobalState:
         if prev_closs >= max_closs:
             self.debt_pool += loss + pst.local_loss
             if self.backend and loss > 0:
-                self.backend.add_loss(loss + pst.local_loss)
+                self.backend.atomic_update_debt(loss + pst.local_loss)
 
             pst.local_loss = 0.0
             pst.closs = 0
@@ -348,7 +345,7 @@ class GlobalState:
 class Engine:
     def __init__(
         self,
-        cfg: V29Config,
+        cfg: V30Config,
         state: GlobalState,
         eq_provider: Any,
         treasury_agent: Any,

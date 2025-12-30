@@ -1,13 +1,13 @@
-ï»¿"""ReservationAgent ç”Ÿå‘½å‘¨æœŸç›¸å…³çš„å•å…ƒæµ‹è¯•ã€‚"""
+"""ReservationAgent ÉúÃüÖÜÆÚÏà¹ØµÄµ¥Ôª²âÊÔ¡£"""
 
 import pytest
 
 from user_data.strategies.agents.portfolio.reservation import ReservationAgent
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 
 class AnalyticsStub:
-    """è®°å½•é¢„çº¦æ—¥å¿—äº‹ä»¶çš„åˆ†ææ¡©ã€‚"""
+    """¼ÇÂ¼Ô¤Ô¼ÈÕÖ¾ÊÂ¼şµÄ·ÖÎö×®¡£"""
 
     def __init__(self):
         self.events = []
@@ -29,9 +29,9 @@ class AnalyticsStub:
 
 
 def test_reservation_lifecycle_and_metrics_reset():
-    """éªŒè¯é¢„çº¦åˆ›å»ºã€é‡Šæ”¾ã€TTL è¿‡æœŸä»¥åŠç»Ÿè®¡å½’é›¶é€»è¾‘ã€‚"""
+    """ÑéÖ¤Ô¤Ô¼´´½¨¡¢ÊÍ·Å¡¢TTL ¹ıÆÚÒÔ¼°Í³¼Æ¹éÁãÂß¼­¡£"""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.reservation_ttl_bars = 2
     analytics = AnalyticsStub()
     agent = ReservationAgent(cfg, analytics=analytics)

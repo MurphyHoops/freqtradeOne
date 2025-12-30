@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional, Sequence, TYPE_CHECKING, Tuple
 
-from ...config.v29_config import DEFAULT_TIERS, DEFAULT_TIER_ROUTING_MAP, TierSpec, V29Config
+from ...config.v30_config import DEFAULT_TIERS, DEFAULT_TIER_ROUTING_MAP, TierSpec, V30Config
 
 __all__ = [
     "TierPolicy",
@@ -62,7 +62,7 @@ class TierPolicy:
 class TierManager:
     """Resolve TierPolicy objects for the current closs / routing state."""
 
-    def __init__(self, cfg: V29Config) -> None:
+    def __init__(self, cfg: V30Config) -> None:
         self._cfg = cfg
         strat_cfg = getattr(cfg, "strategy", cfg)
         self._routing = getattr(strat_cfg, "tier_routing", getattr(cfg, "tier_routing", None))

@@ -53,6 +53,7 @@ class ZeroCopyBridge:
         base_time = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
         last_ts = base_time.iloc[-1] if len(base_time) else None
         max_entries = int(getattr(system_cfg, "aligned_info_cache_max_entries", 0) or 0) if system_cfg else 0
+        base_ts = base_time.astype("int64", copy=False).to_numpy(copy=False)
         for tf in getattr(self._strategy, "_informative_timeframes", []):
             cache_key = (pair, tf, len(df), str(last_ts))
             cached = self._aligned_info_cache.get(cache_key)
@@ -66,20 +67,27 @@ class ZeroCopyBridge:
             info_df = self.get_informative_dataframe(pair, tf)
             if info_df is None or info_df.empty:
                 continue
-            left = pd.DataFrame({"_t": base_time})
-            right = info_df.assign(
-                _tinfo=pd.to_datetime(info_df["date"]) if "date" in info_df.columns else pd.to_datetime(info_df.index)
-            )
-            merged = pd.merge_asof(
-                left.sort_values("_t"),
-                right.sort_values("_tinfo"),
-                left_on="_t",
-                right_on="_tinfo",
-                direction="backward",
-            )
-            merged.index = df.index
-            out[tf] = merged
-            self._aligned_info_cache[cache_key] = merged
+            info_time = pd.to_datetime(info_df["date"]) if "date" in info_df.columns else pd.to_datetime(info_df.index)
+            info_ts = info_time.astype("int64", copy=False).to_numpy(copy=False)
+            info_vals = info_df.to_numpy(copy=False)
+            info_valid = ~pd.isna(info_time.to_numpy(copy=False))
+            if not info_valid.all():
+                info_ts = info_ts[info_valid]
+                info_vals = info_vals[info_valid]
+            if info_ts.size == 0:
+                continue
+            if info_ts.size > 1 and np.any(info_ts[1:] < info_ts[:-1]):
+                order = np.argsort(info_ts, kind="mergesort")
+                info_ts = info_ts[order]
+                info_vals = info_vals[order]
+            idxs = np.searchsorted(info_ts, base_ts, side="right") - 1
+            aligned_vals = np.full((len(base_ts), info_vals.shape[1]), np.nan, dtype=info_vals.dtype)
+            valid = idxs >= 0
+            if valid.any():
+                aligned_vals[valid] = info_vals[idxs[valid]]
+            aligned = pd.DataFrame(aligned_vals, columns=info_df.columns, index=df.index)
+            out[tf] = aligned
+            self._aligned_info_cache[cache_key] = aligned
             if max_entries > 0:
                 while len(self._aligned_info_cache) > max_entries:
                     try:
@@ -185,6 +193,30 @@ class ZeroCopyBridge:
         for pair in stale_pairs:
             self.clear_informative_pair(pair)
 
+    def gc_pair_views(self, current_whitelist) -> None:
+        if not current_whitelist:
+            return
+        allowed = {str(pair) for pair in current_whitelist if pair}
+        if not allowed:
+            return
+        stale_pairs = [pair for pair in list(self._frames.keys()) if pair not in allowed]
+        if not stale_pairs:
+            return
+        for pair in stale_pairs:
+            self._frames.pop(pair, None)
+            self._times.pop(pair, None)
+            self._row_map.pop(pair, None)
+            self._pool_buffers.pop(pair, None)
+            self._views.pop(pair, None)
+            self._col_index.pop(pair, None)
+            self._col_names.pop(pair, None)
+            self._meta_views.pop(pair, None)
+            self._meta_col_index.pop(pair, None)
+            self._meta_col_names.pop(pair, None)
+            self.clear_informative_pair(pair)
+        for key in [key for key in list(self._aligned_info_cache.keys()) if key[0] in stale_pairs]:
+            self._aligned_info_cache.pop(key, None)
+
     def _touch_informative_key(self, pair: str, timeframe: str, max_entries: int) -> None:
         if max_entries <= 0:
             return
@@ -209,6 +241,7 @@ class ZeroCopyBridge:
             return
         try:
             self.gc_informative_cache(current_whitelist)
+            self.gc_pair_views(current_whitelist)
         finally:
             self._informative_gc_last_ts = now_ts
 
@@ -336,29 +369,45 @@ class ZeroCopyBridge:
             return None
         view = self._meta_views.get(pair)
         col_index = self._meta_col_index.get(pair)
-        if view is None or col_index is None:
+        values = np.full(len(_META_COLUMNS), np.nan, dtype=float)
+        if view is not None and col_index is not None:
+            idxs = np.array([col_index.get(name, -1) for name in _META_COLUMNS], dtype=int)
+            row_vals = view[row]
+            valid = (idxs >= 0) & (idxs < row_vals.shape[0])
+            if valid.any():
+                values[valid] = row_vals[idxs[valid]]
+            values = np.where(np.isfinite(values), values, np.nan)
+        else:
             view = self._views.get(pair)
             col_index = self._col_index.get(pair)
-        if view is None or col_index is None:
-            return None
-        def _take(name: str) -> Optional[float]:
-            idx = col_index.get(name)
-            if idx is None:
+            if view is None or col_index is None:
                 return None
-            try:
-                value = float(view[row, idx])
-            except Exception:
-                return None
-            if not np.isfinite(value):
-                return None
-            return value
-
-        return {
-            "signal_id": _take("_signal_id"),
-            "expected_edge": _take("_signal_score"),
-            "raw_score": _take("_signal_raw_score"),
-            "rr_ratio": _take("_signal_rr_ratio"),
-            "sl_pct": _take("_signal_sl_pct"),
-            "tp_pct": _take("_signal_tp_pct"),
-            "plan_atr_pct": _take("_signal_plan_atr_pct"),
-        }
+            row_vals = view[row]
+            for idx, name in enumerate(_META_COLUMNS):
+                col_idx = col_index.get(name, -1)
+                if col_idx < 0:
+                    continue
+                try:
+                    raw = row_vals[col_idx]
+                except Exception:
+                    continue
+                try:
+                    value = float(raw)
+                except Exception:
+                    continue
+                if np.isfinite(value):
+                    values[idx] = value
+        keys = (
+            "signal_id",
+            "expected_edge",
+            "raw_score",
+            "rr_ratio",
+            "sl_pct",
+            "tp_pct",
+            "plan_atr_pct",
+        )
+        out: Dict[str, float | None] = {}
+        for idx, key in enumerate(keys):
+            value = values[idx]
+            out[key] = float(value) if np.isfinite(value) else None
+        return out

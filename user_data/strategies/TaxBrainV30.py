@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover
                 self.dp = type("DP", (), {})()
 
 from user_data.strategies.agents.exits import rules_threshold  # noqa: F401
-from user_data.strategies.config.v29_config import V29Config, apply_overrides
+from user_data.strategies.config.v30_config import V30Config, apply_overrides
 from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
 from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
 from user_data.strategies.agents.portfolio.sizer import SizerAgent
@@ -52,7 +52,7 @@ except Exception:  # pragma: no cover
     EXIT_ROUTER = None
     SLContext = None  # type: ignore
     TPContext = None  # type: ignore
-from user_data.strategies.agents.exits.exit import ExitPolicyV29, ExitTags
+from user_data.strategies.agents.exits.exit import ExitPolicyV30, ExitTags
 from user_data.strategies.agents.signals import schemas
 from user_data.strategies.core.engine import Engine, GlobalState
 from user_data.strategies.core.bridge import ZeroCopyBridge
@@ -88,9 +88,9 @@ class EquityProvider:
 
 
 class TaxBrainV30(IStrategy):
-    timeframe = V29Config().system.timeframe
+    timeframe = V30Config().system.timeframe
     can_short = True
-    startup_candle_count = V29Config().system.startup_candle_count
+    startup_candle_count = V30Config().system.startup_candle_count
     use_custom_roi = False
     use_custom_stoploss = False
     trailing_stop = False
@@ -101,7 +101,7 @@ class TaxBrainV30(IStrategy):
     _indicator_requirements_map: Dict[Optional[str], set[str]] = {}
 
     def __init__(self, config: Dict[str, Any]) -> None:
-        base_cfg = V29Config()
+        base_cfg = V30Config()
         self.cfg = apply_overrides(base_cfg, config.get("strategy_params", {}))
         self.timeframe = self.cfg.system.timeframe
         self.startup_candle_count = self.cfg.system.startup_candle_count
@@ -185,7 +185,7 @@ class TaxBrainV30(IStrategy):
         if self.exit_facade:
             self.exit_facade.attach_strategy(self)
             self.exit_facade.set_dataprovider(getattr(self, "dp", None))
-        self.exit_policy = ExitPolicyV29(self.state, self.eq_provider, self.cfg, dp=getattr(self, "dp", None))
+        self.exit_policy = ExitPolicyV30(self.state, self.eq_provider, self.cfg, dp=getattr(self, "dp", None))
         self.exit_policy.set_strategy(self)
         state_file = (user_data_dir / "taxbrain_v30_state.json").resolve()
         self._runmode_token: str = self._compute_runmode_token()
@@ -329,26 +329,6 @@ class TaxBrainV30(IStrategy):
             return row.get(column, default)
         except Exception:
             return default
-
-    def _candidate_with_plan(
-        self, pair: str, candidate: Optional[schemas.Candidate], row: pd.Series, inf_rows: Dict[str, pd.Series]
-    ) -> Optional[schemas.Candidate]:
-        return helpers.candidate_with_plan(self, pair, candidate, row, inf_rows)
-
-    def _candidate_allowed_by_policy(self, policy, candidate: Optional[schemas.Candidate]) -> bool:
-        return helpers.candidate_allowed_by_policy(policy, candidate)
-
-    def _candidate_allowed_any_tier(self, candidate: Optional[schemas.Candidate]) -> bool:
-        return helpers.candidate_allowed_any_tier(self, candidate)
-
-    def _group_candidates_by_direction(self, candidates: list[schemas.Candidate]) -> dict[str, list[schemas.Candidate]]:
-        return helpers.group_candidates_by_direction(candidates)
-
-    def _trim_candidate_pool(self, grouped: dict[str, list[schemas.Candidate]]) -> dict[str, list[schemas.Candidate]]:
-        return helpers.trim_candidate_pool(self, grouped)
-
-    def _candidate_to_payload(self, candidate: schemas.Candidate) -> dict[str, Any]:
-        return helpers.candidate_to_payload(candidate)
 
     def _update_last_signal(self, pair: str, candidate: Optional[schemas.Candidate], row: pd.Series) -> None:
         helpers.update_last_signal(self, pair, candidate, row)

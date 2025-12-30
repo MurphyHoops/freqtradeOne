@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from user_data.strategies.agents.portfolio.sizer import SizerAgent
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 
 class DummyPairState:
@@ -114,7 +114,7 @@ def build_policy(**overrides):
 def test_sizer_suppresses_baseline_when_stressed():
     """Baseline risk suppressed under stress should skip sizing."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.trading = replace(cfg.trading, sizing=replace(cfg.trading.sizing, enforce_leverage=1.0))
     pair_state = DummyPairState()
     state = DummyState(
@@ -139,7 +139,7 @@ def test_sizer_suppresses_baseline_when_stressed():
 def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
     """BASE_ONLY should honor base nominal even if baseline risk is suppressed."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.trading = replace(
         cfg.trading,
         sizing=replace(
@@ -176,7 +176,7 @@ def test_sizer_base_only_uses_base_nominal_when_baseline_zero():
 def test_sizer_target_recovery_uses_local_loss():
     """TARGET_RECOVERY sizing follows ATR-style formula when uncapped."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.suppress_baseline_when_stressed = False
     cfg.trading = replace(
         cfg.trading,
@@ -213,7 +213,7 @@ def test_sizer_target_recovery_uses_local_loss():
 def test_sizer_respects_caps_and_minmax():
     """Caps and exchange constraints should clamp the nominal target."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.trading = replace(
         cfg.trading,
         sizing=replace(
@@ -255,7 +255,7 @@ def test_sizer_respects_caps_and_minmax():
 def test_sizer_caps_with_proposed_stake():
     """Freqtrade proposed stake should act as a hard cap."""
 
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.trading = replace(
         cfg.trading,
         sizing=replace(

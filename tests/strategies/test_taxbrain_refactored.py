@@ -7,7 +7,7 @@ import pytest
 from user_data.strategies.core.engine import PairState
 from user_data.strategies.TaxBrainV30 import TaxBrainV30
 from user_data.strategies.agents.portfolio import global_backend as gb
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 try:
     import redis  # type: ignore
@@ -31,7 +31,7 @@ class _DummyState:
 def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV30:
     strat = TaxBrainV30.__new__(TaxBrainV30)
     strat.state = _DummyState()
-    strat.cfg = V29Config()
+    strat.cfg = V30Config()
     strat.treasury_agent = SimpleNamespace(
         evaluate_signal_quality=lambda *args, **kwargs: gate_payload or {}
     )

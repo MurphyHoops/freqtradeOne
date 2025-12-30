@@ -7,7 +7,7 @@ import math
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Set
 
-from ...config.v29_config import V29Config
+from ...config.v30_config import V30Config
 from .factors import (
     DEFAULT_BAG_FACTORS,
     FactorBank,
@@ -62,13 +62,13 @@ def _normalized_extra(extra: Optional[Iterable[str]]) -> Iterable[str]:
 
 def collect_factor_requirements(
     extra: Optional[Iterable[str]] = None,
-    cfg: Optional[V29Config] = None,
+    cfg: Optional[V30Config] = None,
 ) -> FactorMap:
     """Return per-timeframe factor requirements derived from registered signals.
 
     Args:
         extra: Optional list of additional factors (with optional ``@timeframe`` suffix).
-        cfg: Optional V29Config; when provided, only signals listed in
+        cfg: Optional V30Config; when provided, only signals listed in
             ``cfg.enabled_signals`` are considered.
     """
 
@@ -106,7 +106,7 @@ def collect_factor_requirements(
 
 def collect_indicator_requirements(
     extra: Optional[Iterable[str]] = None,
-    cfg: Optional[V29Config] = None,
+    cfg: Optional[V30Config] = None,
 ) -> IndicatorMap:
     """Translate factor requirements into indicator dependencies."""
 
@@ -122,7 +122,7 @@ def collect_indicator_requirements(
 
 def required_timeframes(
     extra: Optional[Iterable[str]] = None,
-    cfg: Optional[V29Config] = None,
+    cfg: Optional[V30Config] = None,
 ) -> Set[str]:
     """Return the set of informative timeframes needed beyond the base timeframe."""
 

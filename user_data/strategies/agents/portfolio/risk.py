@@ -1,16 +1,12 @@
 ﻿# -*- coding: utf-8 -*-
-"""风险不变式校验模块。
-
-RiskAgent 在每个 finalize 周期后检查组合/单票风险、预约 TTL 以及预约释放
-的一致性，生成结构化的校验报告供日志和监控使用。
-"""
+"""Risk invariant checks for the portfolio."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from ...config.v29_config import V29Config
+from ...config.v30_config import V30Config
 from .reservation import ReservationAgent
 from .tier import TierManager
 from .global_backend import GlobalRiskBackend
@@ -18,26 +14,27 @@ from .global_backend import GlobalRiskBackend
 
 @dataclass
 class InvariantViolation:
-    """描述一条风险不变式违规记录。"""
+    """Single invariant violation entry."""
 
     code: str
     details: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        """以字典形式导出，方便序列化。"""
+        """Convert to dict for serialization."""
 
         return {"code": self.code, "details": self.details}
 
 
 @dataclass
 class InvariantReport:
-    """风险校验整体结果。"""
+    """Risk invariant report."""
 
     ok: bool
     violations: List[InvariantViolation] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """将报告转换为可 JSON 序列化的结构。"""
+        """Convert report to a JSON-serializable dict."""
+
         return {
             "ok": self.ok,
             "violations": [v.to_dict() for v in self.violations],
@@ -45,21 +42,21 @@ class InvariantReport:
 
 
 class RiskAgent:
-    """组合风险约束与预约一致性的检查器。"""
+    """Check portfolio caps and reservation consistency."""
 
     def __init__(
         self,
-        cfg: V29Config,
+        cfg: V30Config,
         reservation: ReservationAgent,
         tier_mgr: TierManager,
         backend: Optional[GlobalRiskBackend] = None,
     ) -> None:
-        """初始化风险代理。
+        """Initialize risk agent.
 
         Args:
-            cfg: V29Config，用于读取组合 CAP 参数。
-            reservation: ReservationAgent，以获取预约占用情况。
-            tier_mgr: TierManager，提供单票 CAP 阈值。
+            cfg: V30Config for cap thresholds.
+            reservation: ReservationAgent to read reservation usage.
+            tier_mgr: TierManager providing per-pair caps.
         """
 
         self.cfg = cfg
@@ -70,12 +67,12 @@ class RiskAgent:
         self._ttl_snapshot: Dict[str, int] = {}
 
     def check_invariants(self, state, equity: float, cap_pct: float) -> InvariantReport:
-        """执行风险不变式校验并返回结构化的风险报告。"""
+        """Run invariant checks and return a structured report."""
 
         violations: List[InvariantViolation] = []
 
         def add(code: str, **details: Any) -> None:
-            """追加一条违规记录。"""
+            """Append a violation entry."""
 
             violations.append(InvariantViolation(code=code, details=details))
 

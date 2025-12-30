@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from ...config.v29_config import ExitProfile, StrategyRecipe, V29Config
+from ...config.v30_config import ExitProfile, StrategyRecipe, V30Config
 from ..exits.profiles import compute_plan_from_atr
 from .factors import FactorBank, apply_timeframe_to_factor
 
@@ -29,7 +29,7 @@ class RiskPlan:
 class RiskEstimator:
     """Translate exit profiles into usable SL/TP planning values."""
 
-    def __init__(self, cfg: V29Config) -> None:
+    def __init__(self, cfg: V30Config) -> None:
         self._cfg = cfg
         self._profiles: Dict[str, ExitProfile] = dict(
             getattr(getattr(cfg, "strategy", None), "exit_profiles", getattr(cfg, "exit_profiles", {})) or {}

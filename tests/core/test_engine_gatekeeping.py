@@ -6,7 +6,7 @@ from dataclasses import replace
 
 from user_data.strategies.core.engine import Engine, GlobalState
 from user_data.strategies.core.rejections import RejectReason, RejectTracker
-from user_data.strategies.config.v29_config import V29Config
+from user_data.strategies.config.v30_config import V30Config
 
 
 class _DummyReservation:
@@ -55,7 +55,7 @@ def _make_engine(
     tier_permit: bool = True,
     per_pair_cap_pct: float = 0.01,
 ):
-    cfg = V29Config()
+    cfg = V30Config()
     cfg.risk = replace(cfg.risk, portfolio_cap_pct_base=0.01)
     cfg.trading = replace(cfg.trading, treasury=replace(cfg.trading.treasury, debt_pool_cap_pct=0.01))
     state = GlobalState(cfg)

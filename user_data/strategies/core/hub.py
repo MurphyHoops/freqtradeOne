@@ -4,12 +4,14 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import importlib
 import importlib.util
 import sys
 
 from ..config.v29_config import V29Config, entries_to_recipe
 from ..agents.signals import builder
 from ..agents.signals.registry import REGISTRY
+from ..plugins.signals import SIGNAL_PLUGIN_MAP
 
 _LOADED_PLUGINS: set[str] = set()
 
@@ -51,10 +53,40 @@ class SignalHub:
                     sys.modules.pop(name, None)
         logger = logging.getLogger(__name__)
         strict = bool(getattr(system_cfg, "plugin_load_strict", False)) if system_cfg else False
+        enabled_signals = {
+            name
+            for name in (
+                getattr(getattr(self._cfg, "strategy", None), "enabled_signals", getattr(self._cfg, "enabled_signals", ()))
+                or ()
+            )
+            if name
+        }
         plugin_root = Path(__file__).resolve().parents[1] / "plugins"
+        if enabled_signals:
+            for signal_name in sorted(enabled_signals):
+                module_name = SIGNAL_PLUGIN_MAP.get(signal_name)
+                if not module_name:
+                    logger.warning("Signal plugin not found for: %s", signal_name)
+                    if strict:
+                        raise ValueError(f"Signal plugin not found for: {signal_name}")
+                    continue
+                module_key = f"module:{module_name}"
+                if module_key in _LOADED_PLUGINS:
+                    continue
+                try:
+                    importlib.import_module(module_name)
+                    _LOADED_PLUGINS.add(module_key)
+                except Exception as exc:
+                    if isinstance(exc, ValueError) and "Signal already registered" in str(exc):
+                        raise
+                    logger.warning("Signal plugin load failed: %s (%s)", module_name, exc, exc_info=exc)
+                    if strict:
+                        raise
         if plugin_root.exists():
             for path in sorted(plugin_root.rglob("*.py")):
                 if path.name.startswith("__"):
+                    continue
+                if enabled_signals and "signals" in path.parts:
                     continue
                 abs_path = str(path.resolve())
                 if abs_path in _LOADED_PLUGINS:

@@ -17,6 +17,9 @@ class ZeroCopyBridge:
         self._times: Dict[str, np.ndarray] = {}
         self._row_map: Dict[str, Dict[int, int]] = {}
         self._pool_buffers: Dict[str, PoolBuffer] = {}
+        self._views: Dict[str, np.ndarray] = {}
+        self._col_index: Dict[str, Dict[str, int]] = {}
+        self._col_names: Dict[str, tuple[str, ...]] = {}
 
     def align_informative(self, df: pd.DataFrame, pair: str) -> Dict[str, pd.DataFrame]:
         return self._strategy._aligned_informative_for_df(pair, df)
@@ -27,6 +30,9 @@ class ZeroCopyBridge:
             self._times.pop(pair, None)
             self._row_map.pop(pair, None)
             self._pool_buffers.pop(pair, None)
+            self._views.pop(pair, None)
+            self._col_index.pop(pair, None)
+            self._col_names.pop(pair, None)
             return
         self._frames[pair] = df
         time_series = df["date"] if "date" in df.columns else df.index
@@ -39,6 +45,11 @@ class ZeroCopyBridge:
                 continue
             row_map[int(ts_val)] = idx
         self._row_map[pair] = row_map
+        self._views[pair] = df.to_numpy(copy=False)
+        col_names = tuple(df.columns)
+        if col_names != self._col_names.get(pair):
+            self._col_index[pair] = {name: idx for idx, name in enumerate(col_names)}
+            self._col_names[pair] = col_names
 
     def bind_pool_buffer(self, pair: str, buffer: PoolBuffer) -> None:
         self._pool_buffers[pair] = buffer
@@ -118,3 +129,33 @@ class ZeroCopyBridge:
             return None
         candidates = buffer.candidates_for(row, side)
         return candidates[0] if candidates else None
+
+    def get_row_meta(self, pair: str, current_time) -> Optional[Dict[str, float | None]]:
+        row = self._row_from_time(pair, current_time)
+        if row is None:
+            return None
+        view = self._views.get(pair)
+        col_index = self._col_index.get(pair)
+        if view is None or col_index is None:
+            return None
+        def _take(name: str) -> Optional[float]:
+            idx = col_index.get(name)
+            if idx is None:
+                return None
+            try:
+                value = float(view[row, idx])
+            except Exception:
+                return None
+            if not np.isfinite(value):
+                return None
+            return value
+
+        return {
+            "signal_id": _take("_signal_id"),
+            "expected_edge": _take("_signal_score"),
+            "raw_score": _take("_signal_raw_score"),
+            "rr_ratio": _take("_signal_rr_ratio"),
+            "sl_pct": _take("_signal_sl_pct"),
+            "tp_pct": _take("_signal_tp_pct"),
+            "plan_atr_pct": _take("_signal_plan_atr_pct"),
+        }

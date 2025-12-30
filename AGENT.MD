@@ -80,7 +80,7 @@ Only transition modes when I explicitly signal with:
 Without these exact signals, remain in your current mode.
 
 
-# TaxBrain / V29 Agent Architecture
+# TaxBrain Agent Architecture
 
 ## Core Trading Philosophy
 - 分布式微仓侦察（Distributed Scouting）: T0 微仓在 100+ 交易对铺网，追求概率分布而非单票暴利，用大数定律稀释黑天鹅。

@@ -398,13 +398,44 @@ class Engine:
 
     def is_permitted(self, pair: str, context: Optional[Dict[str, Any]] = None) -> bool:
         pst = self.state.get_pair_state(pair)
-        if pst.cooldown_bars_left > 0:
-            self._record_reject(RejectReason.COOLDOWN, pair, context)
-            return False
         tier_pol = self.tier_mgr.get(pst.closs) if self.tier_mgr else None
+        if tier_pol and context:
+            kind = context.get("kind")
+            squad = context.get("squad")
+            recipe = context.get("recipe")
+            if any(item is not None for item in (kind, squad, recipe)):
+                if not tier_pol.permits(kind=kind, squad=squad, recipe=recipe):
+                    self._record_reject(RejectReason.TIER_REJECT, pair, context)
+                    return False
         if tier_pol and getattr(tier_pol, "single_position_only", False) and pst.active_trades:
             self._record_reject(RejectReason.SINGLE_POSITION, pair, context)
             return False
+        if pst.cooldown_bars_left > 0:
+            self._record_reject(RejectReason.COOLDOWN, pair, context)
+            return False
+        try:
+            equity = float(self.eq_provider.get_equity())
+        except Exception:
+            equity = 0.0
+        treasury_cfg = getattr(getattr(self.cfg, "trading", None), "treasury", getattr(self.cfg, "treasury", None))
+        debt_cap_pct = float(getattr(treasury_cfg, "debt_pool_cap_pct", 0.0) or 0.0) if treasury_cfg else 0.0
+        if debt_cap_pct > 0 and equity > 0:
+            debt_cap_abs = debt_cap_pct * equity
+            if float(getattr(self.state, "debt_pool", 0.0)) >= debt_cap_abs:
+                self._record_reject(RejectReason.DEBT_CAP, pair, context)
+                return False
+        cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
+        cap_abs = cap_pct * equity
+        used = self.state.get_total_open_risk() + self.reservation.get_total_reserved()
+        if cap_abs > 0 and used >= cap_abs:
+            self._record_reject(RejectReason.PORTFOLIO_CAP, pair, context)
+            return False
+        if tier_pol:
+            pair_reserved = self.reservation.get_pair_reserved(pair)
+            pair_room = self.state.per_pair_cap_room(pair, equity, tier_pol, pair_reserved)
+            if pair_room <= 0:
+                self._record_reject(RejectReason.PAIR_CAP, pair, context)
+                return False
         for guard in self._guards:
             try:
                 if not guard(pair, context or {}):
@@ -413,16 +444,6 @@ class Engine:
             except Exception:
                 self._record_reject(RejectReason.GUARD, pair, context)
                 return False
-        try:
-            equity = float(self.eq_provider.get_equity())
-        except Exception:
-            equity = 0.0
-        cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
-        cap_abs = cap_pct * equity
-        used = self.state.get_total_open_risk() + self.reservation.get_total_reserved()
-        if cap_abs > 0 and used >= cap_abs:
-            self._record_reject(RejectReason.PORTFOLIO_CAP, pair, context)
-            return False
         score = None
         if context:
             score = context.get("score")

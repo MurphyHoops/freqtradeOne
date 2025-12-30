@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import math
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -67,6 +67,76 @@ def calculate_adx_zsig_vec(
     sigma = adx_series.rolling(window, min_periods=min_points).std()
     z = (adx_series - mu) / sigma.replace(0.0, np.nan)
     return 1.0 / (1.0 + np.exp(-z))
+
+
+def _to_series(value: Any, index: pd.Index, default: float = 0.5) -> pd.Series:
+    if isinstance(value, pd.Series):
+        series = value.reindex(index)
+    elif isinstance(value, np.ndarray):
+        series = pd.Series(value, index=index)
+    else:
+        try:
+            scalar = float(value) if value is not None else default
+        except Exception:
+            scalar = default
+        series = pd.Series(scalar, index=index)
+    series = pd.to_numeric(series, errors="coerce")
+    values = np.nan_to_num(series.to_numpy(copy=False), nan=default, posinf=default, neginf=default)
+    return pd.Series(values, index=index)
+
+
+def calculate_regime_factor_vec(
+    strategy_type: Optional[str],
+    hurst_val: Any,
+    z_sig: Any,
+) -> Any:
+    """Return regime factor for scalar/array/Series inputs, clamped to 0.5-1.5."""
+
+    bias = (strategy_type or "").lower()
+    is_trend = any(token in bias for token in ("trend", "breakout"))
+    is_mean_rev = any(token in bias for token in ("mean_rev", "pullback"))
+
+    if isinstance(hurst_val, pd.Series) or isinstance(z_sig, pd.Series):
+        index = (
+            hurst_val.index
+            if isinstance(hurst_val, pd.Series)
+            else z_sig.index  # type: ignore[union-attr]
+        )
+        hurst_series = _to_series(hurst_val, index)
+        zsig_series = _to_series(z_sig, index)
+        if is_trend and not is_mean_rev:
+            raw_factor = 0.7 * hurst_series + 0.3 * zsig_series
+            factor = 1.0 + (raw_factor - 0.5)
+        elif is_mean_rev and not is_trend:
+            raw_factor = (0.5 - hurst_series) * 2.0
+            factor = 1.0 + raw_factor
+        else:
+            raw_factor = 0.5 * hurst_series + 0.5 * zsig_series
+            factor = 1.0 + 0.5 * (raw_factor - 0.5)
+        return factor.clip(lower=0.5, upper=1.5)
+
+    hurst_arr = np.nan_to_num(
+        np.asarray(0.5 if hurst_val is None else hurst_val, dtype=float),
+        nan=0.5,
+        posinf=0.5,
+        neginf=0.5,
+    )
+    zsig_arr = np.nan_to_num(
+        np.asarray(0.5 if z_sig is None else z_sig, dtype=float),
+        nan=0.5,
+        posinf=0.5,
+        neginf=0.5,
+    )
+    if is_trend and not is_mean_rev:
+        raw_factor = 0.7 * hurst_arr + 0.3 * zsig_arr
+        factor = 1.0 + (raw_factor - 0.5)
+    elif is_mean_rev and not is_trend:
+        raw_factor = (0.5 - hurst_arr) * 2.0
+        factor = 1.0 + raw_factor
+    else:
+        raw_factor = 0.5 * hurst_arr + 0.5 * zsig_arr
+        factor = 1.0 + 0.5 * (raw_factor - 0.5)
+    return np.clip(factor, 0.5, 1.5)
 
 
 def calculate_hurst_scalar(
@@ -138,4 +208,5 @@ __all__ = [
     "calculate_adx_zsig_vec",
     "calculate_hurst_scalar",
     "calculate_adx_zsig_scalar",
+    "calculate_regime_factor_vec",
 ]

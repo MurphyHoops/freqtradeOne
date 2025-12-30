@@ -108,6 +108,16 @@ def test_builder_returns_empty_when_base_factors_nan():
     assert cands == []
 
 
+def test_hub_only_loads_enabled_signals():
+    cfg = V29Config()
+    cfg.system = replace(cfg.system, plugin_allow_reload=True)
+    cfg.strategy = replace(cfg.strategy, enabled_signals=("mean_rev_long",))
+    hub = SignalHub(cfg)
+    hub.discover()
+    names = {spec.name for spec in builder_module.REGISTRY.all()}
+    assert names == {"mean_rev_long"}
+
+
 def test_builder_prefers_regime_columns_over_history(monkeypatch):
     _ensure_signals_loaded()
 

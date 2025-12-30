@@ -48,3 +48,33 @@ def test_bridge_datetimeindex_bind_df_does_not_crash():
     good_time = idx[0]
     assert bridge.get_candidates("BTC/USDT", good_time, "buy") == []
     assert RejectReason.TIME_ALIGNMENT not in tracker.snapshot()
+
+
+def test_bridge_get_row_meta_reads_values():
+    tracker = RejectTracker(log_enabled=False, stats_enabled=True)
+    strategy = SimpleNamespace(
+        cfg=SimpleNamespace(),
+        rejections=tracker,
+        _aligned_informative_for_df=lambda *args, **kwargs: {},
+    )
+    bridge = ZeroCopyBridge(strategy)
+
+    idx = pd.date_range("2024-01-01", periods=2, freq="5min")
+    df = pd.DataFrame(
+        {
+            "date": idx,
+            "_signal_id": [1, 2],
+            "_signal_score": [0.1, 0.2],
+            "_signal_raw_score": [0.3, 0.4],
+            "_signal_rr_ratio": [1.1, 1.2],
+            "_signal_sl_pct": [0.01, 0.02],
+            "_signal_tp_pct": [0.03, 0.04],
+            "_signal_plan_atr_pct": [0.05, 0.06],
+        }
+    )
+    bridge.bind_df("BTC/USDT", df)
+
+    meta = bridge.get_row_meta("BTC/USDT", idx[1])
+    assert meta["signal_id"] == 2.0
+    assert meta["expected_edge"] == 0.2
+    assert meta["sl_pct"] == 0.02

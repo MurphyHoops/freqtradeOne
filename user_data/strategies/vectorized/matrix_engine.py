@@ -392,9 +392,27 @@ class MatrixEngine:
         return payloads
 
     def _ensure_pool_columns(self, df: pd.DataFrame) -> None:
-        for name in ("enter_long", "enter_short", "enter_tag", "_signal_id", "_signal_id_long", "_signal_id_short"):
+        for name in (
+            "enter_long",
+            "enter_short",
+            "enter_tag",
+            "_signal_id",
+            "_signal_id_long",
+            "_signal_id_short",
+            "_signal_score",
+            "_signal_raw_score",
+            "_signal_rr_ratio",
+            "_signal_sl_pct",
+            "_signal_tp_pct",
+            "_signal_plan_atr_pct",
+        ):
             if name not in df.columns:
-                df[name] = 0 if name in ("enter_long", "enter_short") else None
+                if name in ("enter_long", "enter_short"):
+                    df[name] = 0
+                elif name == "enter_tag":
+                    df[name] = None
+                else:
+                    df[name] = np.nan
 
     def _payload_signal_id(self, payload: dict, direction: str) -> Optional[int]:
         name = payload.get("kind")
@@ -425,6 +443,16 @@ class MatrixEngine:
         top_short_id = np.full(size, np.nan)
         top_long_edge = np.full(size, np.nan)
         top_short_edge = np.full(size, np.nan)
+        top_long_raw = np.full(size, np.nan)
+        top_short_raw = np.full(size, np.nan)
+        top_long_rr = np.full(size, np.nan)
+        top_short_rr = np.full(size, np.nan)
+        top_long_sl = np.full(size, np.nan)
+        top_short_sl = np.full(size, np.nan)
+        top_long_tp = np.full(size, np.nan)
+        top_short_tp = np.full(size, np.nan)
+        top_long_atr = np.full(size, np.nan)
+        top_short_atr = np.full(size, np.nan)
 
         for idx, pool in enumerate(payloads_long):
             if not pool:
@@ -433,6 +461,12 @@ class MatrixEngine:
             if sig_id:
                 top_long_id[idx] = float(sig_id)
                 top_long_edge[idx] = float(pool[0].get("expected_edge", 0.0) or 0.0)
+                top_long_raw[idx] = float(pool[0].get("raw_score", np.nan))
+                top_long_rr[idx] = float(pool[0].get("rr_ratio", np.nan))
+                top_long_sl[idx] = float(pool[0].get("sl_pct", np.nan))
+                top_long_tp[idx] = float(pool[0].get("tp_pct", np.nan))
+                atr_val = pool[0].get("plan_atr_pct", np.nan)
+                top_long_atr[idx] = float(atr_val) if atr_val is not None else np.nan
         for idx, pool in enumerate(payloads_short):
             if not pool:
                 continue
@@ -440,6 +474,12 @@ class MatrixEngine:
             if sig_id:
                 top_short_id[idx] = float(sig_id)
                 top_short_edge[idx] = float(pool[0].get("expected_edge", 0.0) or 0.0)
+                top_short_raw[idx] = float(pool[0].get("raw_score", np.nan))
+                top_short_rr[idx] = float(pool[0].get("rr_ratio", np.nan))
+                top_short_sl[idx] = float(pool[0].get("sl_pct", np.nan))
+                top_short_tp[idx] = float(pool[0].get("tp_pct", np.nan))
+                atr_val = pool[0].get("plan_atr_pct", np.nan)
+                top_short_atr[idx] = float(atr_val) if atr_val is not None else np.nan
 
         long_mask = np.isfinite(top_long_id) & (top_long_id > 0)
         short_mask = np.isfinite(top_short_id) & (top_short_id > 0)
@@ -454,8 +494,21 @@ class MatrixEngine:
             top_long_id,
             top_short_id,
         )
+        select_long = np.isnan(top_short_edge) | (top_long_edge >= top_short_edge)
+        selected_edge = np.where(select_long, top_long_edge, top_short_edge)
+        selected_raw = np.where(select_long, top_long_raw, top_short_raw)
+        selected_rr = np.where(select_long, top_long_rr, top_short_rr)
+        selected_sl = np.where(select_long, top_long_sl, top_short_sl)
+        selected_tp = np.where(select_long, top_long_tp, top_short_tp)
+        selected_atr = np.where(select_long, top_long_atr, top_short_atr)
         df["_signal_id"] = selected
         df["enter_tag"] = pd.Series(
             [str(int(x)) if math.isfinite(x) and x > 0 else None for x in selected],
             index=df.index,
         )
+        df["_signal_score"] = selected_edge
+        df["_signal_raw_score"] = selected_raw
+        df["_signal_rr_ratio"] = selected_rr
+        df["_signal_sl_pct"] = selected_sl
+        df["_signal_tp_pct"] = selected_tp
+        df["_signal_plan_atr_pct"] = selected_atr

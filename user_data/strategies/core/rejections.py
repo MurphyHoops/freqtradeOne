@@ -14,6 +14,8 @@ class RejectReason:
     TIER_REJECT = "tier_reject"
     GATEKEEP = "gatekeeping"
     PORTFOLIO_CAP = "portfolio_cap"
+    DEBT_CAP = "debt_cap"
+    PAIR_CAP = "pair_cap"
     SIZER = "sizer"
     RESERVATION = "reservation"
 

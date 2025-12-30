@@ -19,3 +19,20 @@ def test_regime_scalar_matches_vector_tail():
     z_scalar = math_ops.calculate_adx_zsig_scalar(adx.tolist(), float(adx.iloc[-1]), window=60, min_points=20)
     assert np.isfinite(z_vec.iloc[-1])
     assert z_vec.iloc[-1] == pytest.approx(z_scalar, rel=1e-6, abs=1e-6)
+
+
+def test_regime_factor_vector_matches_scalar_tail():
+    hurst = pd.Series([0.8] * 50)
+    zsig = pd.Series([0.2] * 50)
+    vec = math_ops.calculate_regime_factor_vec("mean_rev_long", hurst, zsig)
+    scalar = math_ops.calculate_regime_factor_vec("mean_rev_long", 0.8, 0.2)
+    assert vec.iloc[-1] == pytest.approx(float(scalar), rel=1e-6, abs=1e-6)
+
+
+def test_regime_factor_nan_defaults_to_neutral():
+    hurst = pd.Series([np.nan, np.nan])
+    zsig = pd.Series([np.nan, np.nan])
+    vec = math_ops.calculate_regime_factor_vec("trend_short", hurst, zsig)
+    assert vec.iloc[-1] == pytest.approx(1.0, rel=1e-6, abs=1e-6)
+    scalar = math_ops.calculate_regime_factor_vec("trend_short", float("nan"), float("nan"))
+    assert float(scalar) == pytest.approx(1.0, rel=1e-6, abs=1e-6)

@@ -1,6 +1,6 @@
-﻿"""策略运行过程的事件采集与持久化工具。
+"""策略运行过程的事件采集与持久化工具。
 
-`AnalyticsAgent` 用于在 TaxBrainV29 流程中记录 finalize、预约、退出、风控校验
+`AnalyticsAgent` 用于在 TaxBrainV30 流程中记录 finalize、预约、退出、风控校验
 等关键节点的上下文信息，并同时输出 JSONL 与 CSV 文件，方便后续的回放分析与
 实时监控。
 
@@ -144,7 +144,7 @@ class AnalyticsAgent:
         self._write_jsonl(payload)
 
     def log_exit(self, pair: str, trade_id: str, reason: str, **details) -> None:
-        """��¼���ʽ����˳���ԭ�򲢷����ؼ�������."""
+        """???????????????????????????????."""
 
         payload: dict[str, Any] = {
             "event": "exit",

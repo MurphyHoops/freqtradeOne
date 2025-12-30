@@ -1,5 +1,5 @@
-﻿# -*- coding: utf-8 -*-
-"""Indicator specification and on-demand computation helpers for TaxBrainV29."""
+# -*- coding: utf-8 -*-
+"""Indicator specification and on-demand computation helpers for TaxBrainV30."""
 
 from __future__ import annotations
 

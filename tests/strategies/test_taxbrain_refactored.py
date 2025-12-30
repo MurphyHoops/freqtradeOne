@@ -4,8 +4,8 @@ from unittest import mock
 
 import pytest
 
-from user_data.strategies.TaxBrainV29 import PairState, TaxBrainV29
-from user_data.strategies.agents.signals import schemas
+from user_data.strategies.core.engine import PairState
+from user_data.strategies.TaxBrainV30 import TaxBrainV30
 from user_data.strategies.agents.portfolio import global_backend as gb
 from user_data.strategies.config.v29_config import V29Config
 
@@ -28,15 +28,13 @@ class _DummyState:
         return 0.1
 
 
-def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV29:
-    strat = TaxBrainV29.__new__(TaxBrainV29)
+def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV30:
+    strat = TaxBrainV30.__new__(TaxBrainV30)
     strat.state = _DummyState()
     strat.cfg = V29Config()
     strat.treasury_agent = SimpleNamespace(
         evaluate_signal_quality=lambda *args, **kwargs: gate_payload or {}
     )
-    strat.tier_mgr = mock.Mock(get=lambda *args, **kwargs: None)
-    strat.tier_agent = mock.Mock(filter_best=lambda *args, **kwargs: None)
     strat._pending_entry_meta = {}
     strat._last_signal = {}
     strat.reservation = mock.Mock()
@@ -47,64 +45,12 @@ def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV29:
     strat._is_backtest_like_runmode = lambda: True
     strat.hub = SimpleNamespace(
         meta_for_id=lambda *args, **kwargs: None,
-        signal_id_for=lambda *args, **kwargs: None,
     )
-    strat.bridge = SimpleNamespace(get_candidates=lambda *args, **kwargs: [])
+    strat.bridge = SimpleNamespace(get_side_meta=lambda *args, **kwargs: None, get_row_meta=lambda *args, **kwargs: None)
     strat.engine = SimpleNamespace(is_permitted=lambda *args, **kwargs: True, sync_to_time=lambda *args, **kwargs: None)
     strat.rejections = SimpleNamespace(record=lambda *args, **kwargs: None)
+    strat._reserve_risk_resources = lambda **kwargs: True
     return strat
-
-
-def test_extract_entry_meta_handles_valid_and_invalid_tags():
-    strat = _make_stub_strategy()
-
-    candidate = schemas.Candidate(
-        direction="long",
-        kind="mean_rev_long",
-        raw_score=0.5,
-        rr_ratio=2.0,
-        win_prob=0.6,
-        expected_edge=0.6,
-        squad="MRL",
-        sl_pct=0.01,
-        tp_pct=0.02,
-        timeframe=None,
-    )
-    strat._select_candidate_from_pool = lambda *args, **kwargs: candidate
-    meta = strat._extract_entry_meta("BTC/USDT", None, "buy", current_time=datetime(2024, 1, 1))
-    assert meta is not None
-    assert meta["sl_pct"] == pytest.approx(0.01)
-    assert meta["tp_pct"] == pytest.approx(0.02)
-    assert meta["dir"] == "long"
-
-    assert strat._extract_entry_meta("BTC/USDT", None, "buy", current_time=None) is None
-
-
-def test_select_candidate_from_pool_honors_entry_tag():
-    strat = _make_stub_strategy()
-    strat.tier_agent = SimpleNamespace(filter_best=lambda _policy, candidates: candidates[0] if candidates else None)
-    strat.hub = SimpleNamespace(
-        meta_for_id=lambda *args, **kwargs: None,
-        signal_id_for=lambda *args, **kwargs: 7,
-    )
-
-    candidate = schemas.Candidate(
-        direction="long",
-        kind="mean_rev_long",
-        raw_score=0.5,
-        rr_ratio=2.0,
-        win_prob=0.6,
-        expected_edge=0.6,
-        squad="MRL",
-        sl_pct=0.01,
-        tp_pct=0.02,
-        timeframe="5m",
-    )
-    strat._candidates_from_pool = lambda *args, **kwargs: [candidate]
-    current_time = datetime(2024, 1, 1)
-
-    assert strat._select_candidate_from_pool("BTC/USDT", current_time, "buy", entry_tag="7") is candidate
-    assert strat._select_candidate_from_pool("BTC/USDT", current_time, "buy", entry_tag="8") is None
 
 
 @pytest.mark.skipif(redis is None, reason="redis package not installed")
@@ -123,20 +69,29 @@ def test_custom_stake_amount_rejects_when_gate_disallows():
     strat = _make_stub_strategy(gate_payload={"allowed": False, "reason": "blocked"})
     strat.sizer = mock.Mock()
     strat.sizer.compute.side_effect = AssertionError("sizer should not run when gate blocks")
-
-    candidate = schemas.Candidate(
-        direction="long",
-        kind="mean_rev_long",
-        raw_score=0.5,
-        rr_ratio=2.0,
-        win_prob=0.6,
-        expected_edge=0.6,
-        squad="MRL",
-        sl_pct=0.01,
-        tp_pct=0.02,
-        timeframe=None,
+    strat.engine = SimpleNamespace(
+        is_permitted=lambda *args, **kwargs: False,
+        sync_to_time=lambda *args, **kwargs: None,
     )
-    strat._select_candidate_from_pool = lambda *args, **kwargs: candidate
+    meta = {
+        "signal_id": 7,
+        "raw_score": 0.5,
+        "rr_ratio": 2.0,
+        "expected_edge": 0.6,
+        "sl_pct": 0.01,
+        "tp_pct": 0.02,
+        "plan_atr_pct": 0.03,
+    }
+    meta_info = SimpleNamespace(
+        name="mean_rev_long",
+        direction="long",
+        squad="MRL",
+        exit_profile=None,
+        recipe=None,
+        timeframe="5m",
+        plan_timeframe=None,
+    )
+    strat.bridge.get_side_meta = lambda *args, **kwargs: (meta, meta_info)
     stake = strat.custom_stake_amount(
         pair="BTC/USDT",
         current_time=datetime(2024, 1, 1),
@@ -153,12 +108,29 @@ def test_custom_stake_amount_rejects_when_gate_disallows():
 
 def test_confirm_trade_entry_no_cooldown_decrement_in_backtest():
     strat = _make_stub_strategy()
-    strat._tier_debug = lambda *args, **kwargs: None
-    strat._select_candidate_from_pool = lambda *args, **kwargs: None
     strat.engine = SimpleNamespace(
         is_permitted=lambda *args, **kwargs: True,
         sync_to_time=mock.Mock(),
     )
+    meta = {
+        "signal_id": 7,
+        "raw_score": 0.5,
+        "rr_ratio": 2.0,
+        "expected_edge": 0.6,
+        "sl_pct": 0.01,
+        "tp_pct": 0.02,
+        "plan_atr_pct": 0.03,
+    }
+    meta_info = SimpleNamespace(
+        name="mean_rev_long",
+        direction="long",
+        squad="MRL",
+        exit_profile=None,
+        recipe=None,
+        timeframe="5m",
+        plan_timeframe=None,
+    )
+    strat.bridge.get_side_meta = lambda *args, **kwargs: (meta, meta_info)
 
     pair = "BTC/USDT"
     pst = strat.state.get_pair_state(pair)

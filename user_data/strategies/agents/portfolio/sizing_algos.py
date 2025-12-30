@@ -11,7 +11,7 @@ from .schemas import SizingContext
 from .tier import TierPolicy
 
 if TYPE_CHECKING:  # pragma: no cover - type only
-    from ...TaxBrainV29 import GlobalState as PortfolioState
+    from ...core.engine import GlobalState as PortfolioState
 else:
     PortfolioState = Any
 

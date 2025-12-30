@@ -23,10 +23,10 @@ else
     exit 2
 fi
 
-echo "Running backtest: ${COMPOSE_CMD[*]} run --rm freqtrade backtesting -c user_data/configs/v29_backtest.json -s TaxBrainV29 -i $TIMEFRAME --timerange $TIMERANGE --stake-amount $STAKE"
+echo "Running backtest: ${COMPOSE_CMD[*]} run --rm freqtrade backtesting -c user_data/configs/v29_backtest.json -s TaxBrainV30 -i $TIMEFRAME --timerange $TIMERANGE --stake-amount $STAKE"
 "${COMPOSE_CMD[@]}" run --rm freqtrade backtesting \
   -c user_data/configs/v29_backtest.json \
-  -s TaxBrainV29 -i "$TIMEFRAME" \
+  -s TaxBrainV30 -i "$TIMEFRAME" \
   --timerange "$TIMERANGE" \
   --stake-amount "$STAKE"
 

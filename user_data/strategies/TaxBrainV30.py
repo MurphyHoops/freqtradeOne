@@ -4,9 +4,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Optional
 import sys
 import math
 
@@ -123,11 +122,6 @@ class TaxBrainV30(IStrategy):
         self._informative_timeframes = helpers.derive_informative_timeframes(
             config_timeframes, inferred_timeframes, self.timeframe
         )
-        self._informative_last: Dict[str, Dict[str, pd.Series]] = {}
-        self._informative_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
-        self._aligned_info_cache: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
-        self._informative_gc_last_ts: float = 0.0
-        self._informative_gc_interval_sec: int = 900
         helpers.register_informative_methods(self)
         self._enabled_signal_specs = self.hub.enabled_specs
         super().__init__(config)
@@ -163,11 +157,19 @@ class TaxBrainV30(IStrategy):
         else:
             raise ValueError(f"Unknown global_backend_mode: {self.cfg.system.global_backend_mode}")
 
-        sensor_weights = dict(getattr(getattr(self.cfg, "sensor", None), "weights", {}) or {})
+        sensor_cfg = getattr(self.cfg, "sensor", None)
+        sensor_weights = dict(getattr(sensor_cfg, "weights", {}) or {})
         sensor_entropy = float(
-            getattr(getattr(self.cfg, "sensor", None), "entropy_factor", getattr(getattr(self.cfg, "risk", None), "entropy_factor", 0.4))
+            getattr(sensor_cfg, "entropy_factor", getattr(getattr(self.cfg, "risk", None), "entropy_factor", 0.4))
         )
-        self.market_sensor = MarketSensor(self.global_backend, weights=sensor_weights, entropy_factor=sensor_entropy)
+        system_cfg = getattr(self.cfg, "system", None)
+        sensor_strict = bool(getattr(system_cfg, "market_sensor_strict", False)) if system_cfg else False
+        self.market_sensor = MarketSensor(
+            self.global_backend,
+            weights=sensor_weights,
+            entropy_factor=sensor_entropy,
+            strict=sensor_strict,
+        )
 
         self.state = GlobalState(self.cfg, backend=self.global_backend)
         self.analytics = AnalyticsAgent(user_data_dir / "logs")
@@ -272,27 +274,9 @@ class TaxBrainV30(IStrategy):
             return frame
         return frame
 
-    def _get_informative_dataframe(self, pair: str, timeframe: str) -> Optional[pd.DataFrame]:
-        return helpers.get_informative_dataframe(self, pair, timeframe)
-
-    def _aligned_informative_for_df(self, pair: str, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        return helpers.aligned_informative_for_df(self, pair, df)
-
-    def _informative_rows_for_index(self, aligned_info: Dict[str, pd.DataFrame], idx) -> Dict[str, pd.Series]:
-        return helpers.informative_rows_for_index(aligned_info, idx)
-
-    def _informative_required_columns(self, timeframe: str) -> list[str]:
-        return helpers.informative_required_columns(self, timeframe)
-
     @staticmethod
     def _derived_factor_columns_missing(df: pd.DataFrame, timeframes: Iterable[Optional[str]]) -> bool:
         return helpers.derived_factor_columns_missing(df, timeframes)
-
-    def _merge_informative_columns_into_base(self, df: pd.DataFrame, pair: str) -> None:
-        helpers.merge_informative_columns_into_base(self, df, pair)
-
-    def _gc_informative_cache(self, current_whitelist: List[str]) -> None:
-        helpers.gc_informative_cache(self, current_whitelist)
 
     def informative_pairs(self):
         try:
@@ -320,7 +304,7 @@ class TaxBrainV30(IStrategy):
         return pairs
 
     def get_informative_row(self, pair: str, timeframe: str) -> Optional[pd.Series]:
-        return self._informative_last.get(pair, {}).get(timeframe)
+        return self.bridge.get_informative_row(pair, timeframe)
 
     def get_informative_value(
         self, pair: str, timeframe: str, column: str, default: Optional[float] = None
@@ -501,42 +485,19 @@ class TaxBrainV30(IStrategy):
         **kwargs,
     ) -> bool:
         self.engine.sync_to_time(current_time)
-        row_idx = self.bridge.get_row_index(pair, current_time)
-        if row_idx is None:
-            return False
-
-        meta: Optional[Dict[str, Any]] = None
-        tag_id = None
-        if entry_tag:
-            try:
-                tag_id = int(entry_tag)
-            except Exception:
-                tag_id = None
-        if tag_id:
-            candidate = self.bridge.get_candidate_by_id(pair, current_time, tag_id, side, row_idx=row_idx)
-            if candidate:
-                meta = dict(candidate)
-        if entry_tag and meta is None:
+        result = self.bridge.get_side_meta(pair, current_time, side, entry_tag)
+        if not result:
             helpers.update_rejection(self, RejectReason.NO_CANDIDATE, pair, {"side": side, "entry_tag": entry_tag})
             return False
-        if meta is None:
-            meta = self.bridge.get_row_meta(pair, current_time)
-        if not meta:
-            helpers.update_rejection(self, RejectReason.NO_CANDIDATE, pair, {"side": side, "entry_tag": entry_tag})
-            return False
-
-        candidate = helpers.candidate_from_meta(self, pair, meta)
-        if not candidate:
-            helpers.update_rejection(self, RejectReason.NO_CANDIDATE, pair, {"side": side, "entry_tag": entry_tag})
-            return False
+        meta, meta_info = result
 
         context: Dict[str, Any] = {
             "side": side,
             "time": current_time,
-            "score": float(candidate.expected_edge),
-            "kind": candidate.kind,
-            "recipe": candidate.recipe,
-            "squad": candidate.squad,
+            "score": float(meta.get("expected_edge", 0.0) or 0.0),
+            "kind": meta_info.name,
+            "recipe": meta_info.recipe,
+            "squad": meta_info.squad,
         }
         return self.engine.is_permitted(pair, context)
 
@@ -553,45 +514,22 @@ class TaxBrainV30(IStrategy):
         side: str,
         **kwargs,
     ) -> float:
-        row_idx = self.bridge.get_row_index(pair, current_time)
-        if row_idx is None:
-            return 0.0
-
-        meta: Optional[Dict[str, Any]] = None
-        tag_id = None
-        if entry_tag:
-            try:
-                tag_id = int(entry_tag)
-            except Exception:
-                tag_id = None
-        if tag_id:
-            candidate = self.bridge.get_candidate_by_id(pair, current_time, tag_id, side, row_idx=row_idx)
-            if candidate:
-                meta = dict(candidate)
-        if entry_tag and meta is None:
+        result = self.bridge.get_side_meta(pair, current_time, side, entry_tag)
+        if not result:
             helpers.update_rejection(self, RejectReason.NO_CANDIDATE, pair, {"side": side, "entry_tag": entry_tag})
             return 0.0
-        if meta is None:
-            meta = self.bridge.get_row_meta(pair, current_time)
-        if not meta:
-            helpers.update_rejection(self, RejectReason.NO_CANDIDATE, pair, {"side": side, "entry_tag": entry_tag})
-            return 0.0
-
-        candidate = helpers.candidate_from_meta(self, pair, meta)
-        if not candidate:
-            helpers.update_rejection(self, RejectReason.NO_CANDIDATE, pair, {"side": side, "entry_tag": entry_tag})
-            return 0.0
+        meta, meta_info = result
 
         if self._is_backtest_like_runmode():
             pst = self.state.get_pair_state(pair)
             pst.last_score = float(meta.get("expected_edge", 0.0) or 0.0)
-            pst.last_dir = candidate.direction
+            pst.last_dir = meta_info.direction
             pst.last_sl_pct = float(meta.get("sl_pct", 0.0) or 0.0)
             pst.last_tp_pct = float(meta.get("tp_pct", 0.0) or 0.0)
-            pst.last_kind = str(candidate.kind)
-            pst.last_squad = str(candidate.squad)
-            pst.last_exit_profile = candidate.exit_profile
-            pst.last_recipe = candidate.recipe
+            pst.last_kind = str(meta_info.name)
+            pst.last_squad = str(meta_info.squad)
+            pst.last_exit_profile = meta_info.exit_profile
+            pst.last_recipe = meta_info.recipe
             pst.last_atr_pct = float(meta.get("plan_atr_pct", 0.0) or 0.0)
 
         self.engine.sync_to_time(current_time)
@@ -599,9 +537,9 @@ class TaxBrainV30(IStrategy):
             "side": side,
             "time": current_time,
             "score": float(meta.get("expected_edge", 0.0) or 0.0),
-            "kind": candidate.kind,
-            "recipe": candidate.recipe,
-            "squad": candidate.squad,
+            "kind": meta_info.name,
+            "recipe": meta_info.recipe,
+            "squad": meta_info.squad,
         }
         if not self.engine.is_permitted(pair, context):
             return 0.0
@@ -610,13 +548,13 @@ class TaxBrainV30(IStrategy):
             pair=pair,
             sl_pct=float(meta.get("sl_pct", 0.0) or 0.0),
             tp_pct=float(meta.get("tp_pct", 0.0) or 0.0),
-            direction=str(candidate.direction),
+            direction=str(meta_info.direction),
             proposed_stake=proposed_stake,
             min_stake=min_stake,
             max_stake=max_stake,
             leverage=leverage,
             plan_atr_pct=meta.get("plan_atr_pct"),
-            exit_profile=candidate.exit_profile,
+            exit_profile=meta_info.exit_profile,
             bucket=None,
             current_rate=current_rate,
             score=float(meta.get("expected_edge", 0.0) or 0.0),
@@ -626,14 +564,14 @@ class TaxBrainV30(IStrategy):
             return 0.0
 
         meta_payload = {
-            "dir": candidate.direction,
-            "kind": candidate.kind,
-            "squad": candidate.squad,
+            "dir": meta_info.direction,
+            "kind": meta_info.name,
+            "squad": meta_info.squad,
             "sl_pct": meta.get("sl_pct"),
             "tp_pct": meta.get("tp_pct"),
-            "exit_profile": candidate.exit_profile,
-            "recipe": candidate.recipe,
-            "plan_timeframe": candidate.plan_timeframe,
+            "exit_profile": meta_info.exit_profile,
+            "recipe": meta_info.recipe,
+            "plan_timeframe": meta_info.plan_timeframe,
             "atr_pct": meta.get("plan_atr_pct"),
             "expected_edge": meta.get("expected_edge"),
             "raw_score": meta.get("raw_score"),
@@ -646,7 +584,7 @@ class TaxBrainV30(IStrategy):
             bucket=bucket,
             sl=float(meta.get("sl_pct", 0.0) or 0.0),
             tp=float(meta.get("tp_pct", 0.0) or 0.0),
-            direction=str(candidate.direction),
+            direction=str(meta_info.direction),
             current_rate=current_rate,
             meta=meta_payload,
         )

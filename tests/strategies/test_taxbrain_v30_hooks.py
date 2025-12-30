@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from user_data.strategies.TaxBrainV29 import PairState
+from user_data.strategies.core.engine import PairState
 from user_data.strategies.TaxBrainV30 import TaxBrainV30
 
 
@@ -24,7 +24,7 @@ def _make_stub_strategy() -> TaxBrainV30:
     strat.state = _DummyState()
     strat._last_signal = {}
     strat.bridge = SimpleNamespace()
-    strat.bridge.get_row_index = lambda *args, **kwargs: 0
+    strat.bridge.get_side_meta = lambda *args, **kwargs: None
     strat.bridge.get_row_meta = lambda *args, **kwargs: None
     strat.hub = SimpleNamespace()
     strat.engine = SimpleNamespace(sync_to_time=lambda *args, **kwargs: None, is_permitted=lambda *args, **kwargs: True)
@@ -32,12 +32,14 @@ def _make_stub_strategy() -> TaxBrainV30:
     strat.rejections = SimpleNamespace(record=lambda *args, **kwargs: None)
     strat._reserve_risk_resources = lambda **kwargs: True
     strat.global_backend = None
+    strat._runmode_token = "backtest"
+    strat._is_backtest_like_runmode = lambda: True
     return strat
 
 
 def test_v30_confirm_trade_entry_respects_engine():
     strat = _make_stub_strategy()
-    strat.bridge.get_row_meta = lambda *args, **kwargs: {
+    meta = {
         "signal_id": 7,
         "raw_score": 0.5,
         "rr_ratio": 2.0,
@@ -46,7 +48,7 @@ def test_v30_confirm_trade_entry_respects_engine():
         "tp_pct": 0.02,
         "plan_atr_pct": 0.03,
     }
-    strat.hub.meta_for_id = lambda *_: SimpleNamespace(
+    meta_info = SimpleNamespace(
         name="mean_rev_long",
         direction="long",
         squad="MRL",
@@ -55,6 +57,7 @@ def test_v30_confirm_trade_entry_respects_engine():
         timeframe="5m",
         plan_timeframe=None,
     )
+    strat.bridge.get_side_meta = lambda *args, **kwargs: (meta, meta_info)
     strat.engine = SimpleNamespace(sync_to_time=lambda *args, **kwargs: None, is_permitted=lambda *args, **kwargs: False)
     assert (
         strat.confirm_trade_entry(
@@ -73,7 +76,7 @@ def test_v30_confirm_trade_entry_respects_engine():
 
 def test_v30_confirm_trade_entry_rejects_on_time_alignment():
     strat = _make_stub_strategy()
-    strat.bridge.get_row_index = lambda *args, **kwargs: None
+    strat.bridge.get_side_meta = lambda *args, **kwargs: None
     assert (
         strat.confirm_trade_entry(
             pair="BTC/USDT",
@@ -91,7 +94,7 @@ def test_v30_confirm_trade_entry_rejects_on_time_alignment():
 
 def test_v30_custom_stake_amount_uses_bridge_candidate():
     strat = _make_stub_strategy()
-    strat.bridge.get_row_meta = lambda *args, **kwargs: {
+    meta = {
         "signal_id": 7,
         "raw_score": 0.5,
         "rr_ratio": 2.0,
@@ -100,7 +103,7 @@ def test_v30_custom_stake_amount_uses_bridge_candidate():
         "tp_pct": 0.02,
         "plan_atr_pct": 0.03,
     }
-    strat.hub.meta_for_id = lambda *_: SimpleNamespace(
+    meta_info = SimpleNamespace(
         name="mean_rev_long",
         direction="long",
         squad="MRL",
@@ -109,6 +112,7 @@ def test_v30_custom_stake_amount_uses_bridge_candidate():
         timeframe="5m",
         plan_timeframe=None,
     )
+    strat.bridge.get_side_meta = lambda *args, **kwargs: (meta, meta_info)
 
     stake = strat.custom_stake_amount(
         pair="BTC/USDT",
@@ -128,7 +132,7 @@ def test_v30_custom_stake_amount_uses_bridge_candidate():
 
 def test_v30_populate_entry_trend_updates_last_signal():
     strat = _make_stub_strategy()
-    strat.bridge.get_row_meta = lambda *args, **kwargs: {
+    meta = {
         "signal_id": 7,
         "raw_score": 0.5,
         "rr_ratio": 2.0,
@@ -137,7 +141,7 @@ def test_v30_populate_entry_trend_updates_last_signal():
         "tp_pct": 0.02,
         "plan_atr_pct": 0.03,
     }
-    strat.hub.meta_for_id = lambda *_: SimpleNamespace(
+    meta_info = SimpleNamespace(
         name="mean_rev_long",
         direction="long",
         squad="MRL",
@@ -146,6 +150,9 @@ def test_v30_populate_entry_trend_updates_last_signal():
         timeframe="5m",
         plan_timeframe=None,
     )
+    strat.bridge.get_side_meta = lambda *args, **kwargs: (meta, meta_info)
+    strat.bridge.get_row_meta = lambda *args, **kwargs: meta
+    strat.hub.meta_for_id = lambda *_: meta_info
 
     df = pd.DataFrame(
         {
@@ -165,16 +172,7 @@ def test_v30_populate_entry_trend_updates_last_signal():
 
 def test_v30_entry_tag_requires_matching_candidate():
     strat = _make_stub_strategy()
-    strat.bridge.get_candidate_by_id = lambda *args, **kwargs: None
-    strat.bridge.get_row_meta = lambda *args, **kwargs: {
-        "signal_id": 9,
-        "raw_score": 0.5,
-        "rr_ratio": 2.0,
-        "expected_edge": 0.6,
-        "sl_pct": 0.01,
-        "tp_pct": 0.02,
-        "plan_atr_pct": 0.03,
-    }
+    strat.bridge.get_side_meta = lambda *args, **kwargs: None
     assert (
         strat.confirm_trade_entry(
             pair="BTC/USDT",
@@ -204,7 +202,7 @@ def test_v30_entry_tag_requires_matching_candidate():
 
 def test_v30_entry_tag_uses_matching_candidate():
     strat = _make_stub_strategy()
-    strat.bridge.get_candidate_by_id = lambda *args, **kwargs: {
+    meta = {
         "signal_id": 7,
         "raw_score": 0.5,
         "rr_ratio": 2.0,
@@ -213,7 +211,7 @@ def test_v30_entry_tag_uses_matching_candidate():
         "tp_pct": 0.02,
         "plan_atr_pct": 0.03,
     }
-    strat.hub.meta_for_id = lambda *_: SimpleNamespace(
+    meta_info = SimpleNamespace(
         name="mean_rev_long",
         direction="long",
         squad="MRL",
@@ -222,6 +220,7 @@ def test_v30_entry_tag_uses_matching_candidate():
         timeframe="5m",
         plan_timeframe=None,
     )
+    strat.bridge.get_side_meta = lambda *args, **kwargs: (meta, meta_info)
     assert (
         strat.confirm_trade_entry(
             pair="BTC/USDT",

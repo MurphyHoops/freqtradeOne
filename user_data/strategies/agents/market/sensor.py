@@ -7,7 +7,10 @@ import math
 
 import numpy as np
 import pandas as pd
-import talib.abstract as ta
+try:
+    import talib.abstract as ta
+except Exception:  # pragma: no cover - optional dependency
+    ta = None
 
 from ..portfolio.global_backend import GlobalRiskBackend
 
@@ -30,12 +33,18 @@ class MarketSensor:
         backend: GlobalRiskBackend,
         weights: Optional[Dict[str, float]] = None,
         entropy_factor: float = 0.4,
+        strict: bool = False,
     ) -> None:
         self.backend = backend
         self.weights = weights or {"BTC": 0.6, "ETH": 0.4}
         self.entropy_factor = float(entropy_factor)
+        self.strict = bool(strict)
+        if self.strict and ta is None:
+            raise ModuleNotFoundError("talib is required when market_sensor_strict is enabled.")
 
     def _safe_bias_vol(self, df: Optional[pd.DataFrame]) -> tuple[float, float]:
+        if ta is None:
+            return (0.0, 1.0)
         if df is None or len(df) < 5:
             return (0.0, 1.0)
 

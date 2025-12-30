@@ -33,7 +33,7 @@ if ($composeParts.Count -gt 1) {
 $arguments = @(
     'run','--rm','freqtrade','backtesting',
     '-c','user_data/configs/v29_backtest.json',
-    '-s','TaxBrainV29','-i', $Timeframe,
+    '-s','TaxBrainV30','-i', $Timeframe,
     '--timerange', $Timerange,
     '--stake-amount', $Stake
 )

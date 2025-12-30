@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from types import SimpleNamespace
-
 import pytest
 
-from user_data.strategies.TaxBrainV29 import GlobalState
+from user_data.strategies.core.engine import GlobalState
 from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
+from user_data.strategies.agents.signals import schemas
 from user_data.strategies.config.v29_config import V29Config
-from user_data.strategies import TaxBrainV29
 
 
 def test_record_trade_close_updates_closs_and_debt():
@@ -37,55 +34,43 @@ def test_record_trade_close_updates_closs_and_debt():
 
 def test_candidate_pool_selection_respects_tier():
     cfg = V29Config()
-    strat = TaxBrainV29.TaxBrainV29.__new__(TaxBrainV29.TaxBrainV29)
-    strat.cfg = cfg
-    strat.state = GlobalState(cfg)
-    strat.tier_mgr = TierManager(cfg)
-    strat.tier_agent = TierAgent()
-    strat.bridge = SimpleNamespace(
-        get_candidates=lambda *args, **kwargs: [
-            {
-                "signal_id": 1,
-                "raw_score": 0.30,
-                "rr_ratio": 0.5,
-                "expected_edge": 0.005,
-                "sl_pct": 0.01,
-                "tp_pct": 0.02,
-                "plan_atr_pct": None,
-            },
-            {
-                "signal_id": 2,
-                "raw_score": 0.25,
-                "rr_ratio": 0.6,
-                "expected_edge": 0.004,
-                "sl_pct": 0.012,
-                "tp_pct": 0.024,
-                "plan_atr_pct": None,
-            },
-        ]
+    tier_mgr = TierManager(cfg)
+    tier_agent = TierAgent()
+    candidate_nbx = schemas.Candidate(
+        direction="long",
+        kind="newbars_breakout_long_5m",
+        raw_score=0.30,
+        rr_ratio=0.5,
+        win_prob=0.005,
+        expected_edge=0.005,
+        squad="NBX",
+        sl_pct=0.01,
+        tp_pct=0.02,
+        exit_profile="ATRtrail_v1",
+        recipe="NBX_fast_default",
+        timeframe=None,
     )
-    strat.hub = SimpleNamespace(
-        meta_for_id=lambda sid: SimpleNamespace(
-            name="newbars_breakout_long_5m" if sid == 1 else "pullback_long",
-            squad="NBX" if sid == 1 else "PBL",
-            recipe="NBX_fast_default" if sid == 1 else "Recovery_mix",
-            exit_profile="ATRtrail_v1",
-            timeframe=None,
-            plan_timeframe=None,
-        )
+    candidate_recovery = schemas.Candidate(
+        direction="long",
+        kind="pullback_long",
+        raw_score=0.25,
+        rr_ratio=0.6,
+        win_prob=0.004,
+        expected_edge=0.004,
+        squad="PBL",
+        sl_pct=0.012,
+        tp_pct=0.024,
+        exit_profile="ATRtrail_v1",
+        recipe="Recovery_mix",
+        timeframe=None,
     )
-    state = strat.state
-    pair = "ADA/USDT"
-    pst = state.get_pair_state(pair)
 
-    # Tier-0 selects NBX candidate
-    pst.closs = 0
-    selected = strat._select_candidate_from_pool(pair, datetime.utcnow(), "buy")
+    policy_t0 = tier_mgr.get(0)
+    selected = tier_agent.filter_best(policy_t0, [candidate_nbx, candidate_recovery])
     assert selected is not None
     assert selected.squad == "NBX"
 
-    # Tier-1 routes to recovery squad candidate
-    pst.closs = 1
-    selected = strat._select_candidate_from_pool(pair, datetime.utcnow(), "buy")
+    policy_t1 = tier_mgr.get(1)
+    selected = tier_agent.filter_best(policy_t1, [candidate_nbx, candidate_recovery])
     assert selected is not None
     assert selected.squad == "PBL"

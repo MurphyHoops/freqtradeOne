@@ -78,3 +78,24 @@ def test_bridge_get_row_meta_reads_values():
     assert meta["signal_id"] == 2.0
     assert meta["expected_edge"] == 0.2
     assert meta["sl_pct"] == 0.02
+
+
+def test_bridge_get_side_meta_respects_direction():
+    tracker = RejectTracker(log_enabled=False, stats_enabled=True)
+    hub = SimpleNamespace(meta_for_id=lambda *_: SimpleNamespace(direction="long"))
+    strategy = SimpleNamespace(cfg=SimpleNamespace(), rejections=tracker, hub=hub)
+    bridge = ZeroCopyBridge(strategy)
+
+    idx = pd.date_range("2024-01-01", periods=2, freq="5min")
+    df = pd.DataFrame({"date": idx})
+    bridge.bind_df("BTC/USDT", df)
+
+    payloads_long = [[{"signal_id": 1, "raw_score": 0.2, "rr_ratio": 1.0, "expected_edge": 0.5, "sl_pct": 0.01, "tp_pct": 0.02, "plan_atr_pct": 0.03}], []]
+    payloads_short = [[], []]
+    pool = PoolBuffer.from_payloads(payloads_long, payloads_short, slots=1, signal_id_fn=lambda p, _: p.get("signal_id"))
+    bridge.bind_pool_buffer("BTC/USDT", pool)
+
+    assert bridge.get_side_meta("BTC/USDT", idx[0], "sell", None) is None
+    meta = bridge.get_side_meta("BTC/USDT", idx[0], "buy", "1")
+    assert meta is not None
+    assert meta[0]["signal_id"] == 1

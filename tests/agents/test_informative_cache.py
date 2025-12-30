@@ -1,4 +1,4 @@
-"""验证 TaxBrainV29 多周期缓存/对齐逻辑。"""
+"""Informative cache alignment tests for TaxBrainV30."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from user_data.strategies.TaxBrainV29 import TaxBrainV29
+from user_data.strategies.TaxBrainV30 import TaxBrainV30
 
 
 class _DummyDataProvider:
@@ -22,6 +22,15 @@ class _DummyDataProvider:
         assert timeframe == "1h"
         self.info_calls += 1
         return self._info_df.copy()
+
+
+class _DummyDataProviderMulti:
+    def __init__(self, frames: dict[str, pd.DataFrame]) -> None:
+        self._frames = frames
+
+    def get_informative_dataframe(self, pair: str, timeframe: str):
+        assert pair == "BTC/USDT"
+        return self._frames[timeframe].copy()
 
 
 def _base_frame() -> pd.DataFrame:
@@ -63,7 +72,7 @@ def test_informative_cache_reuses_frames(tmp_path: Path):
         "dry_run_wallet": 1000,
         "user_data_dir": str(tmp_path),
     }
-    strategy = TaxBrainV29(params)
+    strategy = TaxBrainV30(params)
     strategy._informative_timeframes = ("1h",)
 
     info_df = _info_frame()
@@ -74,11 +83,11 @@ def test_informative_cache_reuses_frames(tmp_path: Path):
     strategy.populate_indicators(base_df.copy(), {"pair": "BTC/USDT"})
 
     assert dp.info_calls == 1
-    assert "BTC/USDT" in strategy._informative_cache
-    cached = strategy._informative_cache["BTC/USDT"]["1h"]
+    assert "BTC/USDT" in strategy.bridge._informative_cache
+    cached = strategy.bridge._informative_cache["BTC/USDT"]["1h"]
     assert cached.equals(info_df.tail(len(cached)))
 
-    aligned = strategy._aligned_informative_for_df("BTC/USDT", base_df.copy())
+    aligned = strategy.bridge.align_informative(base_df.copy(), "BTC/USDT")
     assert dp.info_calls == 1, "Aligned fetch should reuse cached dataframe"
     assert "1h" in aligned
     assert len(aligned["1h"]) == len(base_df)
@@ -94,7 +103,7 @@ def test_aligned_info_cache_lru_eviction(tmp_path: Path):
         "dry_run_wallet": 1000,
         "user_data_dir": str(tmp_path),
     }
-    strategy = TaxBrainV29(params)
+    strategy = TaxBrainV30(params)
     strategy._informative_timeframes = ("1h",)
 
     info_df = _info_frame()
@@ -108,13 +117,38 @@ def test_aligned_info_cache_lru_eviction(tmp_path: Path):
     df3 = base_df.copy()
     df3["date"] = df3["date"] + pd.Timedelta(minutes=10)
 
-    strategy._aligned_informative_for_df("BTC/USDT", df1)
-    strategy._aligned_informative_for_df("BTC/USDT", df2)
-    strategy._aligned_informative_for_df("BTC/USDT", df3)
+    strategy.bridge.align_informative(df1, "BTC/USDT")
+    strategy.bridge.align_informative(df2, "BTC/USDT")
+    strategy.bridge.align_informative(df3, "BTC/USDT")
 
-    cache = strategy._aligned_info_cache
+    cache = strategy.bridge._aligned_info_cache
     assert len(cache) <= 2
     key2 = ("BTC/USDT", "1h", len(df2), str(df2["date"].iloc[-1]))
     key3 = ("BTC/USDT", "1h", len(df3), str(df3["date"].iloc[-1]))
     assert key2 in cache
     assert key3 in cache
+
+
+def test_informative_cache_lru_eviction(tmp_path: Path):
+    params = {
+        "strategy_params": {
+            "timeframe": "5m",
+            "startup_candle_count": 50,
+            "informative_cache_max_entries": 1,
+        },
+        "dry_run_wallet": 1000,
+        "user_data_dir": str(tmp_path),
+    }
+    strategy = TaxBrainV30(params)
+    strategy._informative_timeframes = ("1h", "4h")
+
+    info_df = _info_frame()
+    frames = {"1h": info_df, "4h": info_df.copy()}
+    strategy.dp = _DummyDataProviderMulti(frames)
+
+    strategy.bridge.get_informative_dataframe("BTC/USDT", "1h")
+    strategy.bridge.get_informative_dataframe("BTC/USDT", "4h")
+
+    cache = strategy.bridge._informative_cache.get("BTC/USDT", {})
+    assert "4h" in cache
+    assert "1h" not in cache

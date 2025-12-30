@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import user_data.strategies.TaxBrainV29 as strat_mod
-from user_data.strategies.TaxBrainV29 import TaxBrainV29
+import user_data.strategies.TaxBrainV30 as strat_mod
+from user_data.strategies.TaxBrainV30 import TaxBrainV30
 from user_data.strategies.agents.signals import builder, vectorized
 from user_data.strategies.core.hub import SignalHub
 from user_data.strategies.config.v29_config import V29Config
@@ -125,11 +125,11 @@ def test_vectorized_and_nonvectorized_match(monkeypatch, tmp_path):
         "dry_run_wallet": 1000,
         "user_data_dir": str(tmp_path),
     }
-    vectorized_strat = TaxBrainV29(params)
+    vectorized_strat = TaxBrainV30(params)
     vectorized_strat.dp = _RunmodeDP(fake.BACKTEST)
 
     params["strategy_params"]["vectorized_entry_backtest"] = False
-    non_vectorized_strat = TaxBrainV29(params)
+    non_vectorized_strat = TaxBrainV30(params)
     non_vectorized_strat.dp = _RunmodeDP(fake.BACKTEST)
 
     df = _base_frame()
@@ -156,7 +156,7 @@ def test_vectorized_skips_when_informative_unmerged(monkeypatch, tmp_path):
         "dry_run_wallet": 1000,
         "user_data_dir": str(tmp_path),
     }
-    strategy = TaxBrainV29(params)
+    strategy = TaxBrainV30(params)
     strategy.dp = SimpleNamespace(runmode=fake.BACKTEST, get_informative_dataframe=_DummyDP(_info_frame()).get_informative_dataframe)
 
     def _no_vectorized(*args, **kwargs):
@@ -255,12 +255,12 @@ def test_informative_merge_matches_aligned_rows(monkeypatch, tmp_path):
 
     merged_params = dict(params)
     merged_params["strategy_params"] = dict(params["strategy_params"], merge_informative_into_base=True)
-    merged_strat = TaxBrainV29(merged_params)
+    merged_strat = TaxBrainV30(merged_params)
     merged_strat.dp = dp
 
     aligned_params = dict(params)
     aligned_params["strategy_params"] = dict(params["strategy_params"], merge_informative_into_base=False)
-    aligned_strat = TaxBrainV29(aligned_params)
+    aligned_strat = TaxBrainV30(aligned_params)
     aligned_strat.dp = dp
 
     base_df = _base_frame().drop(columns=["atr_pct_30m", "newbars_high_30m", "newbars_low_30m"])

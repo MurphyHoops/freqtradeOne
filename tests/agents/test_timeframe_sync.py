@@ -1,6 +1,6 @@
-﻿"""验证 TaxBrainV29 对 timeframe/startup_candle_count 的同步行为。"""
+"""验证 TaxBrainV30 对 timeframe/startup_candle_count 的同步行为。"""
 
-from user_data.strategies.TaxBrainV29 import TaxBrainV29
+from user_data.strategies.TaxBrainV30 import TaxBrainV30
 
 
 def test_timeframe_startup_sync(tmp_path):
@@ -15,7 +15,7 @@ def test_timeframe_startup_sync(tmp_path):
         "dry_run_wallet": 2000,
         "user_data_dir": str(tmp_path),
     }
-    strategy = TaxBrainV29(params)
+    strategy = TaxBrainV30(params)
 
     assert strategy.timeframe == "1h"
     assert strategy.startup_candle_count == 123

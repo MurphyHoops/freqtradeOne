@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 import math
 import uuid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import pandas as pd
 
@@ -78,42 +78,6 @@ def register_informative_methods(strategy) -> None:
         ensure_informative_method(strategy.__class__, tf)
 
 
-def gc_informative_cache(strategy, current_whitelist: List[str]) -> None:
-    if not current_whitelist:
-        return
-    allowed = {str(pair) for pair in current_whitelist if pair}
-    if not allowed:
-        return
-    stale_pairs = [pair for pair in list(strategy._informative_cache.keys()) if pair not in allowed]
-    for pair in stale_pairs:
-        strategy._informative_cache.pop(pair, None)
-        strategy._informative_last.pop(pair, None)
-
-
-def get_informative_dataframe(strategy, pair: str, timeframe: str) -> Optional[pd.DataFrame]:
-    cached = strategy._informative_cache.get(pair, {}).get(timeframe)
-    if cached is not None and not cached.empty:
-        return cached
-    getter = getattr(strategy.dp, "get_informative_dataframe", None)
-    if callable(getter):
-        result = getter(pair, timeframe)
-        if isinstance(result, tuple):
-            result = result[0]
-        if isinstance(result, pd.DataFrame) and not result.empty:
-            prepared = strategy._prepare_informative_frame(result, timeframe)
-            strategy._informative_cache.setdefault(pair, {})[timeframe] = prepared
-            return prepared
-        return strategy._prepare_informative_frame(result, timeframe)
-    result = strategy.dp.get_analyzed_dataframe(pair, timeframe)
-    if isinstance(result, tuple):
-        result = result[0]
-    if isinstance(result, pd.DataFrame) and not result.empty:
-        prepared = strategy._prepare_informative_frame(result, timeframe)
-        strategy._informative_cache.setdefault(pair, {})[timeframe] = prepared
-        return prepared
-    return strategy._prepare_informative_frame(result, timeframe)
-
-
 def informative_required_columns(strategy, timeframe: str) -> list[str]:
     required: set[str] = set()
     factors_needed = strategy._factor_requirements.get(timeframe, set())
@@ -151,13 +115,13 @@ def derived_factor_columns_missing(df: pd.DataFrame, timeframes: Iterable[Option
     return False
 
 
-def merge_informative_columns_into_base(strategy, df: pd.DataFrame, pair: str) -> None:
+def merge_informative_columns_into_base(strategy, bridge, df: pd.DataFrame, pair: str) -> None:
     if df is None or df.empty:
         return
     base_time = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
     left = pd.DataFrame({"_t": base_time})
     for tf in getattr(strategy, "_informative_timeframes", []):
-        info_df = strategy._get_informative_dataframe(pair, tf)
+        info_df = bridge.get_informative_dataframe(pair, tf)
         if info_df is None or info_df.empty:
             continue
         cols = informative_required_columns(strategy, tf)
@@ -188,54 +152,6 @@ def merge_informative_columns_into_base(strategy, df: pd.DataFrame, pair: str) -
                 continue
             if col in merged.columns:
                 df[target] = merged[col]
-
-
-def aligned_informative_for_df(strategy, pair: str, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    out: Dict[str, pd.DataFrame] = {}
-    if df is None or df.empty:
-        return out
-    system_cfg = getattr(strategy.cfg, "system", None)
-    if system_cfg and getattr(system_cfg, "merge_informative_into_base", False) and strategy._is_backtest_like_runmode():
-        return out
-    base_time = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
-    last_ts = base_time.iloc[-1] if len(base_time) else None
-    max_entries = int(getattr(system_cfg, "aligned_info_cache_max_entries", 0) or 0) if system_cfg else 0
-    for tf in getattr(strategy, "_informative_timeframes", []):
-        cache_key = (pair, tf, len(df), str(last_ts))
-        cached = strategy._aligned_info_cache.get(cache_key)
-        if cached is not None:
-            if hasattr(strategy._aligned_info_cache, "move_to_end"):
-                try:
-                    strategy._aligned_info_cache.move_to_end(cache_key)
-                except Exception:
-                    pass
-            out[tf] = cached
-            continue
-        info_df = strategy._get_informative_dataframe(pair, tf)
-        if info_df is None or info_df.empty:
-            continue
-        left = pd.DataFrame({"_t": base_time})
-        right = info_df
-        right = right.assign(
-            _tinfo=pd.to_datetime(right["date"]) if "date" in right.columns else pd.to_datetime(right.index)
-        )
-        merged = pd.merge_asof(
-            left.sort_values("_t"),
-            right.sort_values("_tinfo"),
-            left_on="_t",
-            right_on="_tinfo",
-            direction="backward",
-        )
-        merged.index = df.index
-        out[tf] = merged
-        strategy._aligned_info_cache[cache_key] = merged
-        if max_entries > 0:
-            while len(strategy._aligned_info_cache) > max_entries:
-                try:
-                    strategy._aligned_info_cache.popitem(last=False)
-                except Exception:
-                    break
-    return out
 
 
 def informative_rows_for_index(aligned_info: Dict[str, pd.DataFrame], idx) -> Dict[str, pd.Series]:

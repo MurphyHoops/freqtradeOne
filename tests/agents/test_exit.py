@@ -1,11 +1,12 @@
-"""ExitPolicyV29 and TaxBrainV29 exit wiring unit tests."""
+"""ExitPolicyV29 and TaxBrainV30 exit wiring unit tests."""
 
 from __future__ import annotations
 
 import pytest
 
-import user_data.strategies.TaxBrainV29 as strat_mod
-from user_data.strategies.TaxBrainV29 import ActiveTradeMeta, PairState, TaxBrainV29
+import user_data.strategies.TaxBrainV30 as strat_mod
+from user_data.strategies.core.engine import ActiveTradeMeta, PairState
+from user_data.strategies.TaxBrainV30 import TaxBrainV30
 from user_data.strategies.agents.exits.exit import ExitPolicyV29, ExitTags
 from user_data.strategies.config.v29_config import V29Config
 
@@ -100,7 +101,7 @@ def test_custom_stoploss_router_behavior(monkeypatch, tmp_path, router_value):
         "dry_run_wallet": 1000,
         "user_data_dir": str(tmp_path),
     }
-    strategy = TaxBrainV29(config)
+    strategy = TaxBrainV30(config)
     trade = DummyTrade(trade_id=42)
     pair = "BTC/USDT"
 
@@ -125,7 +126,7 @@ def test_custom_exit_records_reason(monkeypatch, tmp_path):
         "dry_run_wallet": 1000,
         "user_data_dir": str(tmp_path),
     }
-    strategy = TaxBrainV29(config)
+    strategy = TaxBrainV30(config)
     trade = DummyTrade()
     monkeypatch.setattr(strategy.exit_policy, "decide", lambda *args, **kwargs: ExitTags.ICU_TIMEOUT)
 

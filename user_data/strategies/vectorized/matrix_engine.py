@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import sys
 import math
-import time
 
 import numpy as np
 import pandas as pd
@@ -15,6 +14,7 @@ except Exception:  # pragma: no cover
 
 from ..agents.signals import builder, indicators, schemas, vectorized
 from ..core import math_ops
+from ..core import strategy_helpers as helpers
 from .pool_buffer import PoolBuffer, PoolSchema
 
 
@@ -76,7 +76,7 @@ class MatrixEngine:
             backtest_like = False
         if system_cfg and backtest_like and merge_info:
             try:
-                self._strategy._merge_informative_columns_into_base(df, pair)
+                helpers.merge_informative_columns_into_base(self._strategy, self._bridge, df, pair)
                 timeframes = (None, *getattr(self._strategy, "_informative_timeframes", ()))
                 if self._strategy._derived_factor_columns_missing(df, timeframes):
                     vectorized.add_derived_factor_columns(df, timeframes)
@@ -86,26 +86,23 @@ class MatrixEngine:
         if getattr(self._strategy, "_informative_timeframes", None):
             for tf in self._strategy._informative_timeframes:
                 try:
-                    info_df = self._strategy._get_informative_dataframe(pair, tf)
+                    info_df = self._bridge.get_informative_dataframe(pair, tf)
                 except Exception:
                     continue
                 if info_df is None or info_df.empty:
                     continue
                 informative_rows[tf] = info_df.iloc[-1]
-                cache = self._strategy._informative_cache.setdefault(pair, {})
-                cache[tf] = info_df
         if informative_rows:
-            self._strategy._informative_last[pair] = informative_rows
-        elif pair in self._strategy._informative_last:
-            self._strategy._informative_last.pop(pair, None)
-            self._strategy._informative_cache.pop(pair, None)
+            self._bridge.set_informative_last(pair, informative_rows)
+        else:
+            self._bridge.clear_informative_pair(pair)
 
         sensor_enabled = bool(getattr(system_cfg, "market_sensor_enabled", True)) if system_cfg else True
         sensor_backtest = bool(getattr(system_cfg, "market_sensor_in_backtest", False)) if system_cfg else False
         if pair.upper().startswith("BTC") and sensor_enabled and (not backtest_like or sensor_backtest):
             eth_df = None
             try:
-                eth_df = self._strategy._get_informative_dataframe("ETH/USDT", self._strategy.timeframe)
+                eth_df = self._bridge.get_informative_dataframe("ETH/USDT", self._strategy.timeframe)
             except Exception:
                 try:
                     eth_df = self._strategy.dp.get_analyzed_dataframe("ETH/USDT", self._strategy.timeframe)
@@ -132,14 +129,7 @@ class MatrixEngine:
             )
         except Exception:
             pass
-        now_ts = time.time()
-        if (now_ts - getattr(self._strategy, "_informative_gc_last_ts", 0.0)) >= getattr(
-            self._strategy, "_informative_gc_interval_sec", 900
-        ):
-            try:
-                self._strategy._gc_informative_cache(whitelist)
-            finally:
-                self._strategy._informative_gc_last_ts = now_ts
+        self._bridge.maybe_gc_informative_cache(whitelist)
 
         aligned_info = {} if use_vector_prefilter else self._bridge.align_informative(df, pair)
 
@@ -243,7 +233,7 @@ class MatrixEngine:
             for idx in df.index:
                 df.at[idx, "LOSS_TIER_STATE"] = pst_snapshot.closs
                 row = df.loc[idx]
-                inf_rows = self._strategy._informative_rows_for_index(aligned_info, idx)
+                inf_rows = helpers.informative_rows_for_index(aligned_info, idx)
                 raw_candidates = builder.build_candidates(
                     row,
                     self._strategy.cfg,
@@ -275,7 +265,7 @@ class MatrixEngine:
             last_idx = df.index[-1]
             df.at[last_idx, "LOSS_TIER_STATE"] = pst_snapshot.closs
             row = df.loc[last_idx]
-            inf_rows = self._strategy._informative_rows_for_index(aligned_info, last_idx)
+            inf_rows = helpers.informative_rows_for_index(aligned_info, last_idx)
             raw_candidates = builder.build_candidates(
                 row,
                 self._strategy.cfg,
@@ -439,20 +429,20 @@ class MatrixEngine:
         df["enter_short"] = 0
         df["enter_tag"] = None
 
-        top_long_id = np.full(size, np.nan)
-        top_short_id = np.full(size, np.nan)
-        top_long_edge = np.full(size, np.nan)
-        top_short_edge = np.full(size, np.nan)
-        top_long_raw = np.full(size, np.nan)
-        top_short_raw = np.full(size, np.nan)
-        top_long_rr = np.full(size, np.nan)
-        top_short_rr = np.full(size, np.nan)
-        top_long_sl = np.full(size, np.nan)
-        top_short_sl = np.full(size, np.nan)
-        top_long_tp = np.full(size, np.nan)
-        top_short_tp = np.full(size, np.nan)
-        top_long_atr = np.full(size, np.nan)
-        top_short_atr = np.full(size, np.nan)
+        top_long_id = np.full(size, np.nan, dtype=np.float32)
+        top_short_id = np.full(size, np.nan, dtype=np.float32)
+        top_long_edge = np.full(size, np.nan, dtype=np.float32)
+        top_short_edge = np.full(size, np.nan, dtype=np.float32)
+        top_long_raw = np.full(size, np.nan, dtype=np.float32)
+        top_short_raw = np.full(size, np.nan, dtype=np.float32)
+        top_long_rr = np.full(size, np.nan, dtype=np.float32)
+        top_short_rr = np.full(size, np.nan, dtype=np.float32)
+        top_long_sl = np.full(size, np.nan, dtype=np.float32)
+        top_short_sl = np.full(size, np.nan, dtype=np.float32)
+        top_long_tp = np.full(size, np.nan, dtype=np.float32)
+        top_short_tp = np.full(size, np.nan, dtype=np.float32)
+        top_long_atr = np.full(size, np.nan, dtype=np.float32)
+        top_short_atr = np.full(size, np.nan, dtype=np.float32)
 
         for idx, pool in enumerate(payloads_long):
             if not pool:
@@ -486,8 +476,8 @@ class MatrixEngine:
         df.loc[long_mask, "enter_long"] = 1
         df.loc[short_mask, "enter_short"] = 1
 
-        df["_signal_id_long"] = top_long_id
-        df["_signal_id_short"] = top_short_id
+        df["_signal_id_long"] = pd.Series(top_long_id, index=df.index, dtype=np.float32)
+        df["_signal_id_short"] = pd.Series(top_short_id, index=df.index, dtype=np.float32)
 
         selected = np.where(
             np.isnan(top_short_edge) | (top_long_edge >= top_short_edge),
@@ -501,14 +491,14 @@ class MatrixEngine:
         selected_sl = np.where(select_long, top_long_sl, top_short_sl)
         selected_tp = np.where(select_long, top_long_tp, top_short_tp)
         selected_atr = np.where(select_long, top_long_atr, top_short_atr)
-        df["_signal_id"] = selected
+        df["_signal_id"] = pd.Series(selected, index=df.index, dtype=np.float32)
         df["enter_tag"] = pd.Series(
             [str(int(x)) if math.isfinite(x) and x > 0 else None for x in selected],
             index=df.index,
         )
-        df["_signal_score"] = selected_edge
-        df["_signal_raw_score"] = selected_raw
-        df["_signal_rr_ratio"] = selected_rr
-        df["_signal_sl_pct"] = selected_sl
-        df["_signal_tp_pct"] = selected_tp
-        df["_signal_plan_atr_pct"] = selected_atr
+        df["_signal_score"] = pd.Series(selected_edge, index=df.index, dtype=np.float32)
+        df["_signal_raw_score"] = pd.Series(selected_raw, index=df.index, dtype=np.float32)
+        df["_signal_rr_ratio"] = pd.Series(selected_rr, index=df.index, dtype=np.float32)
+        df["_signal_sl_pct"] = pd.Series(selected_sl, index=df.index, dtype=np.float32)
+        df["_signal_tp_pct"] = pd.Series(selected_tp, index=df.index, dtype=np.float32)
+        df["_signal_plan_atr_pct"] = pd.Series(selected_atr, index=df.index, dtype=np.float32)

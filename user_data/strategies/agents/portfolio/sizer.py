@@ -484,23 +484,6 @@ class SizerAgent:
             proposed_nominal_cap=proposed_nominal_cap,
         )
 
-    def _compute_recovery_risk(
-        self,
-        ctx: SizingContext,
-        tier_pol: TierPolicy,
-        pst,
-        bucket_risk: float,
-        sizing_cfg: SizingAlgoConfig,
-        base_nominal: float,
-        sl_price_pct: float,
-        equity: float,
-        baseline_risk: float,
-        algo: str,
-    ) -> float:
-        """Deprecated: sizing algorithms now live in sizing_algos.py."""
-
-        raise RuntimeError("Use sizing_algos via SizerAgent pipeline instead.")
-
     def _apply_caps(self, nominal_target: float, caps: Caps, min_entry_nominal: float) -> float:
         """Clamp the nominal target by all caps, respecting exchange minimums."""
 

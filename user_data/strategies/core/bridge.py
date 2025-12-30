@@ -65,13 +65,17 @@ class ZeroCopyBridge:
                     pass
         return row
 
+    def get_row_index(self, pair: str, current_time) -> Optional[int]:
+        return self._row_from_time(pair, current_time)
+
     def get_candidates(
         self,
         pair: str,
         current_time,
         side: str,
+        row_idx: Optional[int] = None,
     ) -> list[Dict[str, float]]:
-        row = self._row_from_time(pair, current_time)
+        row = row_idx if row_idx is not None else self._row_from_time(pair, current_time)
         if row is None:
             return []
         buffer = self._pool_buffers.get(pair)
@@ -79,3 +83,38 @@ class ZeroCopyBridge:
             return []
         out = buffer.candidates_for(row, side)
         return out
+
+    def get_candidate_by_id(
+        self,
+        pair: str,
+        current_time,
+        signal_id: int,
+        side: str,
+        row_idx: Optional[int] = None,
+    ) -> Optional[Dict[str, float]]:
+        row = row_idx if row_idx is not None else self._row_from_time(pair, current_time)
+        if row is None:
+            return None
+        buffer = self._pool_buffers.get(pair)
+        if buffer is None:
+            return None
+        for cand in buffer.candidates_for(row, side):
+            if int(cand.get("signal_id", 0)) == int(signal_id):
+                return cand
+        return None
+
+    def get_best_candidate(
+        self,
+        pair: str,
+        current_time,
+        side: str,
+        row_idx: Optional[int] = None,
+    ) -> Optional[Dict[str, float]]:
+        row = row_idx if row_idx is not None else self._row_from_time(pair, current_time)
+        if row is None:
+            return None
+        buffer = self._pool_buffers.get(pair)
+        if buffer is None:
+            return None
+        candidates = buffer.candidates_for(row, side)
+        return candidates[0] if candidates else None

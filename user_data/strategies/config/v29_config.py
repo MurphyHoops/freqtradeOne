@@ -129,6 +129,8 @@ class SystemConfig:
     market_sensor_enabled: bool = True  # Master toggle for market sensor.
     market_sensor_in_backtest: bool = False  # Enable market sensor during backtest/hyperopt.
     debug_prints: bool = False  # Enable verbose prints in strategy hooks.
+    plugin_load_strict: bool = False  # Raise if any plugin fails to load.
+    plugin_allow_reload: bool = False  # Allow dev-only plugin reload (clears registry before load).
     rejection_log_enabled: bool = False  # Emit structured rejection logs.
     rejection_stats_enabled: bool = True  # Track rejection counters in memory.
 

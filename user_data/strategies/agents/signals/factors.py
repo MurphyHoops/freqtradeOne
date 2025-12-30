@@ -10,6 +10,7 @@ import pandas as pd
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING
 
+from ...core import math_ops
 if TYPE_CHECKING:  # pragma: no cover - typing only
     FactorBankType = "FactorBank"
 else:
@@ -93,52 +94,7 @@ def _sigmoid(x: float) -> float:
 
 def _compute_hurst_rs(history_close: Optional[Iterable[float]], window: int = 200, min_points: int = 50) -> float:
     """Compute a simplified R/S Hurst exponent; returns NaN when data is insufficient."""
-
-    if not history_close:
-        return float("nan")
-    try:
-        values = [
-            float(v)
-            for v in history_close
-            if v is not None and not math.isnan(float(v)) and not math.isinf(float(v))
-        ]
-    except Exception:
-        return float("nan")
-    if window and window > 0:
-        values = values[-window:]
-    if len(values) < max(2, min_points):
-        return float("nan")
-
-    returns: list[float] = []
-    for prev, curr in zip(values, values[1:]):
-        if prev == 0 or math.isnan(prev) or math.isinf(prev) or math.isnan(curr) or math.isinf(curr):
-            continue
-        returns.append((curr - prev) / abs(prev))
-    if len(returns) < max(2, min_points // 2):
-        return float("nan")
-
-    mean_ret = sum(returns) / len(returns)
-    devs = [r - mean_ret for r in returns]
-    cum_devs: list[float] = []
-    running = 0.0
-    for d in devs:
-        running += d
-        cum_devs.append(running)
-    if not cum_devs:
-        return float("nan")
-
-    R = max(cum_devs) - min(cum_devs)
-    variance = sum(d * d for d in devs) / max(1, len(devs))
-    S = math.sqrt(variance)
-    if R <= 0 or S <= 0:
-        return float("nan")
-    try:
-        hurst = math.log(R / S) / math.log(len(cum_devs))
-    except Exception:
-        return float("nan")
-    if math.isnan(hurst) or math.isinf(hurst):
-        return float("nan")
-    return max(0.0, min(1.0, hurst))
+    return math_ops.calculate_hurst_scalar(history_close, window=window, min_points=min_points)
 
 
 def _compute_adx_zsig(
@@ -148,28 +104,9 @@ def _compute_adx_zsig(
     min_points: int = 50,
 ) -> float:
     """Compute sigmoid(z-score) for ADX using recent history; returns NaN if insufficient."""
-
-    if history_adx is None or current_adx is None or math.isnan(current_adx):
-        return float("nan")
-    try:
-        values = [
-            float(v)
-            for v in history_adx
-            if v is not None and not math.isnan(float(v)) and not math.isinf(float(v))
-        ]
-    except Exception:
-        return float("nan")
-    if window and window > 0:
-        values = values[-window:]
-    if len(values) < max(2, min_points):
-        return float("nan")
-    mu = sum(values) / len(values)
-    variance = sum((v - mu) ** 2 for v in values) / max(1, len(values))
-    sigma = math.sqrt(variance)
-    if sigma <= 1e-9:
-        return float("nan")
-    z_val = (current_adx - mu) / sigma
-    return _sigmoid(z_val)
+    return math_ops.calculate_adx_zsig_scalar(
+        history_adx, current_adx, window=window, min_points=min_points
+    )
 
 
 def calculate_regime_factor(

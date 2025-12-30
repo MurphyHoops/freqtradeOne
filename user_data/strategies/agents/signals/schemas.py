@@ -61,6 +61,8 @@ class SignalSpec:
     timeframe: Optional[str] = None
     vec_raw_fn: Optional[Callable[..., Any]] = None
     vec_win_prob_fn: Optional[Callable[..., Any]] = None
+    vec_ready: bool = False
+    origin: Optional[str] = None
 
 
 __all__ = ["Candidate", "Condition", "SignalSpec", "Direction"]

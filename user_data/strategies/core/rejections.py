@@ -13,6 +13,7 @@ class RejectReason:
     NO_CANDIDATE = "no_candidate"
     TIER_REJECT = "tier_reject"
     GATEKEEP = "gatekeeping"
+    PORTFOLIO_CAP = "portfolio_cap"
     SIZER = "sizer"
     RESERVATION = "reservation"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import sys
 import math
+import time
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,8 @@ try:
 except Exception:  # pragma: no cover
     RunMode = None
 
-from ..agents.signals import builder, schemas, vectorized
+from ..agents.signals import builder, indicators, schemas, vectorized
+from ..core import math_ops
 from .pool_buffer import PoolBuffer, PoolSchema
 
 
@@ -26,6 +28,23 @@ class MatrixEngine:
     def inject_features(self, df: pd.DataFrame, pair: str) -> pd.DataFrame:
         if df is None or df.empty:
             return df
+
+        system_cfg = getattr(self._strategy.cfg, "system", None)
+        base_needs = getattr(self._strategy, "_indicator_requirements", {}).get(None)
+        try:
+            df = indicators.compute_indicators(df, self._strategy.cfg, required=base_needs)
+        except Exception:
+            pass
+        if "close" in df.columns:
+            try:
+                df["hurst"] = math_ops.calculate_hurst_vec(df["close"])
+            except Exception:
+                df["hurst"] = np.nan
+        if "adx" in df.columns:
+            try:
+                df["adx_zsig"] = math_ops.calculate_adx_zsig_vec(df["adx"])
+            except Exception:
+                df["adx_zsig"] = np.nan
 
         runmode = getattr(getattr(self._strategy, "dp", None), "runmode", None)
         is_vector_pass = False
@@ -44,13 +63,84 @@ class MatrixEngine:
         if not is_vector_pass:
             token = str(getattr(runmode, "value", runmode) or "").lower()
             is_vector_pass = any(key in token for key in ("backtest", "hyperopt", "plot"))
-        system_cfg = getattr(self._strategy.cfg, "system", None)
         vectorized_bt = bool(getattr(system_cfg, "vectorized_entry_backtest", False)) if system_cfg else False
         merge_info = bool(getattr(system_cfg, "merge_informative_into_base", False)) if system_cfg else False
         informative_requires_merge = bool(self._strategy._informative_timeframes and not merge_info)
         use_vector_prefilter = bool(is_vector_pass and vectorized_bt and not informative_requires_merge)
 
         self._ensure_pool_columns(df)
+        backtest_like = False
+        try:
+            backtest_like = bool(self._strategy._is_backtest_like_runmode())
+        except Exception:
+            backtest_like = False
+        if system_cfg and backtest_like and merge_info:
+            try:
+                self._strategy._merge_informative_columns_into_base(df, pair)
+                timeframes = (None, *getattr(self._strategy, "_informative_timeframes", ()))
+                if self._strategy._derived_factor_columns_missing(df, timeframes):
+                    vectorized.add_derived_factor_columns(df, timeframes)
+            except Exception:
+                pass
+        informative_rows: Dict[str, pd.Series] = {}
+        if getattr(self._strategy, "_informative_timeframes", None):
+            for tf in self._strategy._informative_timeframes:
+                try:
+                    info_df = self._strategy._get_informative_dataframe(pair, tf)
+                except Exception:
+                    continue
+                if info_df is None or info_df.empty:
+                    continue
+                informative_rows[tf] = info_df.iloc[-1]
+                cache = self._strategy._informative_cache.setdefault(pair, {})
+                cache[tf] = info_df
+        if informative_rows:
+            self._strategy._informative_last[pair] = informative_rows
+        elif pair in self._strategy._informative_last:
+            self._strategy._informative_last.pop(pair, None)
+            self._strategy._informative_cache.pop(pair, None)
+
+        sensor_enabled = bool(getattr(system_cfg, "market_sensor_enabled", True)) if system_cfg else True
+        sensor_backtest = bool(getattr(system_cfg, "market_sensor_in_backtest", False)) if system_cfg else False
+        if pair.upper().startswith("BTC") and sensor_enabled and (not backtest_like or sensor_backtest):
+            eth_df = None
+            try:
+                eth_df = self._strategy._get_informative_dataframe("ETH/USDT", self._strategy.timeframe)
+            except Exception:
+                try:
+                    eth_df = self._strategy.dp.get_analyzed_dataframe("ETH/USDT", self._strategy.timeframe)
+                except Exception:
+                    eth_df = None
+            try:
+                self._strategy.market_sensor.analyze(df, eth_df)
+            except Exception:
+                pass
+
+        last = df.iloc[-1]
+        last_ts = float(pd.to_datetime(last.get("date", pd.Timestamp.utcnow())).timestamp())
+        try:
+            whitelist = self._strategy.dp.current_whitelist()
+        except Exception:
+            whitelist = [pair]
+        try:
+            self._strategy.cycle_agent.maybe_finalize(
+                pair=pair,
+                bar_ts=last_ts,
+                whitelist=whitelist,
+                timeframe_sec=self._strategy._tf_sec,
+                eq_provider=self._strategy.eq_provider,
+            )
+        except Exception:
+            pass
+        now_ts = time.time()
+        if (now_ts - getattr(self._strategy, "_informative_gc_last_ts", 0.0)) >= getattr(
+            self._strategy, "_informative_gc_interval_sec", 900
+        ):
+            try:
+                self._strategy._gc_informative_cache(whitelist)
+            finally:
+                self._strategy._informative_gc_last_ts = now_ts
+
         aligned_info = {} if use_vector_prefilter else self._bridge.align_informative(df, pair)
 
         pst_snapshot = self._strategy.state.get_pair_state(pair)

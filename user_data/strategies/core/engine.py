@@ -387,6 +387,15 @@ class Engine:
         except Exception:
             return
 
+    def evaluate_gatekeeping(self, pair: str, score: float, closs: int) -> GateResult:
+        try:
+            raw = self.treasury_agent.evaluate_signal_quality(pair, score, closs=closs)
+        except Exception:
+            raw = {}
+        return GateResult.from_mapping(raw, default_closs=closs) if raw else GateResult(
+            allowed=True, thresholds={}, reason="", debt=None, closs=closs
+        )
+
     def is_permitted(self, pair: str, context: Optional[Dict[str, Any]] = None) -> bool:
         pst = self.state.get_pair_state(pair)
         if pst.cooldown_bars_left > 0:
@@ -403,6 +412,32 @@ class Engine:
                     return False
             except Exception:
                 self._record_reject(RejectReason.GUARD, pair, context)
+                return False
+        try:
+            equity = float(self.eq_provider.get_equity())
+        except Exception:
+            equity = 0.0
+        cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity)
+        cap_abs = cap_pct * equity
+        used = self.state.get_total_open_risk() + self.reservation.get_total_reserved()
+        if cap_abs > 0 and used >= cap_abs:
+            self._record_reject(RejectReason.PORTFOLIO_CAP, pair, context)
+            return False
+        score = None
+        if context:
+            score = context.get("score")
+        if score is not None:
+            try:
+                score_val = float(score)
+            except Exception:
+                score_val = 0.0
+            gate = self.evaluate_gatekeeping(pair, score_val, pst.closs)
+            if not gate.allowed:
+                self._record_reject(
+                    RejectReason.GATEKEEP,
+                    pair,
+                    dict(context or {}, reason=gate.reason),
+                )
                 return False
         return True
 

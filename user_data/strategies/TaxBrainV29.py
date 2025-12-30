@@ -707,86 +707,8 @@ class TaxBrainV29(IStrategy):
             self.state.treasury.cycle_start_equity = self.eq_provider.get_equity()
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        """计算指标、生成候选信号并触发周期 finalize。
-        Args:
-            df: 原始 K 线数据。
-            metadata: Freqtrade 提供的上下文字典，至少包含 pair。
-        Returns:
-            pd.DataFrame: 附加指标列后的数据帧。
-        Notes:
-            当 cfg.adx_len != 14 时会记录动态列名日志，对应 V29.1 修订 #1。
-        """
         pair = metadata["pair"]
-        system_cfg = getattr(self.cfg, "system", None)
-        if system_cfg and getattr(system_cfg, "debug_prints", False):
-            print(">>> base_needs:", self._indicator_requirements.get(None))
-        base_needs = self._indicator_requirements.get(None)
-        df = indicators.compute_indicators(df, self.cfg, required=base_needs)
-        df = self._append_regime_columns(df)
-        backtest_like = self._is_backtest_like_runmode()
-        if system_cfg and backtest_like and getattr(system_cfg, "merge_informative_into_base", False):
-            self._merge_informative_columns_into_base(df, pair)
-            timeframes = (None, *getattr(self, "_informative_timeframes", ()))
-            if self._derived_factor_columns_missing(df, timeframes):
-                vectorized.add_derived_factor_columns(df, timeframes)
-        informative_rows: Dict[str, pd.Series] = {}
-        if self._informative_timeframes:
-            for tf in self._informative_timeframes:
-                try:
-                    info_df = self._get_informative_dataframe(pair, tf)
-                except Exception:
-                    continue
-                if info_df is None or info_df.empty:
-                    continue
-                informative_rows[tf] = info_df.iloc[-1]
-                cache = self._informative_cache.setdefault(pair, {})
-                cache[tf] = info_df
-        if informative_rows:
-            self._informative_last[pair] = informative_rows
-        elif pair in self._informative_last:
-            self._informative_last.pop(pair, None)
-            self._informative_cache.pop(pair, None)
-        if len(df) == 0:
-            return df
-
-        sensor_enabled = bool(getattr(system_cfg, "market_sensor_enabled", True)) if system_cfg else True
-        sensor_backtest = bool(getattr(system_cfg, "market_sensor_in_backtest", False)) if system_cfg else False
-        if pair.upper().startswith("BTC") and sensor_enabled and (not backtest_like or sensor_backtest):
-            eth_df = None
-            try:
-                eth_df = self._get_informative_dataframe("ETH/USDT", self.timeframe)
-            except Exception:
-                try:
-                    eth_df = self.dp.get_analyzed_dataframe("ETH/USDT", self.timeframe)
-                except Exception:
-                    eth_df = None
-            try:
-                self.market_sensor.analyze(df, eth_df)
-            except Exception:
-                pass
-
-        last = df.iloc[-1]
-        last_ts = float(pd.to_datetime(
-            last.get("date", pd.Timestamp.utcnow())).timestamp())
-        try:
-            whitelist = self.dp.current_whitelist()
-        except Exception:
-            whitelist = [pair]
-        self.cycle_agent.maybe_finalize(
-            pair=pair,
-            bar_ts=last_ts,
-            whitelist=whitelist,
-            timeframe_sec=self._tf_sec,
-            eq_provider=self.eq_provider,
-        )
-        now_ts = time.time()
-        if (now_ts - getattr(self, "_informative_gc_last_ts", 0.0)) >= getattr(self, "_informative_gc_interval_sec", 900):
-            try:
-                self._gc_informative_cache(whitelist)
-            finally:
-                self._informative_gc_last_ts = now_ts
-        df = self.matrix_engine.inject_features(df, pair)
-        return df
+        return self.matrix_engine.inject_features(df, pair)
 
     def get_informative_row(self, pair: str, timeframe: str) -> Optional[pd.Series]:
         """"""
@@ -828,12 +750,23 @@ class TaxBrainV29(IStrategy):
         """
         ??????????K??????????? Candidate
         """
+        def _finite(value: Any) -> bool:
+            try:
+                return value is not None and math.isfinite(float(value))
+            except Exception:
+                return False
+
+        hurst_val = row.get("hurst")
+        adx_zsig_val = row.get("adx_zsig")
+        use_history_close = history_close if (history_close is not None and not _finite(hurst_val)) else None
+        use_history_adx = history_adx if (history_adx is not None and not _finite(adx_zsig_val)) else None
+
         candidates = builder.build_candidates(
             row,
             self.cfg,
             informative=inf_rows,
-            history_close=history_close,
-            history_adx=history_adx,
+            history_close=use_history_close,
+            history_adx=use_history_adx,
             specs=self._enabled_signal_specs,
         )
         policy = self.tier_mgr.get(pst_state.closs)

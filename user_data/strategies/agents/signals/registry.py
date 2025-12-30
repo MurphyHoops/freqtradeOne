@@ -40,6 +40,11 @@ class SignalRegistry:
 
         return list(self._specs.values())
 
+    def reset(self) -> None:
+        """Clear all registered signal specs (useful for reload in dev)."""
+
+        self._specs.clear()
+
 
 REGISTRY = SignalRegistry()
 
@@ -66,6 +71,8 @@ def register_signal(
     """
 
     tf_list = list(timeframes) if timeframes else [None]
+    if vec_raw_fn is None or vec_win_prob_fn is None:
+        raise ValueError("Signal registration requires vec_raw_fn and vec_win_prob_fn")
 
     def decorator(fn: Callable[[], None]):
         for raw_tf in tf_list:
@@ -83,6 +90,8 @@ def register_signal(
                 min_edge=min_edge,
                 required_factors=tuple(required_factors or ()),
                 timeframe=normalized_tf,
+                vec_ready=True,
+                origin=getattr(fn, "__module__", None),
             )
             REGISTRY.register(spec)
         return fn

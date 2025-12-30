@@ -10,7 +10,9 @@ from types import SimpleNamespace
 from user_data.strategies.config.v29_config import ExitProfile, StrategyRecipe, V29Config
 from user_data.strategies.agents.signals import build_candidates
 from user_data.strategies.agents.signals import builder as builder_module
+from user_data.strategies.agents.signals import factors as factors_module
 from user_data.strategies.agents.signals.schemas import Condition, SignalSpec
+from user_data.strategies.core.hub import SignalHub
 
 
 
@@ -36,10 +38,16 @@ def _row(**kwargs):
     }
 
 
+def _ensure_signals_loaded():
+    hub = SignalHub(V29Config())
+    hub.discover()
+
+
 
 
 
 def test_builder_emits_long_candidates_when_conditions_met():
+    _ensure_signals_loaded()
 
     cfg = V29Config()
 
@@ -66,6 +74,7 @@ def test_builder_emits_long_candidates_when_conditions_met():
 
 
 def test_builder_emits_short_candidate_for_trend_short():
+    _ensure_signals_loaded()
 
     cfg = V29Config()
 
@@ -88,6 +97,7 @@ def test_builder_emits_short_candidate_for_trend_short():
 
 
 def test_builder_returns_empty_when_base_factors_nan():
+    _ensure_signals_loaded()
 
     cfg = V29Config()
 
@@ -96,6 +106,31 @@ def test_builder_returns_empty_when_base_factors_nan():
     cands = build_candidates(row, cfg)
 
     assert cands == []
+
+
+def test_builder_prefers_regime_columns_over_history(monkeypatch):
+    _ensure_signals_loaded()
+
+    cfg = V29Config()
+
+    row = _row(close=90.0, ema_fast=110.0, ema_slow=95.0, rsi=5.0, adx=45.0)
+    row["hurst"] = 0.8
+    row["adx_zsig"] = 0.2
+
+    def _raise(*_args, **_kwargs):
+        raise AssertionError("history regime compute should be skipped when columns exist")
+
+    monkeypatch.setattr(builder_module, "_compute_hurst_rs", _raise)
+    monkeypatch.setattr(builder_module, "_compute_adx_zsig", _raise)
+
+    cands = build_candidates(
+        row,
+        cfg,
+        history_close=[100.0, 101.0, 102.0],
+        history_adx=[20.0, 21.0, 22.0],
+    )
+
+    assert cands
 
 
 

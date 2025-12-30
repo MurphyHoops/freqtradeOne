@@ -10,6 +10,7 @@ import pandas as pd
 
 from .registry import REGISTRY
 from . import factors
+from ...core import math_ops
 
 
 class _SeriesCache:
@@ -220,6 +221,16 @@ def build_signal_matrices(df: pd.DataFrame, cfg, specs: Sequence[Any]) -> list[D
 
     if df is None or df.empty:
         return []
+    if "hurst" not in df.columns and "close" in df.columns:
+        try:
+            df["hurst"] = math_ops.calculate_hurst_vec(df["close"])
+        except Exception:
+            df["hurst"] = np.nan
+    if "adx_zsig" not in df.columns and "adx" in df.columns:
+        try:
+            df["adx_zsig"] = math_ops.calculate_adx_zsig_vec(df["adx"])
+        except Exception:
+            df["adx_zsig"] = np.nan
     cache = _SeriesCache(df)
     profiles = getattr(getattr(cfg, "strategy", None), "exit_profiles", getattr(cfg, "exit_profiles", {})) or {}
     default_profile = getattr(

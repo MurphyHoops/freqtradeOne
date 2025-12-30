@@ -11,6 +11,7 @@ import pytest
 import user_data.strategies.TaxBrainV29 as strat_mod
 from user_data.strategies.TaxBrainV29 import TaxBrainV29
 from user_data.strategies.agents.signals import builder, vectorized
+from user_data.strategies.core.hub import SignalHub
 from user_data.strategies.config.v29_config import V29Config
 
 
@@ -83,7 +84,13 @@ def _patch_runmode(monkeypatch):
     return FakeRunMode
 
 
+def _ensure_signals_loaded():
+    hub = SignalHub(V29Config())
+    hub.discover()
+
+
 def test_prefilter_specs_matches_default():
+    _ensure_signals_loaded()
     cfg = V29Config()
     df = _base_frame()
     vectorized.add_derived_factor_columns(df, (None,))
@@ -96,6 +103,7 @@ def test_prefilter_specs_matches_default():
 
 
 def test_build_candidates_specs_matches_default():
+    _ensure_signals_loaded()
     cfg = V29Config()
     row = _base_frame().iloc[-1]
     default = builder.build_candidates(row, cfg)
@@ -162,6 +170,7 @@ def test_vectorized_skips_when_informative_unmerged(monkeypatch, tmp_path):
 
 
 def test_build_signal_matrices_matches_builder():
+    _ensure_signals_loaded()
     cfg = V29Config()
     df = _base_frame()
     vectorized.add_derived_factor_columns(df, (None,))
@@ -185,6 +194,7 @@ def test_build_signal_matrices_matches_builder():
 
 
 def test_build_signal_matrices_matches_builder_for_all_builtin_signals():
+    _ensure_signals_loaded()
     cfg = V29Config()
     df = _base_frame()
     vectorized.add_derived_factor_columns(df, (None, "30m"))
@@ -213,6 +223,7 @@ def test_build_signal_matrices_matches_builder_for_all_builtin_signals():
 
 
 def test_regime_factor_matches_builder_with_series_inputs():
+    _ensure_signals_loaded()
     cfg = V29Config()
     df = _base_frame()
     df["hurst"] = [0.8] * len(df)
@@ -266,6 +277,7 @@ def test_informative_merge_matches_aligned_rows(monkeypatch, tmp_path):
 
 
 def test_missing_informative_atr_pct_blocks_vectorized_and_builder():
+    _ensure_signals_loaded()
     cfg = V29Config()
     df = _base_frame().drop(columns=["atr_pct_30m"])
     vectorized.add_derived_factor_columns(df, (None, "30m"))

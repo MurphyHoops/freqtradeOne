@@ -5,10 +5,13 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import importlib.util
+import sys
 
 from ..config.v29_config import V29Config, entries_to_recipe
 from ..agents.signals import builder
 from ..agents.signals.registry import REGISTRY
+
+_LOADED_PLUGINS: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -35,14 +38,26 @@ class SignalHub:
         self._indicator_requirements: Dict[Optional[str], set[str]] = {}
 
     def discover(self) -> None:
-        if self._discovered:
+        system_cfg = getattr(self._cfg, "system", None)
+        allow_reload = bool(getattr(system_cfg, "plugin_allow_reload", False)) if system_cfg else False
+        if self._discovered and not allow_reload:
             return
+        if allow_reload:
+            _LOADED_PLUGINS.clear()
+            REGISTRY.reset()
+            self._discovered = False
+            for name in list(sys.modules):
+                if name.startswith("user_data.strategies.plugins."):
+                    sys.modules.pop(name, None)
         logger = logging.getLogger(__name__)
-        strict = bool(getattr(getattr(self._cfg, "system", None), "plugin_load_strict", False))
+        strict = bool(getattr(system_cfg, "plugin_load_strict", False)) if system_cfg else False
         plugin_root = Path(__file__).resolve().parents[1] / "plugins"
         if plugin_root.exists():
             for path in sorted(plugin_root.rglob("*.py")):
                 if path.name.startswith("__"):
+                    continue
+                abs_path = str(path.resolve())
+                if abs_path in _LOADED_PLUGINS:
                     continue
                 rel_parts = path.relative_to(plugin_root).with_suffix("").parts
                 module_name = ".".join(["user_data", "strategies", "plugins", *rel_parts])
@@ -51,6 +66,7 @@ class SignalHub:
                     module = importlib.util.module_from_spec(spec)
                     try:
                         spec.loader.exec_module(module)  # type: ignore[call-arg]
+                        _LOADED_PLUGINS.add(abs_path)
                     except Exception as exc:
                         if isinstance(exc, ValueError) and "Signal already registered" in str(exc):
                             raise
@@ -63,7 +79,7 @@ class SignalHub:
 
     def _refresh_registry(self) -> None:
         specs = list(REGISTRY.all())
-        specs.sort(key=lambda s: (s.name, s.timeframe or "", s.direction, s.squad))
+        specs.sort(key=lambda s: (s.origin or "", s.name, s.timeframe or "", s.direction, s.squad))
         self._specs = specs
 
         enabled = {

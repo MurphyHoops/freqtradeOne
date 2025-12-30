@@ -210,11 +210,24 @@ def build_candidates(
     fb = FactorBank(row, informative=informative)
     hurst_val: Optional[float] = None
     z_sig: Optional[float] = None
-    if history_close:
+    try:
+        hurst_val = float(fb.get("HURST"))
+    except Exception:
+        hurst_val = None
+    if hurst_val is not None and (math.isnan(hurst_val) or math.isinf(hurst_val)):
+        hurst_val = None
+    if hurst_val is None and history_close is not None:
         hurst_val = _compute_hurst_rs(history_close)
         if hurst_val is not None and (math.isnan(hurst_val) or math.isinf(hurst_val)):
             hurst_val = None
-    if history_adx:
+
+    try:
+        z_sig = float(fb.get("ADX_ZSIG"))
+    except Exception:
+        z_sig = None
+    if z_sig is not None and (math.isnan(z_sig) or math.isinf(z_sig)):
+        z_sig = None
+    if z_sig is None and history_adx is not None:
         try:
             adx_now = float(fb.get("ADX"))
         except Exception:

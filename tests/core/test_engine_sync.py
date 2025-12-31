@@ -43,8 +43,10 @@ def test_engine_sync_to_time_advances_and_decays():
         reservations={},
     )
     treasury_agent = SimpleNamespace(plan=lambda *args, **kwargs: _plan_stub())
-    risk_agent = SimpleNamespace(check_invariants=lambda *args, **kwargs: SimpleNamespace(to_dict=lambda: {"ok": True}))
-    analytics = SimpleNamespace(log_finalize=lambda **kwargs: None, log_invariant=lambda *args, **kwargs: None)
+    risk_agent = SimpleNamespace(
+        check_invariants=mock.Mock(return_value=SimpleNamespace(to_dict=lambda: {"ok": True}))
+    )
+    analytics = SimpleNamespace(log_finalize=lambda **kwargs: None, log_invariant=mock.Mock())
     persist = SimpleNamespace(save=lambda *args, **kwargs: None)
     eq_provider = SimpleNamespace(get_equity=lambda: 1000.0)
 
@@ -72,9 +74,13 @@ def test_engine_sync_to_time_advances_and_decays():
     assert pst.cooldown_bars_left == 1
     assert state.debt_pool == pytest.approx(25.0)
     assert reservation.tick_ttl.call_count == 2
+    assert risk_agent.check_invariants.call_count == 1
+    assert analytics.log_invariant.call_count == 1
 
     engine.sync_to_time(current_time)
     assert state.bar_tick == 2
+    assert risk_agent.check_invariants.call_count == 1
+    assert analytics.log_invariant.call_count == 1
 
 
 def test_engine_finalize_clears_debt_on_profitable_cycle():

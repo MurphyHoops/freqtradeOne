@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 
 from user_data.strategies.vectorized.matrix_engine import MatrixEngine
@@ -42,6 +43,24 @@ def test_matrix_engine_signal_id_matches_top_edge():
         ]
     ]
     engine._apply_payloads(df, payloads_long, payloads_short)
+
+    assert int(df["_signal_id"].iat[0]) == 2
+    assert df["enter_tag"].iat[0] == "2"
+
+
+def test_matrix_engine_signal_id_matches_top_edge_from_arrays():
+    engine = MatrixEngine(strategy=SimpleNamespace(cfg=None), hub=_DummyHub(), bridge=SimpleNamespace())
+    df = pd.DataFrame(index=[0])
+    field_len = len(engine._pool_schema.fields)
+    long_array = np.full((1, 1, field_len), np.nan, dtype=float)
+    short_array = np.full((1, 1, field_len), np.nan, dtype=float)
+    idx = engine._pool_schema.index
+    long_array[0, 0, idx["signal_id"]] = 1
+    long_array[0, 0, idx["expected_edge"]] = 0.2
+    short_array[0, 0, idx["signal_id"]] = 2
+    short_array[0, 0, idx["expected_edge"]] = 0.5
+
+    engine._apply_pool_arrays(df, long_array, short_array)
 
     assert int(df["_signal_id"].iat[0]) == 2
     assert df["enter_tag"].iat[0] == "2"

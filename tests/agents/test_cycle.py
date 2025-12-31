@@ -12,6 +12,7 @@ import pytest
 from user_data.strategies.agents.portfolio.cycle import CycleAgent
 from user_data.strategies.config.v30_config import V30Config
 from user_data.strategies.agents.portfolio.treasury import AllocationPlan
+from user_data.strategies.core.engine import Engine
 
 
 class DummyPairState:
@@ -191,7 +192,22 @@ def test_cycle_finalize_clears_debt_on_profitable_cycle():
     persist = PersistStub()
     eq = EquityStub(1000.0)
 
-    agent = CycleAgent(cfg, state, reservation, treasury, risk, analytics, persist, tier_mgr=None)
+    engine = Engine(
+        cfg=cfg,
+        state=state,
+        eq_provider=eq,
+        treasury_agent=treasury,
+        reservation=reservation,
+        risk_agent=risk,
+        analytics=analytics,
+        persist=persist,
+        tier_mgr=None,
+        tf_sec=60,
+        is_backtest_like=lambda: False,
+    )
+    agent = CycleAgent(
+        cfg, state, reservation, treasury, risk, analytics, persist, tier_mgr=None, engine=engine
+    )
 
     # 先积累多个周期，最后一次带正收益，触发清债。
     agent.finalize(eq)

@@ -18,6 +18,28 @@ class _DummyState:
             self.per_pair[pair] = PairState()
         return self.per_pair[pair]
 
+    def record_signal(self, pair: str, candidate) -> None:
+        pst = self.get_pair_state(pair)
+        if candidate:
+            pst.last_dir = candidate.direction
+            pst.last_squad = candidate.squad
+            pst.last_score = float(candidate.expected_edge)
+            pst.last_sl_pct = float(candidate.sl_pct)
+            pst.last_tp_pct = float(candidate.tp_pct)
+            pst.last_kind = str(candidate.kind)
+            pst.last_exit_profile = candidate.exit_profile
+            pst.last_recipe = candidate.recipe
+            pst.last_atr_pct = float(candidate.plan_atr_pct) if candidate.plan_atr_pct is not None else 0.0
+        else:
+            pst.last_dir = None
+            pst.last_squad = None
+            pst.last_score = 0.0
+            pst.last_sl_pct = 0.0
+            pst.last_tp_pct = 0.0
+            pst.last_exit_profile = None
+            pst.last_recipe = None
+            pst.last_atr_pct = 0.0
+
 
 def _make_stub_strategy() -> TaxBrainV30:
     strat = TaxBrainV30.__new__(TaxBrainV30)
@@ -27,10 +49,14 @@ def _make_stub_strategy() -> TaxBrainV30:
     strat.bridge.get_side_meta = lambda *args, **kwargs: None
     strat.bridge.get_row_meta = lambda *args, **kwargs: None
     strat.hub = SimpleNamespace()
-    strat.engine = SimpleNamespace(sync_to_time=lambda *args, **kwargs: None, is_permitted=lambda *args, **kwargs: True)
+    strat.engine = SimpleNamespace(
+        sync_to_time=lambda *args, **kwargs: None,
+        is_permitted=lambda *args, **kwargs: True,
+        reserve_risk_resources=lambda **kwargs: True,
+        pending_entry_meta={},
+    )
     strat.sizer = SimpleNamespace(compute=lambda **kwargs: (10.0, 1.0, "long"))
     strat.rejections = SimpleNamespace(record=lambda *args, **kwargs: None)
-    strat._reserve_risk_resources = lambda **kwargs: True
     strat.global_backend = None
     strat._runmode_token = "backtest"
     strat._is_backtest_like_runmode = lambda: True

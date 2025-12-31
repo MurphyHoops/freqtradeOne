@@ -27,6 +27,28 @@ class _DummyState:
     def get_dynamic_portfolio_cap_pct(self, equity: float) -> float:
         return 0.1
 
+    def record_signal(self, pair: str, candidate) -> None:
+        pst = self.get_pair_state(pair)
+        if candidate:
+            pst.last_dir = candidate.direction
+            pst.last_squad = candidate.squad
+            pst.last_score = float(candidate.expected_edge)
+            pst.last_sl_pct = float(candidate.sl_pct)
+            pst.last_tp_pct = float(candidate.tp_pct)
+            pst.last_kind = str(candidate.kind)
+            pst.last_exit_profile = candidate.exit_profile
+            pst.last_recipe = candidate.recipe
+            pst.last_atr_pct = float(candidate.plan_atr_pct) if candidate.plan_atr_pct is not None else 0.0
+        else:
+            pst.last_dir = None
+            pst.last_squad = None
+            pst.last_score = 0.0
+            pst.last_sl_pct = 0.0
+            pst.last_tp_pct = 0.0
+            pst.last_exit_profile = None
+            pst.last_recipe = None
+            pst.last_atr_pct = 0.0
+
 
 def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV30:
     strat = TaxBrainV30.__new__(TaxBrainV30)
@@ -35,7 +57,6 @@ def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV30:
     strat.treasury_agent = SimpleNamespace(
         evaluate_signal_quality=lambda *args, **kwargs: gate_payload or {}
     )
-    strat._pending_entry_meta = {}
     strat._last_signal = {}
     strat.reservation = mock.Mock()
     strat.sizer = mock.Mock()
@@ -47,9 +68,13 @@ def _make_stub_strategy(gate_payload: dict | None = None) -> TaxBrainV30:
         meta_for_id=lambda *args, **kwargs: None,
     )
     strat.bridge = SimpleNamespace(get_side_meta=lambda *args, **kwargs: None, get_row_meta=lambda *args, **kwargs: None)
-    strat.engine = SimpleNamespace(is_permitted=lambda *args, **kwargs: True, sync_to_time=lambda *args, **kwargs: None)
+    strat.engine = SimpleNamespace(
+        is_permitted=lambda *args, **kwargs: True,
+        sync_to_time=lambda *args, **kwargs: None,
+        reserve_risk_resources=lambda **kwargs: True,
+        pending_entry_meta={},
+    )
     strat.rejections = SimpleNamespace(record=lambda *args, **kwargs: None)
-    strat._reserve_risk_resources = lambda **kwargs: True
     return strat
 
 

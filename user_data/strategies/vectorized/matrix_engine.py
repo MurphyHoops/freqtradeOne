@@ -131,13 +131,14 @@ class MatrixEngine:
         aligned_info = {} if use_vector_prefilter else self._bridge.align_informative(df, pair)
 
         pst_snapshot = self._strategy.state.get_pair_state(pair)
+        loss_tier_state = self._strategy.state.get_loss_tier_state(pair)
         payloads_long: list[list[dict]] = [[] for _ in range(len(df.index))]
         payloads_short: list[list[dict]] = [[] for _ in range(len(df.index))]
 
         if use_vector_prefilter:
             timeframes = (None, *getattr(self._strategy, "_informative_timeframes", ()))
             vectorized.add_derived_factor_columns(df, timeframes, required=derived_required)
-            df["LOSS_TIER_STATE"] = pst_snapshot.closs
+            df["LOSS_TIER_STATE"] = loss_tier_state
 
             vec_specs = [
                 spec for spec in self._strategy._enabled_signal_specs if vectorized.is_vectorizable(spec)
@@ -170,8 +171,8 @@ class MatrixEngine:
                     else:
                         mat["valid_mask"] = mat["valid_mask"] & allowed
 
-            payloads_long = self._select_topk_payloads(df, matrices, "long")
-            payloads_short = self._select_topk_payloads(df, matrices, "short")
+            long_array = self._select_topk_arrays(df, matrices, "long")
+            short_array = self._select_topk_arrays(df, matrices, "short")
             idx_to_pos = {idx: pos for pos, idx in enumerate(df.index)}
 
             if fallback_specs:
@@ -211,24 +212,14 @@ class MatrixEngine:
                         continue
                     if grouped.get("long"):
                         extra = [self._candidate_to_payload(c) for c in grouped["long"]]
-                        combined = payloads_long[pos] + extra
-                        combined.sort(
-                            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
-                            reverse=True,
-                        )
-                        payloads_long[pos] = combined[: self._strategy._candidate_pool_limit]
+                        self._merge_row_payloads(long_array, pos, extra, "long")
                     if grouped.get("short"):
                         extra = [self._candidate_to_payload(c) for c in grouped["short"]]
-                        combined = payloads_short[pos] + extra
-                        combined.sort(
-                            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
-                            reverse=True,
-                        )
-                        payloads_short[pos] = combined[: self._strategy._candidate_pool_limit]
+                        self._merge_row_payloads(short_array, pos, extra, "short")
 
         elif is_vector_pass:
             for idx in df.index:
-                df.at[idx, "LOSS_TIER_STATE"] = pst_snapshot.closs
+                df.at[idx, "LOSS_TIER_STATE"] = loss_tier_state
                 row = df.loc[idx]
                 inf_rows = helpers.informative_rows_for_index(aligned_info, idx)
                 raw_candidates = builder.build_candidates(
@@ -263,7 +254,7 @@ class MatrixEngine:
                     payloads_short[pos] = [self._candidate_to_payload(c) for c in grouped["short"]]
         else:
             last_idx = df.index[-1]
-            df.at[last_idx, "LOSS_TIER_STATE"] = pst_snapshot.closs
+            df.at[last_idx, "LOSS_TIER_STATE"] = loss_tier_state
             row = df.loc[last_idx]
             inf_rows = helpers.informative_rows_for_index(aligned_info, last_idx)
             raw_candidates = builder.build_candidates(
@@ -292,14 +283,18 @@ class MatrixEngine:
             if grouped.get("short"):
                 payloads_short[pos] = [self._candidate_to_payload(c) for c in grouped["short"]]
 
-        pool = PoolBuffer.from_payloads(
-            payloads_long,
-            payloads_short,
-            slots=self._strategy._candidate_pool_limit,
-            signal_id_fn=self._payload_signal_id,
-            schema=self._pool_schema,
-        )
-        self._apply_payloads(df, payloads_long, payloads_short)
+        if use_vector_prefilter:
+            pool = PoolBuffer.from_array_data(long_array, short_array, schema=self._pool_schema)
+            self._apply_pool_arrays(df, long_array, short_array)
+        else:
+            pool = PoolBuffer.from_payloads(
+                payloads_long,
+                payloads_short,
+                slots=self._strategy._candidate_pool_limit,
+                signal_id_fn=self._payload_signal_id,
+                schema=self._pool_schema,
+            )
+            self._apply_payloads(df, payloads_long, payloads_short)
         self._bridge.bind_df(pair, df)
         self._bridge.bind_pool_buffer(pair, pool)
         return df
@@ -383,6 +378,141 @@ class MatrixEngine:
                     }
                 )
         return payloads
+
+    def _select_topk_arrays(
+        self, df: pd.DataFrame, matrices: list[dict], direction: str
+    ) -> np.ndarray:
+        rows = len(df.index) if df is not None else 0
+        slots = self._strategy._candidate_pool_limit
+        field_len = len(self._pool_schema.fields)
+        out = np.full((rows, slots, field_len), np.nan, dtype=float)
+        if df is None or df.empty:
+            return out
+        specs = [m for m in matrices if m.get("direction") == direction]
+        if not specs:
+            return out
+        edges_list = []
+        raw_list = []
+        rr_list = []
+        sl_list = []
+        tp_list = []
+        plan_atr_list = []
+        signal_ids: list[float] = []
+        for mat in specs:
+            sig_id = self._hub.signal_id_for(mat["name"], mat.get("timeframe"), direction)
+            signal_ids.append(float(sig_id) if sig_id else 0.0)
+            valid = mat["valid_mask"]
+            if not sig_id:
+                valid = valid & False
+            edge = mat["expected_edge"].where(valid, -np.inf)
+            raw = mat["raw_score"].where(valid, -np.inf)
+            edges_list.append(edge.to_numpy(copy=False))
+            raw_list.append(raw.to_numpy(copy=False))
+            rr_list.append(mat["rr_ratio"].to_numpy(copy=False))
+            sl_list.append(mat["sl_pct"].to_numpy(copy=False))
+            tp_list.append(mat["tp_pct"].to_numpy(copy=False))
+            plan_atr_list.append(mat["plan_atr_pct"].to_numpy(copy=False))
+        edges = np.vstack(edges_list)
+        raws = np.vstack(raw_list)
+        rrs = np.vstack(rr_list)
+        sls = np.vstack(sl_list)
+        tps = np.vstack(tp_list)
+        plan_atr = np.vstack(plan_atr_list)
+        sig_ids = np.asarray(signal_ids, dtype=float)
+        idx = self._pool_schema.index
+        valid_any = np.isfinite(edges).any(axis=0)
+        for col_idx in np.where(valid_any)[0]:
+            row_edges = edges[:, col_idx]
+            valid_idx = np.where(np.isfinite(row_edges))[0]
+            if len(valid_idx) == 0:
+                continue
+            if len(valid_idx) > slots:
+                topk_idx = valid_idx[np.argpartition(row_edges[valid_idx], -slots)[-slots:]]
+            else:
+                topk_idx = valid_idx
+            order = sorted(
+                topk_idx,
+                key=lambda i: (row_edges[i], raws[i, col_idx]),
+                reverse=True,
+            )
+            for slot, spec_idx in enumerate(order[:slots]):
+                sig_id = sig_ids[spec_idx]
+                if sig_id <= 0:
+                    continue
+                atr_val = float(plan_atr[spec_idx, col_idx])
+                if not math.isfinite(atr_val):
+                    atr_val = np.nan
+                out[col_idx, slot, idx["signal_id"]] = sig_id
+                out[col_idx, slot, idx["raw_score"]] = float(raws[spec_idx, col_idx])
+                out[col_idx, slot, idx["rr_ratio"]] = float(rrs[spec_idx, col_idx])
+                out[col_idx, slot, idx["expected_edge"]] = float(edges[spec_idx, col_idx])
+                out[col_idx, slot, idx["sl_pct"]] = float(sls[spec_idx, col_idx])
+                out[col_idx, slot, idx["tp_pct"]] = float(tps[spec_idx, col_idx])
+                out[col_idx, slot, idx["plan_atr_pct"]] = atr_val
+        return out
+
+    def _merge_row_payloads(
+        self,
+        arrays: np.ndarray,
+        row_idx: int,
+        extra: list[dict],
+        direction: str,
+    ) -> None:
+        idx = self._pool_schema.index
+        slots = min(self._strategy._candidate_pool_limit, arrays.shape[1])
+        row = arrays[row_idx]
+        combined: list[dict[str, Any]] = []
+        for slot in range(slots):
+            sig_id = float(row[slot, idx["signal_id"]])
+            if not math.isfinite(sig_id) or sig_id <= 0:
+                continue
+            combined.append(
+                {
+                    "signal_id": int(sig_id),
+                    "raw_score": float(row[slot, idx["raw_score"]]),
+                    "rr_ratio": float(row[slot, idx["rr_ratio"]]),
+                    "expected_edge": float(row[slot, idx["expected_edge"]]),
+                    "sl_pct": float(row[slot, idx["sl_pct"]]),
+                    "tp_pct": float(row[slot, idx["tp_pct"]]),
+                    "plan_atr_pct": float(row[slot, idx["plan_atr_pct"]]),
+                }
+            )
+        for payload in extra:
+            sig_id = self._payload_signal_id(payload, direction)
+            if not sig_id:
+                continue
+            combined.append(
+                {
+                    "signal_id": int(sig_id),
+                    "raw_score": float(payload.get("raw_score", 0.0)),
+                    "rr_ratio": float(payload.get("rr_ratio", 0.0)),
+                    "expected_edge": float(payload.get("expected_edge", 0.0)),
+                    "sl_pct": float(payload.get("sl_pct", 0.0)),
+                    "tp_pct": float(payload.get("tp_pct", 0.0)),
+                    "plan_atr_pct": payload.get("plan_atr_pct"),
+                }
+            )
+        combined.sort(
+            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
+            reverse=True,
+        )
+        row[:, :] = np.nan
+        for slot, item in enumerate(combined[:slots]):
+            row[slot, idx["signal_id"]] = float(item["signal_id"])
+            row[slot, idx["raw_score"]] = float(item["raw_score"])
+            row[slot, idx["rr_ratio"]] = float(item["rr_ratio"])
+            row[slot, idx["expected_edge"]] = float(item["expected_edge"])
+            row[slot, idx["sl_pct"]] = float(item["sl_pct"])
+            row[slot, idx["tp_pct"]] = float(item["tp_pct"])
+            atr_val = item.get("plan_atr_pct")
+            if atr_val is None:
+                row[slot, idx["plan_atr_pct"]] = np.nan
+            else:
+                try:
+                    atr_float = float(atr_val)
+                except Exception:
+                    atr_float = float("nan")
+                row[slot, idx["plan_atr_pct"]] = atr_float if math.isfinite(atr_float) else np.nan
 
     def _ensure_pool_columns(self, df: pd.DataFrame) -> None:
         for name in (
@@ -473,6 +603,95 @@ class MatrixEngine:
                 top_short_tp[idx] = float(pool[0].get("tp_pct", np.nan))
                 atr_val = pool[0].get("plan_atr_pct", np.nan)
                 top_short_atr[idx] = float(atr_val) if atr_val is not None else np.nan
+
+        long_mask = np.isfinite(top_long_id) & (top_long_id > 0)
+        short_mask = np.isfinite(top_short_id) & (top_short_id > 0)
+        df.loc[long_mask, "enter_long"] = 1
+        df.loc[short_mask, "enter_short"] = 1
+
+        df["_signal_id_long"] = pd.Series(top_long_id, index=df.index, dtype=np.float32)
+        df["_signal_id_short"] = pd.Series(top_short_id, index=df.index, dtype=np.float32)
+
+        selected = np.where(
+            np.isnan(top_short_edge) | (top_long_edge >= top_short_edge),
+            top_long_id,
+            top_short_id,
+        )
+        select_long = np.isnan(top_short_edge) | (top_long_edge >= top_short_edge)
+        selected_edge = np.where(select_long, top_long_edge, top_short_edge)
+        selected_raw = np.where(select_long, top_long_raw, top_short_raw)
+        selected_rr = np.where(select_long, top_long_rr, top_short_rr)
+        selected_sl = np.where(select_long, top_long_sl, top_short_sl)
+        selected_tp = np.where(select_long, top_long_tp, top_short_tp)
+        selected_atr = np.where(select_long, top_long_atr, top_short_atr)
+        df["_signal_id"] = pd.Series(selected, index=df.index, dtype=np.float32)
+        df["enter_tag"] = pd.Series(
+            [str(int(x)) if math.isfinite(x) and x > 0 else None for x in selected],
+            index=df.index,
+        )
+        df["_signal_score"] = pd.Series(selected_edge, index=df.index, dtype=np.float32)
+        df["_signal_raw_score"] = pd.Series(selected_raw, index=df.index, dtype=np.float32)
+        df["_signal_rr_ratio"] = pd.Series(selected_rr, index=df.index, dtype=np.float32)
+        df["_signal_sl_pct"] = pd.Series(selected_sl, index=df.index, dtype=np.float32)
+        df["_signal_tp_pct"] = pd.Series(selected_tp, index=df.index, dtype=np.float32)
+        df["_signal_plan_atr_pct"] = pd.Series(selected_atr, index=df.index, dtype=np.float32)
+
+    def _apply_pool_arrays(
+        self,
+        df: pd.DataFrame,
+        long_array: np.ndarray,
+        short_array: np.ndarray,
+    ) -> None:
+        size = len(df.index)
+        df["enter_long"] = 0
+        df["enter_short"] = 0
+        df["enter_tag"] = None
+
+        idx = self._pool_schema.index
+        top_long_id = long_array[:, 0, idx["signal_id"]].astype(float, copy=False)
+        top_short_id = short_array[:, 0, idx["signal_id"]].astype(float, copy=False)
+
+        invalid_long = ~np.isfinite(top_long_id) | (top_long_id <= 0)
+        invalid_short = ~np.isfinite(top_short_id) | (top_short_id <= 0)
+        top_long_id = np.where(invalid_long, np.nan, top_long_id)
+        top_short_id = np.where(invalid_short, np.nan, top_short_id)
+
+        top_long_edge = np.where(
+            invalid_long, np.nan, long_array[:, 0, idx["expected_edge"]]
+        )
+        top_short_edge = np.where(
+            invalid_short, np.nan, short_array[:, 0, idx["expected_edge"]]
+        )
+        top_long_raw = np.where(
+            invalid_long, np.nan, long_array[:, 0, idx["raw_score"]]
+        )
+        top_short_raw = np.where(
+            invalid_short, np.nan, short_array[:, 0, idx["raw_score"]]
+        )
+        top_long_rr = np.where(
+            invalid_long, np.nan, long_array[:, 0, idx["rr_ratio"]]
+        )
+        top_short_rr = np.where(
+            invalid_short, np.nan, short_array[:, 0, idx["rr_ratio"]]
+        )
+        top_long_sl = np.where(
+            invalid_long, np.nan, long_array[:, 0, idx["sl_pct"]]
+        )
+        top_short_sl = np.where(
+            invalid_short, np.nan, short_array[:, 0, idx["sl_pct"]]
+        )
+        top_long_tp = np.where(
+            invalid_long, np.nan, long_array[:, 0, idx["tp_pct"]]
+        )
+        top_short_tp = np.where(
+            invalid_short, np.nan, short_array[:, 0, idx["tp_pct"]]
+        )
+        top_long_atr = np.where(
+            invalid_long, np.nan, long_array[:, 0, idx["plan_atr_pct"]]
+        )
+        top_short_atr = np.where(
+            invalid_short, np.nan, short_array[:, 0, idx["plan_atr_pct"]]
+        )
 
         long_mask = np.isfinite(top_long_id) & (top_long_id > 0)
         short_mask = np.isfinite(top_short_id) & (top_short_id > 0)

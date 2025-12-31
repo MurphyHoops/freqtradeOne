@@ -73,10 +73,8 @@ class ExecutionAgent:
             tier_pol = None
 
         stake_nominal = 0.0
-        lev = getattr(getattr(self.cfg, "sizing", None), "enforce_leverage", None)
-        if lev is None:
-            lev = getattr(self.cfg, "enforce_leverage", 1.0)
-        lev = float(lev or 1.0)
+        sizing_cfg = getattr(getattr(self.cfg, "trading", None), "sizing", None)
+        lev = float(getattr(sizing_cfg, "enforce_leverage", 1.0) or 1.0)
         if sl and sl > 0:
             stake_margin = real_risk / sl
             stake_nominal = stake_margin * lev

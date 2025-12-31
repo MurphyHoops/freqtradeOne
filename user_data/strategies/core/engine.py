@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Iterable
 import time
+import uuid
 
 from ..config.v30_config import V30Config
 from ..agents.portfolio.global_backend import GlobalRiskBackend
@@ -127,6 +128,31 @@ class GlobalState:
         if key not in self.per_pair:
             self.per_pair[key] = PairState()
         return self.per_pair[key]
+
+    def get_loss_tier_state(self, pair: str) -> int:
+        return self.get_pair_state(pair).closs
+
+    def record_signal(self, pair: str, candidate) -> None:
+        pst = self.get_pair_state(pair)
+        if candidate:
+            pst.last_dir = candidate.direction
+            pst.last_squad = candidate.squad
+            pst.last_score = float(candidate.expected_edge)
+            pst.last_sl_pct = float(candidate.sl_pct)
+            pst.last_tp_pct = float(candidate.tp_pct)
+            pst.last_kind = str(candidate.kind)
+            pst.last_exit_profile = candidate.exit_profile
+            pst.last_recipe = candidate.recipe
+            pst.last_atr_pct = float(candidate.plan_atr_pct) if candidate.plan_atr_pct is not None else 0.0
+        else:
+            pst.last_dir = None
+            pst.last_squad = None
+            pst.last_score = 0.0
+            pst.last_sl_pct = 0.0
+            pst.last_tp_pct = 0.0
+            pst.last_exit_profile = None
+            pst.last_recipe = None
+            pst.last_atr_pct = 0.0
 
     def get_total_open_risk(self) -> float:
         return sum(self.pair_risk_open.values())
@@ -372,6 +398,7 @@ class Engine:
         self._is_backtest_like = is_backtest_like
         self._guards = list(guard_bus or [])
         self.rejections = rejections
+        self.pending_entry_meta: Dict[str, Dict[str, Any]] = {}
 
     def set_guard_bus(self, guard_bus: Iterable[Callable[[str, Dict[str, Any]], bool]]) -> None:
         self._guards = list(guard_bus or [])
@@ -392,6 +419,75 @@ class Engine:
         return GateResult.from_mapping(raw, default_closs=closs) if raw else GateResult(
             allowed=True, thresholds={}, reason="", debt=None, closs=closs
         )
+
+    def reserve_backend_risk(self, pair: str, risk: float) -> bool:
+        backend = getattr(self.state, "backend", None)
+        if backend is None:
+            return True
+        cap_abs = 0.0
+        try:
+            equity_now = self.eq_provider.get_equity()
+            cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity_now)
+            cap_abs = cap_pct * equity_now
+            reserved = bool(backend.add_risk_usage(risk, cap_abs))
+        except Exception as exc:
+            reserved = False
+            try:
+                print(
+                    f"[backend] reserve failed for {pair}: risk={risk:.4f} cap_abs={cap_abs:.4f} err={exc}"
+                )
+            except Exception:
+                pass
+
+        if not reserved:
+            msg = f"Global Gatekeeper: CAP reached for {pair}, risk={risk:.4f}, cap_abs={cap_abs:.4f}"
+            try:
+                print(msg)
+            except Exception:
+                pass
+            return False
+        return True
+
+    def reserve_risk_resources(
+        self,
+        pair: str,
+        stake: float,
+        risk: float,
+        bucket: str,
+        sl: float,
+        tp: float,
+        direction: str,
+        current_rate: float,
+        meta: Dict[str, Any],
+    ) -> bool:
+        meta_payload = dict(meta or {})
+        meta_payload.update(
+            {
+                "sl_pct": sl,
+                "tp_pct": tp,
+                "stake_final": stake,
+                "risk_final": risk,
+                "bucket": bucket,
+                "entry_price": current_rate,
+                "dir": direction,
+            }
+        )
+
+        if self._is_backtest_like():
+            self.pending_entry_meta[pair] = meta_payload
+            return True
+
+        backend = getattr(self.state, "backend", None)
+        if backend:
+            backend_reserved = self.reserve_backend_risk(pair, risk)
+            if not backend_reserved:
+                return False
+
+        rid = f"{pair}:{bucket}:{uuid.uuid4().hex}"
+        self.reservation.reserve(pair, rid, risk, bucket)
+        meta_payload["reservation_id"] = rid
+        self.pending_entry_meta[pair] = meta_payload
+        return True
 
     def is_permitted(self, pair: str, context: Optional[Dict[str, Any]] = None) -> bool:
         pst = self.state.get_pair_state(pair)
@@ -635,3 +731,14 @@ class Engine:
             self.state.treasury.volatility = plan.volatility
         except Exception:
             pass
+
+        try:
+            equity_now = float(self.eq_provider.get_equity())
+        except Exception:
+            equity_now = 0.0
+        cap_pct = self.state.get_dynamic_portfolio_cap_pct(equity_now)
+        report = self.risk_agent.check_invariants(self.state, equity_now, cap_pct)
+        report_payload = report.to_dict() if hasattr(report, "to_dict") else {"ok": True}
+        self.analytics.log_invariant(report_payload)
+        if not report_payload.get("ok", True):
+            print("[WARN] Risk invariant breach:", report_payload)

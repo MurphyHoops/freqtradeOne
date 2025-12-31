@@ -41,6 +41,26 @@ class SizerAgent:
         self._validate_sizing_algos()
         self.dp = None
         self._bct_pressure_ema: Optional[float] = None
+        score_cfg = getattr(self.cfg, "sizing_algos", None)
+        self._score_floor = float(getattr(score_cfg, "score_floor", 0.3) or 0.0) if score_cfg else 0.3
+        self._score_exponent = float(getattr(score_cfg, "score_exponent", 2.0) or 2.0) if score_cfg else 2.0
+        self._bct_beta_min = float(getattr(score_cfg, "bct_beta_min", 1.0) or 1.0) if score_cfg else 1.0
+        self._bct_beta_max = float(getattr(score_cfg, "bct_beta_max", 4.0) or 4.0) if score_cfg else 4.0
+        self._bct_pressure_ratio = float(getattr(score_cfg, "bct_pressure_ratio", 1.0) or 1.0) if score_cfg else 1.0
+        self._bct_pressure_ema_alpha = (
+            float(getattr(score_cfg, "bct_pressure_ema_alpha", 0.0) or 0.0) if score_cfg else 0.0
+        )
+        self._fluid_cap_pct_of_equity = (
+            float(getattr(score_cfg, "fluid_cap_pct_of_equity", 0.0) or 0.0) if score_cfg else 0.0
+        )
+        self._c_target_risk_cap_pct_of_equity = (
+            float(getattr(score_cfg, "c_target_risk_cap_pct_of_equity", 0.0) or 0.0) if score_cfg else 0.0
+        )
+        self._bct_pressure_include_reservation = (
+            bool(getattr(score_cfg, "bct_pressure_include_reservation", True))
+            if score_cfg is not None
+            else True
+        )
 
     def set_dataprovider(self, dp) -> None:
         """Inject DataProvider for dynamic min_notional lookups."""
@@ -161,19 +181,14 @@ class SizerAgent:
             except Exception:
                 score_val = 0.0
         fluid = 0.0
-        score_cfg = getattr(self.cfg, "sizing_algos", getattr(self.cfg, "sizing", None))
-        score_floor = float(getattr(score_cfg, "score_floor", 0.3) or 0.0) if score_cfg else 0.3
-        score_exp = float(getattr(score_cfg, "score_exponent", 2.0) or 2.0) if score_cfg else 2.0
-        beta_min = float(getattr(score_cfg, "bct_beta_min", 1.0) or 1.0) if score_cfg else 1.0
-        beta_max = float(getattr(score_cfg, "bct_beta_max", 4.0) or 4.0) if score_cfg else 4.0
-        pressure_ratio = float(getattr(score_cfg, "bct_pressure_ratio", 1.0) or 1.0) if score_cfg else 1.0
-        pressure_ema_alpha = float(getattr(score_cfg, "bct_pressure_ema_alpha", 0.0) or 0.0) if score_cfg else 0.0
-        fluid_cap_pct = float(getattr(score_cfg, "fluid_cap_pct_of_equity", 0.0) or 0.0) if score_cfg else 0.0
-        include_reservation = (
-            bool(getattr(score_cfg, "bct_pressure_include_reservation", True))
-            if score_cfg is not None
-            else True
-        )
+        score_floor = self._score_floor
+        score_exp = self._score_exponent
+        beta_min = self._bct_beta_min
+        beta_max = self._bct_beta_max
+        pressure_ratio = self._bct_pressure_ratio
+        pressure_ema_alpha = self._bct_pressure_ema_alpha
+        fluid_cap_pct = self._fluid_cap_pct_of_equity
+        include_reservation = self._bct_pressure_include_reservation
         clamped_score = max(0.0, min(1.0, score_val))
         beta_low, beta_high = sorted((beta_min, beta_max))
         pressure = 1.0
@@ -250,9 +265,7 @@ class SizerAgent:
                 c_algo_fn = ALGO_REGISTRY["BASE_ONLY"]
             c_result = c_algo_fn(c_inputs, self.cfg)
             c_target_risk = max(c_result.target_risk, 0.0)
-            c_target_risk_cap_pct = float(
-                getattr(score_cfg, "c_target_risk_cap_pct_of_equity", 0.0) or 0.0
-            ) if score_cfg else 0.0
+            c_target_risk_cap_pct = self._c_target_risk_cap_pct_of_equity
             if c_target_risk_cap_pct > 0 and equity > 0:
                 c_target_risk = min(c_target_risk, equity * c_target_risk_cap_pct)
 

@@ -53,6 +53,23 @@ class PoolBuffer:
         buffer._fill("short", payloads_short, signal_id_fn)
         return buffer
 
+    @classmethod
+    def from_array_data(
+        cls,
+        long_data: np.ndarray,
+        short_data: np.ndarray,
+        schema: PoolSchema | None = None,
+    ) -> "PoolBuffer":
+        if long_data.ndim != 3 or short_data.ndim != 3:
+            raise ValueError("PoolBuffer arrays must be 3D (rows, slots, fields).")
+        if long_data.shape != short_data.shape:
+            raise ValueError("PoolBuffer arrays must share the same shape.")
+        rows, slots, _ = long_data.shape
+        buffer = cls(rows, slots, schema=schema)
+        buffer._data["long"] = long_data
+        buffer._data["short"] = short_data
+        return buffer
+
     def _fill(
         self,
         direction: str,

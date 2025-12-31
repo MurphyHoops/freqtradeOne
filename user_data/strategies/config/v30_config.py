@@ -47,7 +47,7 @@ class TierSpec:
     min_rr_ratio: float = 1.0  # Minimum reward/risk ratio; >1 enforces positive skew.
     min_edge: float = 0.0  # Minimum expected edge; raise to reject thin edges.
     sizing_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "BASELINE"  # Sizing policy used for the tier.
-    center_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "TARGET_RECOVERY",
+    center_algo: Literal["BASE_ONLY", "BASELINE", "TARGET_RECOVERY"] = "TARGET_RECOVERY"
     k_mult_base_pct: float = 1.0  # Baseline stake multiplier vs equity; larger = bigger base size.
     recovery_factor: float = 1.0  # Multiplier applied to local_loss for recovery sizing; larger = more aggressive recovery.
     cooldown_bars: int = 0  # Bars to pause after any trade in this tier; raise to slow entries.

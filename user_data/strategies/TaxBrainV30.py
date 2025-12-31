@@ -210,21 +210,6 @@ class TaxBrainV30(IStrategy):
         )
         if not self._persist_enabled:
             self.persist = _NoopStateStore()
-        self.cycle_agent = CycleAgent(
-            cfg=self.cfg,
-            state=self.state,
-            reservation=self.reservation,
-            treasury=self.treasury_agent,
-            risk=self.risk_agent,
-            analytics=self.analytics,
-            persist=self.persist,
-            tier_mgr=self.tier_mgr,
-            backend=self.global_backend,
-        )
-        self.sizer = SizerAgent(
-            self.state, self.reservation, self.eq_provider, self.cfg, self.tier_mgr, backend=self.global_backend
-        )
-        self.execution = ExecutionAgent(self.state, self.reservation, self.eq_provider, self.cfg)
         self._last_signal: Dict[str, Optional[schemas.Candidate]] = {}
         self._pending_entry_meta: Dict[str, Dict[str, Any]] = {}
         self._tf_sec = helpers.tf_to_sec(self.cfg.system.timeframe)
@@ -245,7 +230,22 @@ class TaxBrainV30(IStrategy):
             is_backtest_like=self._is_backtest_like_runmode,
             rejections=self.rejections,
         )
-        self.cycle_agent.engine = self.engine
+        self.cycle_agent = CycleAgent(
+            cfg=self.cfg,
+            state=self.state,
+            reservation=self.reservation,
+            treasury=self.treasury_agent,
+            risk=self.risk_agent,
+            analytics=self.analytics,
+            persist=self.persist,
+            tier_mgr=self.tier_mgr,
+            backend=self.global_backend,
+            engine=self.engine,
+        )
+        self.sizer = SizerAgent(
+            self.state, self.reservation, self.eq_provider, self.cfg, self.tier_mgr, backend=self.global_backend
+        )
+        self.execution = ExecutionAgent(self.state, self.reservation, self.eq_provider, self.cfg)
 
     def set_dataprovider(self, dp):
         try:
@@ -347,35 +347,8 @@ class TaxBrainV30(IStrategy):
             return default
 
     def _update_last_signal(self, pair: str, candidate: Optional[schemas.Candidate], row: pd.Series) -> None:
-        helpers.update_last_signal(self, pair, candidate, row)
-
-    def _reserve_backend_risk(self, pair: str, risk: float) -> bool:
-        return helpers.reserve_backend_risk(self, pair, risk)
-
-    def _reserve_risk_resources(
-        self,
-        pair: str,
-        stake: float,
-        risk: float,
-        bucket: str,
-        sl: float,
-        tp: float,
-        direction: str,
-        current_rate: float,
-        meta: Dict[str, Any],
-    ) -> bool:
-        return helpers.reserve_risk_resources(
-            self,
-            pair=pair,
-            stake=stake,
-            risk=risk,
-            bucket=bucket,
-            sl=sl,
-            tp=tp,
-            direction=direction,
-            current_rate=current_rate,
-            meta=meta,
-        )
+        self.state.record_signal(pair, candidate)
+        self._last_signal[pair] = candidate
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         pair = metadata["pair"]
@@ -414,7 +387,8 @@ class TaxBrainV30(IStrategy):
 
         meta = self.bridge.get_row_meta(pair, current_time)
         candidate = helpers.candidate_from_meta(self, pair, meta) if meta else None
-        self._update_last_signal(pair, candidate, last_row)
+        self.state.record_signal(pair, candidate)
+        self._last_signal[pair] = candidate
         try:
             if candidate and getattr(self, "global_backend", None):
                 self.global_backend.record_signal_score(pair, float(getattr(candidate, "expected_edge", 0.0)))
@@ -517,16 +491,24 @@ class TaxBrainV30(IStrategy):
         meta, meta_info = result
 
         if self._is_backtest_like_runmode():
-            pst = self.state.get_pair_state(pair)
-            pst.last_score = float(meta.get("expected_edge", 0.0) or 0.0)
-            pst.last_dir = meta_info.direction
-            pst.last_sl_pct = float(meta.get("sl_pct", 0.0) or 0.0)
-            pst.last_tp_pct = float(meta.get("tp_pct", 0.0) or 0.0)
-            pst.last_kind = str(meta_info.name)
-            pst.last_squad = str(meta_info.squad)
-            pst.last_exit_profile = meta_info.exit_profile
-            pst.last_recipe = meta_info.recipe
-            pst.last_atr_pct = float(meta.get("plan_atr_pct", 0.0) or 0.0)
+            candidate = schemas.Candidate(
+                direction=meta_info.direction,
+                kind=meta_info.name,
+                raw_score=float(meta.get("raw_score", 0.0) or 0.0),
+                rr_ratio=float(meta.get("rr_ratio", 0.0) or 0.0),
+                win_prob=float(meta.get("expected_edge", 0.0) or 0.0),
+                expected_edge=float(meta.get("expected_edge", 0.0) or 0.0),
+                squad=str(meta_info.squad),
+                sl_pct=float(meta.get("sl_pct", 0.0) or 0.0),
+                tp_pct=float(meta.get("tp_pct", 0.0) or 0.0),
+                exit_profile=meta_info.exit_profile,
+                recipe=meta_info.recipe,
+                timeframe=meta_info.timeframe,
+                plan_timeframe=meta_info.plan_timeframe,
+                plan_atr_pct=meta.get("plan_atr_pct"),
+            )
+            self.state.record_signal(pair, candidate)
+            self._last_signal[pair] = candidate
 
         self.engine.sync_to_time(current_time)
         context = {
@@ -573,7 +555,7 @@ class TaxBrainV30(IStrategy):
             "raw_score": meta.get("raw_score"),
             "score": meta.get("expected_edge"),
         }
-        reserved = self._reserve_risk_resources(
+        reserved = self.engine.reserve_risk_resources(
             pair=pair,
             stake=stake,
             risk=risk,
@@ -621,7 +603,7 @@ class TaxBrainV30(IStrategy):
         is_exit = side == getattr(trade, "exit_side", None)
 
         if is_entry:
-            meta = self._pending_entry_meta.pop(pair, None)
+            meta = self.engine.pending_entry_meta.pop(pair, None)
             opened = self.execution.on_open_filled(
                 pair=pair,
                 trade=trade,
@@ -716,12 +698,12 @@ class TaxBrainV30(IStrategy):
             self.analytics.log_exit(pair, trade_id, tag)
 
     def _handle_cancel_or_reject(self, pair: str) -> tuple[bool, Optional[dict[str, Any]]]:
-        meta = self._pending_entry_meta.get(pair)
+        meta = self.engine.pending_entry_meta.get(pair)
         meta_snapshot = dict(meta) if meta else None
         rid = meta.get("reservation_id") if meta else None
         released = self.execution.on_cancel_or_reject(pair, rid)
         if released:
-            self._pending_entry_meta.pop(pair, None)
+            self.engine.pending_entry_meta.pop(pair, None)
             if self._persist_enabled:
                 self.persist.save()
         return released, meta_snapshot

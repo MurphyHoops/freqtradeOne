@@ -39,6 +39,8 @@ class ZeroCopyBridge:
         self._informative_cache_order: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._informative_last: Dict[str, Dict[str, pd.Series]] = {}
         self._aligned_info_cache: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
+        self._aligned_base_ts_cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
+        self._aligned_info_ts_cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
         self._informative_gc_last_ts: float = 0.0
         self._informative_gc_interval_sec: int = 900
 
@@ -50,10 +52,32 @@ class ZeroCopyBridge:
         merge_info = bool(getattr(system_cfg, "merge_informative_into_base", False)) if system_cfg else False
         if merge_info and self._strategy._is_backtest_like_runmode():
             return out
-        base_time = pd.to_datetime(df["date"]) if "date" in df.columns else pd.to_datetime(df.index)
-        last_ts = base_time.iloc[-1] if len(base_time) else None
+        base_source = df["date"] if "date" in df.columns else df.index
+        if len(base_source):
+            try:
+                last_ts = base_source.iloc[-1]
+            except Exception:
+                last_ts = base_source[-1]
+        else:
+            last_ts = None
         max_entries = int(getattr(system_cfg, "aligned_info_cache_max_entries", 0) or 0) if system_cfg else 0
-        base_ts = base_time.astype("int64", copy=False).to_numpy(copy=False)
+        base_cache_key = (pair, len(df), str(last_ts))
+        base_ts = self._aligned_base_ts_cache.get(base_cache_key)
+        if base_ts is not None:
+            try:
+                self._aligned_base_ts_cache.move_to_end(base_cache_key)
+            except Exception:
+                pass
+        else:
+            base_time = pd.to_datetime(base_source)
+            base_ts = base_time.astype("int64", copy=False).to_numpy(copy=False)
+            self._aligned_base_ts_cache[base_cache_key] = base_ts
+            if max_entries > 0:
+                while len(self._aligned_base_ts_cache) > max_entries:
+                    try:
+                        self._aligned_base_ts_cache.popitem(last=False)
+                    except Exception:
+                        break
         for tf in getattr(self._strategy, "_informative_timeframes", []):
             cache_key = (pair, tf, len(df), str(last_ts))
             cached = self._aligned_info_cache.get(cache_key)
@@ -67,10 +91,34 @@ class ZeroCopyBridge:
             info_df = self.get_informative_dataframe(pair, tf)
             if info_df is None or info_df.empty:
                 continue
-            info_time = pd.to_datetime(info_df["date"]) if "date" in info_df.columns else pd.to_datetime(info_df.index)
-            info_ts = info_time.astype("int64", copy=False).to_numpy(copy=False)
+            info_source = info_df["date"] if "date" in info_df.columns else info_df.index
+            if len(info_source):
+                try:
+                    last_info_ts = info_source.iloc[-1]
+                except Exception:
+                    last_info_ts = info_source[-1]
+            else:
+                last_info_ts = None
+            info_cache_key = (pair, tf, len(info_df), str(last_info_ts))
+            info_ts = self._aligned_info_ts_cache.get(info_cache_key)
+            if info_ts is not None:
+                try:
+                    self._aligned_info_ts_cache.move_to_end(info_cache_key)
+                except Exception:
+                    pass
+            else:
+                info_time = pd.to_datetime(info_source)
+                info_ts = info_time.astype("int64", copy=False).to_numpy(copy=False)
+                self._aligned_info_ts_cache[info_cache_key] = info_ts
+                if max_entries > 0:
+                    while len(self._aligned_info_ts_cache) > max_entries:
+                        try:
+                            self._aligned_info_ts_cache.popitem(last=False)
+                        except Exception:
+                            break
             info_vals = info_df.to_numpy(copy=False)
-            info_valid = ~pd.isna(info_time.to_numpy(copy=False))
+            min_int64 = np.iinfo("int64").min
+            info_valid = info_ts != min_int64
             if not info_valid.all():
                 info_ts = info_ts[info_valid]
                 info_vals = info_vals[info_valid]
@@ -179,6 +227,12 @@ class ZeroCopyBridge:
         self._informative_last.pop(pair, None)
         for key in [key for key in self._informative_cache_order.keys() if key[0] == pair]:
             self._informative_cache_order.pop(key, None)
+        for key in [key for key in list(self._aligned_info_cache.keys()) if key[0] == pair]:
+            self._aligned_info_cache.pop(key, None)
+        for key in [key for key in list(self._aligned_base_ts_cache.keys()) if key[0] == pair]:
+            self._aligned_base_ts_cache.pop(key, None)
+        for key in [key for key in list(self._aligned_info_ts_cache.keys()) if key[0] == pair]:
+            self._aligned_info_ts_cache.pop(key, None)
 
     def get_informative_row(self, pair: str, timeframe: str) -> Optional[pd.Series]:
         return self._informative_last.get(pair, {}).get(timeframe)
@@ -216,6 +270,10 @@ class ZeroCopyBridge:
             self.clear_informative_pair(pair)
         for key in [key for key in list(self._aligned_info_cache.keys()) if key[0] in stale_pairs]:
             self._aligned_info_cache.pop(key, None)
+        for key in [key for key in list(self._aligned_base_ts_cache.keys()) if key[0] in stale_pairs]:
+            self._aligned_base_ts_cache.pop(key, None)
+        for key in [key for key in list(self._aligned_info_ts_cache.keys()) if key[0] in stale_pairs]:
+            self._aligned_info_ts_cache.pop(key, None)
 
     def _touch_informative_key(self, pair: str, timeframe: str, max_entries: int) -> None:
         if max_entries <= 0:

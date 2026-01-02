@@ -175,7 +175,7 @@ class TaxBrainV30(IStrategy):
         if self.exit_facade:
             self.exit_facade.attach_strategy(self)
             self.exit_facade.set_dataprovider(getattr(self, "dp", None))
-        state_file = (user_data_dir / "taxbrain_v30_state.json").resolve()
+        state_file = (user_data_dir / self.cfg.system.state_store_filename).resolve()
         self._runmode_token: str = self._compute_runmode_token()
         self._persist_enabled: bool = not self._is_backtest_like_runmode()
         self.persist = JsonStateStore(

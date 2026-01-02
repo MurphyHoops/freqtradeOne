@@ -10,6 +10,7 @@ from .models import StrategySpec, TierSpec
 
 # Inline default profile version tag (metadata only for inline defaults).
 DEFAULT_PROFILE_VERSION = "inline_v1"
+DEFAULT_EXIT_PROFILE_NAME = "ATRtrail_v1"
 
 
 def default_profiles_factory() -> Dict[str, ExitProfile]:
@@ -142,6 +143,7 @@ DEFAULT_TIER_ROUTING_MAP: Dict[int, str] = {
 
 
 __all__ = [
+    "DEFAULT_EXIT_PROFILE_NAME",
     "DEFAULT_PROFILE_VERSION",
     "DEFAULT_EXIT_PROFILES",
     "DEFAULT_STRATEGIES",

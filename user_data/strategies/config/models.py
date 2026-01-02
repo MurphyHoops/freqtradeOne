@@ -9,42 +9,6 @@ from typing import Dict, Literal, Mapping, Optional, Tuple
 from ..agents.exits.profiles import ExitProfile
 
 
-def _default_profile_version() -> str:
-    from .presets import DEFAULT_PROFILE_VERSION
-
-    return DEFAULT_PROFILE_VERSION
-
-
-def _copy_exit_profiles() -> Dict[str, ExitProfile]:
-    from .presets import DEFAULT_EXIT_PROFILES
-
-    return dict(DEFAULT_EXIT_PROFILES)
-
-
-def _copy_strategies() -> Dict[str, "StrategySpec"]:
-    from .presets import DEFAULT_STRATEGIES
-
-    return dict(DEFAULT_STRATEGIES)
-
-
-def _copy_tiers() -> Dict[str, "TierSpec"]:
-    from .presets import DEFAULT_TIERS
-
-    return dict(DEFAULT_TIERS)
-
-
-def _default_enabled_signals() -> Tuple[str, ...]:
-    from .presets import DEFAULT_ENABLED_SIGNALS
-
-    return tuple(DEFAULT_ENABLED_SIGNALS)
-
-
-def _default_tier_routing() -> "TierRouting":
-    from .presets import DEFAULT_TIER_ROUTING_MAP
-
-    return TierRouting(loss_tier_map=dict(DEFAULT_TIER_ROUTING_MAP))
-
-
 @dataclass(frozen=True)
 class StrategySpec:
     """Bind a set of entry signals to an exit profile + policy thresholds."""
@@ -168,6 +132,7 @@ class SystemConfig:
     sensor_pairs: Tuple[str, ...] = ("BTC/USDT", "ETH/USDT")  # Pairs to fetch for market sensor.
     rejection_log_enabled: bool = False  # Emit structured rejection logs.
     rejection_stats_enabled: bool = True  # Track rejection counters in memory.
+    state_store_filename: str = "taxbrain_v30_state.json"  # State file name for persistence.
 
 
 @dataclass(frozen=True)
@@ -206,13 +171,13 @@ class StrategyConfig:
     """Strategy-level components such as signals, tiers and exits."""
 
     enabled_recipes: Tuple[str, ...] = field(default_factory=tuple)  # Optional recipe allowlist; derives enabled_signals when set.
-    enabled_signals: Tuple[str, ...] = field(default_factory=_default_enabled_signals)  # Which signals are active; drop entries to disable.
-    exit_profile_version: str = field(default_factory=_default_profile_version)  # Semantic version tag for exit profiles; metadata only.
-    exit_profiles: Dict[str, ExitProfile] = field(default_factory=_copy_exit_profiles)  # Exit profile definitions.
-    default_exit_profile: Optional[str] = "ATRtrail_v1"  # Default profile name used when candidate/tiers provide none.
-    strategies: Dict[str, StrategySpec] = field(default_factory=_copy_strategies)  # Strategy recipes mapping.
-    tiers: Dict[str, TierSpec] = field(default_factory=_copy_tiers)  # Tier definitions.
-    tier_routing: "TierRouting" = field(default_factory=_default_tier_routing)  # Mapping from closs to tier names.
+    enabled_signals: Tuple[str, ...] = field(default_factory=tuple)  # Which signals are active; drop entries to disable.
+    exit_profile_version: str = "inline_v1"  # Semantic version tag for exit profiles; metadata only.
+    exit_profiles: Dict[str, ExitProfile] = field(default_factory=dict)  # Exit profile definitions.
+    default_exit_profile: Optional[str] = None  # Default profile name used when candidate/tiers provide none.
+    strategies: Dict[str, StrategySpec] = field(default_factory=dict)  # Strategy recipes mapping.
+    tiers: Dict[str, TierSpec] = field(default_factory=dict)  # Tier definitions.
+    tier_routing: "TierRouting" = field(default_factory=TierRouting)  # Mapping from closs to tier names.
 
 
 @dataclass(frozen=True)

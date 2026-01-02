@@ -30,7 +30,9 @@ from .models import (
 )
 from .presets import (
     DEFAULT_ENABLED_SIGNALS,
+    DEFAULT_EXIT_PROFILE_NAME,
     DEFAULT_EXIT_PROFILES,
+    DEFAULT_PROFILE_VERSION,
     DEFAULT_STRATEGIES,
     DEFAULT_TIERS,
     DEFAULT_TIER_ROUTING_MAP,
@@ -113,7 +115,11 @@ def _is_default_tiers_map(tiers: Mapping[str, TierSpec]) -> bool:
 def _resolve_user_data_dir(system_cfg: SystemConfig) -> Path:
     if system_cfg and getattr(system_cfg, "user_data_dir", None):
         return Path(system_cfg.user_data_dir).expanduser().resolve()
-    return Path(__file__).resolve().parents[2]
+    cwd = Path.cwd()
+    user_data = cwd / "user_data"
+    if user_data.exists():
+        return user_data.resolve()
+    return cwd.resolve()
 
 
 def _discover_recipe_plugins(system_cfg: SystemConfig) -> Dict[str, StrategySpec]:
@@ -399,6 +405,8 @@ def _normalize_strategy_config(cfg: V30Config) -> V30Config:
     enabled_signals = tuple(getattr(strat_cfg, "enabled_signals", ()) or ())
     if not enabled_signals or enabled_signals == tuple(DEFAULT_ENABLED_SIGNALS):
         enabled_signals = base_enabled_signals
+    exit_profile_version = getattr(strat_cfg, "exit_profile_version", None) or DEFAULT_PROFILE_VERSION
+    default_exit_profile = getattr(strat_cfg, "default_exit_profile", None) or DEFAULT_EXIT_PROFILE_NAME
     if enabled_recipes:
         missing_recipes = [name for name in enabled_recipes if name not in strategies]
         if missing_recipes:
@@ -418,6 +426,8 @@ def _normalize_strategy_config(cfg: V30Config) -> V30Config:
         tier_routing=tier_routing,
         enabled_recipes=enabled_recipes,
         enabled_signals=enabled_signals,
+        exit_profile_version=exit_profile_version,
+        default_exit_profile=default_exit_profile,
     )
 
     cfg.strategy_recipes = tuple(strategies.values())

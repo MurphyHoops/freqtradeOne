@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover
                 self.dp = type("DP", (), {})()
 
 from user_data.strategies.agents.exits import rules_threshold  # noqa: F401
-from user_data.strategies.config.v30_config import V30Config, apply_overrides
+from user_data.strategies.config.v30_config import V30Config, build_v30_config
 from user_data.strategies.agents.portfolio.treasury import TreasuryAgent
 from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
 from user_data.strategies.agents.portfolio.sizer import SizerAgent
@@ -76,8 +76,11 @@ class TaxBrainV30(IStrategy):
     _indicator_requirements_map: Dict[Optional[str], set[str]] = {}
 
     def __init__(self, config: Dict[str, Any]) -> None:
-        base_cfg = V30Config()
-        self.cfg = apply_overrides(base_cfg, config.get("strategy_params", {}))
+        strategy_params = dict(config.get("strategy_params", {}) or {})
+        user_data_dir = config.get("user_data_dir")
+        if user_data_dir and "system.user_data_dir" not in strategy_params:
+            strategy_params["system.user_data_dir"] = user_data_dir
+        self.cfg = build_v30_config(strategy_params)
         self.timeframe = self.cfg.system.timeframe
         self.startup_candle_count = self.cfg.system.startup_candle_count
         stoploss_default = float(self.cfg.trading.sizing.enforce_leverage) * -0.2

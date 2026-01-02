@@ -1,0 +1,126 @@
+{
+  "exit_profiles": {
+    "ATRtrail_v1": {
+      "atr_timeframe": null,
+      "atr_mul_sl": 4,
+      "floor_sl_pct": 1e-12,
+      "atr_mul_tp": 4,
+      "breakeven_lock_frac_of_tp": 0.0,
+      "trail_mode": null,
+      "trail_atr_mul": 0.0,
+      "activation_atr_mul": 0.0,
+      "max_bars_in_trade": 0
+    }
+  },
+  "strategies": {
+    "NBX_fast_default": {
+      "entries": [
+        "newbars_breakout_long_5m",
+        "newbars_breakdown_short_5m"
+      ],
+      "exit_profile": "ATRtrail_v1",
+      "min_rr": 0.00001,
+      "min_edge": 0.0,
+      "base_win_prob": 0.4
+    },
+    "Recovery_mix": {
+      "entries": [
+        "pullback_long",
+        "trend_short",
+        "newbars_breakdown_short_30m"
+      ],
+      "exit_profile": "ATRtrail_v1",
+      "min_rr": 0.2,
+      "min_edge": 0.0,
+      "base_win_prob": 0.55
+    },
+    "ICU_conservative": {
+      "entries": [
+        "trend_short",
+        "mean_rev_long",
+        "newbars_breakout_long_30m"
+      ],
+      "exit_profile": "ATRtrail_v1",
+      "min_rr": 0.2,
+      "min_edge": 0.0,
+      "base_win_prob": 0.45
+    }
+  },
+  "enabled_signals": [
+    "newbars_breakout_long_5m",
+    "newbars_breakdown_short_5m",
+    "newbars_breakout_long_30m",
+    "newbars_breakdown_short_30m",
+    "pullback_long",
+    "trend_short",
+    "mean_rev_long"
+  ],
+  "tiers": {
+    "T0_healthy": {
+      "allowed_recipes": [
+        "NBX_fast_default"
+      ],
+      "min_raw_score": 0.2,
+      "min_rr_ratio": 0.00001,
+      "min_edge": 0.002,
+      "sizing_algo": "BASE_ONLY",
+      "center_algo": "TARGET_RECOVERY",
+      "k_mult_base_pct": 0.0,
+      "recovery_factor": 1.0,
+      "cooldown_bars": 0,
+      "cooldown_bars_after_win": 0,
+      "per_pair_risk_cap_pct": 1,
+      "max_stake_notional_pct": 0.5,
+      "icu_force_exit_bars": 0,
+      "default_exit_profile": "ATRtrail_v1",
+      "single_position_only": true
+    },
+    "T12_recovery": {
+      "allowed_recipes": [
+        "Recovery_mix"
+      ],
+      "min_raw_score": 0.2,
+      "min_rr_ratio": 0.000001,
+      "min_edge": 0.0,
+      "sizing_algo": "TARGET_RECOVERY",
+      "center_algo": "TARGET_RECOVERY",
+      "k_mult_base_pct": 1.0,
+      "recovery_factor": 1,
+      "cooldown_bars": 0,
+      "cooldown_bars_after_win": 0,
+      "per_pair_risk_cap_pct": 1,
+      "max_stake_notional_pct": 1,
+      "icu_force_exit_bars": 0,
+      "default_exit_profile": "ATRtrail_v1",
+      "single_position_only": true
+    },
+    "T3p_ICU": {
+      "allowed_recipes": [
+        "ICU_conservative"
+      ],
+      "min_raw_score": 0.2,
+      "min_rr_ratio": 0.000001,
+      "min_edge": 0.0,
+      "sizing_algo": "TARGET_RECOVERY",
+      "center_algo": "TARGET_RECOVERY",
+      "k_mult_base_pct": 1.0,
+      "recovery_factor": 1,
+      "cooldown_bars": 0,
+      "cooldown_bars_after_win": 0,
+      "per_pair_risk_cap_pct": 1,
+      "max_stake_notional_pct": 1,
+      "icu_force_exit_bars": 0,
+      "default_exit_profile": "ATRtrail_v1",
+      "single_position_only": true
+    }
+  },
+  "tier_routing_map": {
+    "0": "T0_healthy",
+    "1": "T12_recovery",
+    "2": "T12_recovery",
+    "3": "T3p_ICU",
+    "4": "T3p_ICU",
+    "5": "T3p_ICU",
+    "6": "T3p_ICU"
+  }
+}

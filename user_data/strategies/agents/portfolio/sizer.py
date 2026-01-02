@@ -61,10 +61,14 @@ class SizerAgent:
             if score_cfg is not None
             else True
         )
+        self.exit_facade = None
 
     def set_dataprovider(self, dp) -> None:
         """Inject DataProvider for dynamic min_notional lookups."""
         self.dp = dp
+
+    def set_exit_facade(self, exit_facade) -> None:
+        self.exit_facade = exit_facade
 
     def _log_debug(self, msg: str) -> None:
         try:
@@ -116,6 +120,7 @@ class SizerAgent:
         bucket: Optional[str] = None,
         current_rate: float = 0.0,
         score: float = 0.0,
+        current_time=None,
     ) -> Tuple[float, float, str]:
         ctx = SizingContext(
             pair=pair,
@@ -131,6 +136,7 @@ class SizerAgent:
             bucket=bucket,
             current_rate=current_rate,
             score=float(score or 0.0),
+            current_time=current_time,
         )
         return self._compute_internal(ctx)
 
@@ -348,8 +354,22 @@ class SizerAgent:
         lev_ctx = float(getattr(ctx, "leverage", 0.0) or 0.0)
         lev = lev_cfg or lev_ctx or 1.0
 
+        exit_profile_name = (
+            ctx.exit_profile
+            or getattr(tier_pol, "default_exit_profile", None)
+            or getattr(getattr(self.cfg, "strategy", None), "default_exit_profile", getattr(self.cfg, "default_exit_profile", None))
+        )
+        atr_mul_sl = 1.0
+        profile = None
+        try:
+            profile = get_exit_profile(self.cfg, exit_profile_name) if exit_profile_name else None
+            if profile and getattr(profile, "atr_mul_sl", None):
+                atr_mul_sl = float(profile.atr_mul_sl)
+        except Exception:
+            atr_mul_sl = 1.0
+
         plan_atr_pct: Optional[float] = None
-        for candidate in (getattr(ctx, "plan_atr_pct", None), getattr(pst, "last_atr_pct", None)):
+        for candidate in (getattr(ctx, "plan_atr_pct", None),):
             if candidate is None:
                 continue
             try:
@@ -360,18 +380,25 @@ class SizerAgent:
                 plan_atr_pct = val
                 break
 
-        exit_profile_name = (
-            ctx.exit_profile
-            or getattr(tier_pol, "default_exit_profile", None)
-            or getattr(getattr(self.cfg, "strategy", None), "default_exit_profile", getattr(self.cfg, "default_exit_profile", None))
-        )
-        atr_mul_sl = 1.0
-        try:
-            profile = get_exit_profile(self.cfg, exit_profile_name) if exit_profile_name else None
-            if profile and getattr(profile, "atr_mul_sl", None):
-                atr_mul_sl = float(profile.atr_mul_sl)
-        except Exception:
-            atr_mul_sl = 1.0
+        if plan_atr_pct is None and self.exit_facade:
+            try:
+                plan_atr_pct = self.exit_facade.get_authoritative_atr(
+                    ctx.pair,
+                    getattr(profile, "atr_timeframe", None) if profile else None,
+                    getattr(ctx, "current_time", None),
+                )
+            except Exception:
+                plan_atr_pct = None
+            if plan_atr_pct is not None and plan_atr_pct <= 0:
+                plan_atr_pct = None
+
+        if plan_atr_pct is None:
+            try:
+                val = float(getattr(pst, "last_atr_pct", None))
+            except Exception:
+                val = None
+            if val and val > 0:
+                plan_atr_pct = val
 
         if self.cfg.sizing_algos.target_recovery.use_atr_based and plan_atr_pct:
             sl_price_pct = max(plan_atr_pct * atr_mul_sl, 0.0)

@@ -7,40 +7,8 @@ import uuid
 
 from ..config.v30_config import V30Config
 from ..agents.portfolio.global_backend import GlobalRiskBackend
+from ..agents.portfolio.schemas import ActiveTradeMeta, PairState
 from .rejections import RejectReason
-
-
-@dataclass
-class ActiveTradeMeta:
-    sl_pct: float
-    tp_pct: float
-    direction: str
-    entry_bar_tick: int
-    entry_price: float
-    bucket: str
-    icu_bars_left: Optional[int]
-    exit_profile: Optional[str] = None
-    recipe: Optional[str] = None
-    plan_timeframe: Optional[str] = None
-    plan_atr_pct: Optional[float] = None
-    tier_name: Optional[str] = None
-
-
-@dataclass
-class PairState:
-    closs: int = 0
-    local_loss: float = 0.0
-    cooldown_bars_left: int = 0
-    last_dir: Optional[str] = None
-    last_score: float = 0.0
-    last_kind: Optional[str] = None
-    last_squad: Optional[str] = None
-    last_sl_pct: float = 0.0
-    last_tp_pct: float = 0.0
-    last_atr_pct: float = 0.0
-    last_exit_profile: Optional[str] = None
-    last_recipe: Optional[str] = None
-    active_trades: Dict[str, ActiveTradeMeta] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -703,6 +671,8 @@ class Engine:
             return
 
         bars_passed = int(delta_seconds // self._tf_sec)
+        if bars_passed <= 0:
+            return
         self.state.bar_tick += bars_passed
         self.state.last_finalized_bar_ts += (bars_passed * self._tf_sec)
         self._decay_and_cooldowns(bars_passed)

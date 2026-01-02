@@ -33,6 +33,31 @@ def tf_to_sec(tf: str) -> int:
     return 300
 
 
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(num):
+        return default
+    return num
+
+
+def apply_leverage_to_pct(pct: Optional[float], leverage) -> Optional[float]:
+    if pct is None:
+        return None
+    try:
+        pct_val = float(pct)
+    except (TypeError, ValueError):
+        return None
+    if pct_val <= 0 or not math.isfinite(pct_val):
+        return None
+    lev = safe_float(leverage, default=1.0)
+    if lev <= 0:
+        lev = 1.0
+    return pct_val * lev
+
+
 def timeframe_suffix_token(timeframe: Optional[str]) -> str:
     token = (timeframe or "").strip()
     return token.replace("/", "_") if token else ""

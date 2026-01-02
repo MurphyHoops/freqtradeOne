@@ -131,6 +131,8 @@ class SystemConfig:
     merge_informative_into_base: bool = True  # Merge informative columns once into base dataframe in backtest/hyperopt.
     aligned_info_cache_max_entries: int = 512  # LRU cap for aligned informative cache; 0 disables.
     informative_cache_max_entries: int = 0  # LRU cap for informative dataframe cache; 0 disables.
+    informative_gc_mem_pct: float = 0.85  # Memory pressure (0-1 or 0-100) to trigger cache GC early.
+    informative_gc_force_pct: float = 0.92  # Memory pressure (0-1 or 0-100) to force-clear caches.
     market_sensor_enabled: bool = True  # Master toggle for market sensor.
     market_sensor_in_backtest: bool = False  # Enable market sensor during backtest/hyperopt.
     market_sensor_strict: bool = False  # Raise if TA-Lib is missing when sensor is enabled.

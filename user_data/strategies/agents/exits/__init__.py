@@ -1,3 +1,3 @@
 """Convenience re-exports for exit components."""
 
-from .exit import ExitTags  # noqa: F401
+from .facade import ExitTags  # noqa: F401

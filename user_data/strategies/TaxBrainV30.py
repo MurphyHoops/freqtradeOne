@@ -35,7 +35,8 @@ from user_data.strategies.agents.portfolio.tier import TierAgent, TierManager
 from user_data.strategies.agents.portfolio.sizer import SizerAgent
 from user_data.strategies.agents.portfolio.risk import RiskAgent
 from user_data.strategies.agents.portfolio.reservation import ReservationAgent
-from user_data.strategies.agents.portfolio.persist import StateStore
+from user_data.strategies.agents.portfolio.persist import JsonStateStore, NoopStateStore
+from user_data.strategies.agents.portfolio.schemas import EquityProvider
 from user_data.strategies.agents.portfolio.execution import ExecutionAgent
 from user_data.strategies.agents.portfolio.cycle import CycleAgent
 from user_data.strategies.agents.portfolio.analytics import AnalyticsAgent
@@ -45,14 +46,13 @@ from user_data.strategies.agents.portfolio.global_backend import (
     RedisGlobalBackend,
 )
 from user_data.strategies.agents.market.sensor import MarketSensor
-from user_data.strategies.agents.exits.facade import ExitFacade
+from user_data.strategies.agents.exits.facade import ExitFacade, ExitTags
 try:
     from user_data.strategies.agents.exits.router import EXIT_ROUTER, SLContext, TPContext
 except Exception:  # pragma: no cover
     EXIT_ROUTER = None
     SLContext = None  # type: ignore
     TPContext = None  # type: ignore
-from user_data.strategies.agents.exits.exit import ExitPolicyV30, ExitTags
 from user_data.strategies.agents.signals import schemas
 from user_data.strategies.core.engine import Engine, GlobalState
 from user_data.strategies.core.bridge import ZeroCopyBridge
@@ -60,31 +60,6 @@ from user_data.strategies.core.hub import SignalHub
 from user_data.strategies.core.rejections import RejectTracker, RejectReason
 from user_data.strategies.vectorized.matrix_engine import MatrixEngine
 from user_data.strategies.core import strategy_helpers as helpers
-
-
-class _NoopStateStore:
-    def save(self) -> None:  # pragma: no cover - trivial
-        return
-
-    def load_if_exists(self) -> None:  # pragma: no cover - trivial
-        return
-
-
-class EquityProvider:
-    def __init__(self, initial_equity: float) -> None:
-        self.equity_current = float(initial_equity)
-
-    def to_snapshot(self) -> Dict[str, float]:
-        return {"equity_current": self.equity_current}
-
-    def restore_snapshot(self, payload: Dict[str, Any]) -> None:
-        self.equity_current = float(payload.get("equity_current", self.equity_current))
-
-    def get_equity(self) -> float:
-        return self.equity_current
-
-    def on_trade_closed_update(self, profit_abs: float) -> None:
-        self.equity_current += float(profit_abs)
 
 
 class TaxBrainV30(IStrategy):
@@ -197,19 +172,17 @@ class TaxBrainV30(IStrategy):
         if self.exit_facade:
             self.exit_facade.attach_strategy(self)
             self.exit_facade.set_dataprovider(getattr(self, "dp", None))
-        self.exit_policy = ExitPolicyV30(self.state, self.eq_provider, self.cfg, dp=getattr(self, "dp", None))
-        self.exit_policy.set_strategy(self)
         state_file = (user_data_dir / "taxbrain_v30_state.json").resolve()
         self._runmode_token: str = self._compute_runmode_token()
         self._persist_enabled: bool = not self._is_backtest_like_runmode()
-        self.persist = StateStore(
+        self.persist = JsonStateStore(
             filepath=str(state_file),
             state=self.state,
             eq_provider=self.eq_provider,
             reservation_agent=self.reservation,
         )
         if not self._persist_enabled:
-            self.persist = _NoopStateStore()
+            self.persist = NoopStateStore()
         self._last_signal: Dict[str, Optional[schemas.Candidate]] = {}
         self._pending_entry_meta: Dict[str, Dict[str, Any]] = {}
         self._tf_sec = helpers.tf_to_sec(self.cfg.system.timeframe)
@@ -245,6 +218,7 @@ class TaxBrainV30(IStrategy):
         self.sizer = SizerAgent(
             self.state, self.reservation, self.eq_provider, self.cfg, self.tier_mgr, backend=self.global_backend
         )
+        self.sizer.set_exit_facade(self.exit_facade)
         self.execution = ExecutionAgent(self.state, self.reservation, self.eq_provider, self.cfg)
 
     def set_dataprovider(self, dp):
@@ -253,8 +227,6 @@ class TaxBrainV30(IStrategy):
         except AttributeError:
             pass
         self.dp = dp
-        if hasattr(self, "exit_policy") and self.exit_policy is not None:
-            self.exit_policy.dp = dp
         if hasattr(self, "sizer"):
             self.sizer.set_dataprovider(dp)
         if self.exit_facade:
@@ -352,7 +324,27 @@ class TaxBrainV30(IStrategy):
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         pair = metadata["pair"]
-        return self.matrix_engine.inject_features(df, pair)
+        if df is None or df.empty:
+            return df
+        df = self.matrix_engine.inject_features(df, pair)
+        try:
+            last_time = df.iloc[-1]["date"]
+            last_row_ts = float(pd.to_datetime(last_time).timestamp())
+        except Exception:
+            last_row_ts = float(pd.Timestamp.utcnow().timestamp())
+        try:
+            whitelist = self.dp.current_whitelist()
+        except Exception:
+            whitelist = [pair]
+        self.cycle_agent.maybe_finalize(
+            pair=pair,
+            bar_ts=last_row_ts,
+            whitelist=whitelist,
+            timeframe_sec=self._tf_sec,
+            eq_provider=self.eq_provider,
+        )
+        self.bridge.maybe_gc_informative_cache(whitelist)
+        return df
 
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         pair = metadata["pair"]
@@ -536,6 +528,7 @@ class TaxBrainV30(IStrategy):
             bucket=None,
             current_rate=current_rate,
             score=float(meta.get("expected_edge", 0.0) or 0.0),
+            current_time=current_time,
         )
         if stake <= 0 or risk <= 0:
             helpers.update_rejection(self, RejectReason.SIZER, pair, {"side": side})
@@ -588,7 +581,7 @@ class TaxBrainV30(IStrategy):
         if self._persist_enabled:
             self.persist.load_if_exists()
         else:
-            self.persist = _NoopStateStore()
+            self.persist = NoopStateStore()
             self.cycle_agent.persist = self.persist
         if self.state.treasury.cycle_start_tick == 0:
             self.state.treasury.cycle_start_tick = self.state.bar_tick
@@ -708,27 +701,6 @@ class TaxBrainV30(IStrategy):
                 self.persist.save()
         return released, meta_snapshot
 
-    @staticmethod
-    def _apply_leverage_pct(pct: Optional[float], trade) -> Optional[float]:
-        if pct is None:
-            return None
-        try:
-            pct = float(pct)
-        except (TypeError, ValueError):
-            return None
-        if pct <= 0:
-            return None
-
-        lev = getattr(trade, "leverage", 1.0) or 1.0
-        try:
-            lev = float(lev)
-        except (TypeError, ValueError):
-            lev = 1.0
-        if lev <= 0:
-            lev = 1.0
-
-        return pct * lev
-
     def custom_stoploss(
         self,
         pair: str,
@@ -756,7 +728,7 @@ class TaxBrainV30(IStrategy):
         except Exception:
             sl_pct = None
 
-        sl_pct = self._apply_leverage_pct(sl_pct, trade)
+        sl_pct = helpers.apply_leverage_to_pct(sl_pct, getattr(trade, "leverage", 1.0))
         if sl_pct is None or sl_pct <= 0:
             return self.stoploss
         return -abs(float(sl_pct))
@@ -771,19 +743,14 @@ class TaxBrainV30(IStrategy):
         **kwargs,
     ) -> Optional[str]:
         tid = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
-        reason = self.exit_policy.decide(
-            pair,
-            tid,
-            float(current_profit) if current_profit is not None else None,
-            trade=trade,
-        )
-        if not reason:
-            reason = self._atr_entry_exit_reason(
-                pair,
-                trade,
-                current_time,
-                current_rate,
-                current_profit,
+        reason = None
+        if self.exit_facade:
+            reason = self.exit_facade.decide_exit(
+                pair=pair,
+                trade=trade,
+                current_time=current_time,
+                current_rate=current_rate,
+                current_profit_pct=float(current_profit) if current_profit is not None else None,
             )
         if not reason:
             return None
@@ -830,109 +797,10 @@ class TaxBrainV30(IStrategy):
         except Exception:
             tp_pct = None
 
-        tp_pct = self._apply_leverage_pct(tp_pct, trade)
+        tp_pct = helpers.apply_leverage_to_pct(tp_pct, getattr(trade, "leverage", 1.0))
         if tp_pct is None or tp_pct <= 0:
             return None
         return float(tp_pct)
-
-    def _get_current_atr_abs(
-        self,
-        pair: str,
-        current_time: datetime,
-        profile: Optional[Any] = None,
-    ) -> Optional[float]:
-        dp = getattr(self, "dp", None)
-        if dp is None:
-            return None
-        atr_tf = None
-        if profile is not None:
-            atr_tf = getattr(profile, "atr_timeframe", None)
-        if not atr_tf:
-            atr_tf = getattr(self.cfg, "timeframe", None) or self.timeframe
-        try:
-            analyzed = dp.get_analyzed_dataframe(pair, atr_tf)
-        except Exception:
-            return None
-        df = analyzed[0] if isinstance(analyzed, (list, tuple)) else analyzed
-        if df is None or df.empty:
-            return None
-        try:
-            upto = df.loc[:current_time] if current_time is not None else df
-        except Exception:
-            try:
-                ct = current_time.replace(tzinfo=None) if getattr(current_time, "tzinfo", None) else current_time
-                upto = df.loc[:ct]
-            except Exception:
-                upto = df
-        if upto is None or upto.empty:
-            return None
-        row = upto.iloc[-1]
-        try:
-            if "atr" in row.index:
-                atr_val = float(row["atr"])
-                if math.isfinite(atr_val) and atr_val > 0:
-                    return atr_val
-        except Exception:
-            pass
-        try:
-            atr_pct = float(row.get("atr_pct", 0.0))
-            close = float(row.get("close", 0.0))
-            if atr_pct > 0 and close > 0:
-                atr_val = atr_pct * close
-                if math.isfinite(atr_val) and atr_val > 0:
-                    return atr_val
-        except Exception:
-            return None
-        return None
-
-    def _atr_entry_exit_reason(
-        self,
-        pair: str,
-        trade,
-        current_time: datetime,
-        current_rate: float,
-        current_profit: float,
-    ) -> Optional[str]:
-        if self.exit_facade is None:
-            return None
-        try:
-            _, profile_def, _ = self.exit_facade.resolve_trade_plan(pair, trade, current_time)
-        except Exception:
-            profile_def = None
-        if not profile_def:
-            return None
-        k_sl = float(getattr(profile_def, "atr_mul_sl", 0.0) or 0.0)
-        k_tp = getattr(profile_def, "atr_mul_tp", None)
-        if k_tp is None or k_tp <= 0:
-            k_tp = max(k_sl * 2.0, 0.0)
-        k_tp = float(k_tp)
-        atr_abs = self._get_current_atr_abs(pair, current_time, profile_def)
-        if atr_abs is None or atr_abs <= 0:
-            return None
-        entry = float(trade.open_rate)
-        price = float(current_rate)
-        is_short = bool(getattr(trade, "is_short", False))
-        sl_abs = k_sl * atr_abs if k_sl > 0 else None
-        tp_abs = k_tp * atr_abs if k_tp > 0 else None
-        if not is_short:
-            if sl_abs is not None:
-                sl_price = entry - sl_abs
-                if price <= sl_price:
-                    return "atr_entry_sl"
-            if tp_abs is not None:
-                tp_price = entry + tp_abs
-                if price >= tp_price:
-                    return "atr_entry_tp"
-        else:
-            if sl_abs is not None:
-                sl_price = entry + sl_abs
-                if price >= sl_price:
-                    return "atr_entry_sl"
-            if tp_abs is not None:
-                tp_price = entry - tp_abs
-                if price <= tp_price:
-                    return "atr_entry_tp"
-        return None
 
     def _log_full_exit_state(
         self,

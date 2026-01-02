@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 from collections import OrderedDict
+import ctypes
+import os
+import platform
 import time
 
 import pandas as pd
@@ -27,7 +30,6 @@ class ZeroCopyBridge:
         self._strategy = strategy
         self._frames: Dict[str, pd.DataFrame] = {}
         self._times: Dict[str, np.ndarray] = {}
-        self._row_map: Dict[str, Dict[int, int]] = {}
         self._pool_buffers: Dict[str, PoolBuffer] = {}
         self._views: Dict[str, np.ndarray] = {}
         self._col_index: Dict[str, Dict[str, int]] = {}
@@ -43,6 +45,17 @@ class ZeroCopyBridge:
         self._aligned_info_ts_cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
         self._informative_gc_last_ts: float = 0.0
         self._informative_gc_interval_sec: int = 900
+        system_cfg = getattr(getattr(strategy, "cfg", None), "system", None)
+        self._informative_gc_mem_pct = float(
+            getattr(system_cfg, "informative_gc_mem_pct", 0.85) or 0.0
+        ) if system_cfg else 0.85
+        self._informative_gc_force_pct = float(
+            getattr(system_cfg, "informative_gc_force_pct", 0.92) or 0.0
+        ) if system_cfg else 0.92
+        if self._informative_gc_mem_pct > 1.0:
+            self._informative_gc_mem_pct /= 100.0
+        if self._informative_gc_force_pct > 1.0:
+            self._informative_gc_force_pct /= 100.0
 
     def align_informative(self, df: pd.DataFrame, pair: str) -> Dict[str, pd.DataFrame]:
         out: Dict[str, pd.DataFrame] = {}
@@ -148,7 +161,6 @@ class ZeroCopyBridge:
         if df is None or df.empty:
             self._frames.pop(pair, None)
             self._times.pop(pair, None)
-            self._row_map.pop(pair, None)
             self._pool_buffers.pop(pair, None)
             self._views.pop(pair, None)
             self._col_index.pop(pair, None)
@@ -161,13 +173,7 @@ class ZeroCopyBridge:
         time_series = df["date"] if "date" in df.columns else df.index
         ts = pd.to_datetime(time_series, errors="coerce")
         ts_int = ts.astype("int64", copy=False)
-        self._times[pair] = np.asarray(ts_int)
-        row_map: Dict[int, int] = {}
-        for idx, ts_val in enumerate(self._times[pair]):
-            if pd.isna(ts_val):
-                continue
-            row_map[int(ts_val)] = idx
-        self._row_map[pair] = row_map
+        self._times[pair] = np.asarray(ts_int, dtype="int64")
         self._views[pair] = df.to_numpy(copy=False)
         col_names = tuple(df.columns)
         if col_names != self._col_names.get(pair):
@@ -259,7 +265,6 @@ class ZeroCopyBridge:
         for pair in stale_pairs:
             self._frames.pop(pair, None)
             self._times.pop(pair, None)
-            self._row_map.pop(pair, None)
             self._pool_buffers.pop(pair, None)
             self._views.pop(pair, None)
             self._col_index.pop(pair, None)
@@ -292,9 +297,85 @@ class ZeroCopyBridge:
                 if not pair_cache:
                     self._informative_cache.pop(stale_pair, None)
 
+    def _force_gc_informative_cache(self) -> None:
+        self._informative_cache.clear()
+        self._informative_last.clear()
+        self._informative_cache_order.clear()
+        self._aligned_info_cache.clear()
+        self._aligned_base_ts_cache.clear()
+        self._aligned_info_ts_cache.clear()
+
+    def _memory_pressure_ratio(self) -> Optional[float]:
+        try:
+            system = platform.system().lower()
+        except Exception:
+            system = ""
+        if system == "windows":
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            try:
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) == 0:
+                    return None
+            except Exception:
+                return None
+            return max(0.0, min(1.0, float(status.dwMemoryLoad) / 100.0))
+
+        meminfo = "/proc/meminfo"
+        if os.path.isfile(meminfo):
+            total_kb = None
+            avail_kb = None
+            try:
+                with open(meminfo, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.startswith("MemTotal:"):
+                            total_kb = float(line.split()[1])
+                        elif line.startswith("MemAvailable:"):
+                            avail_kb = float(line.split()[1])
+                        if total_kb is not None and avail_kb is not None:
+                            break
+            except Exception:
+                return None
+            if total_kb and avail_kb is not None and total_kb > 0:
+                used = max(0.0, total_kb - avail_kb)
+                return max(0.0, min(1.0, used / total_kb))
+        return None
+
     def maybe_gc_informative_cache(self, current_whitelist) -> None:
-        interval = self._informative_gc_interval_sec
         now_ts = time.time()
+        mem_ratio = self._memory_pressure_ratio()
+        if (
+            mem_ratio is not None
+            and self._informative_gc_force_pct > 0
+            and mem_ratio >= self._informative_gc_force_pct
+        ):
+            self._force_gc_informative_cache()
+            self.gc_pair_views(current_whitelist)
+            self._informative_gc_last_ts = now_ts
+            return
+        if (
+            mem_ratio is not None
+            and self._informative_gc_mem_pct > 0
+            and mem_ratio >= self._informative_gc_mem_pct
+        ):
+            self.gc_informative_cache(current_whitelist)
+            self.gc_pair_views(current_whitelist)
+            self._informative_gc_last_ts = now_ts
+            return
+
+        interval = self._informative_gc_interval_sec
         if (now_ts - self._informative_gc_last_ts) < interval:
             return
         try:
@@ -304,14 +385,15 @@ class ZeroCopyBridge:
             self._informative_gc_last_ts = now_ts
 
     def _row_from_time(self, pair: str, current_time) -> Optional[int]:
-        row_map = self._row_map.get(pair)
-        if not row_map:
+        times = self._times.get(pair)
+        if times is None or len(times) == 0:
             return None
         try:
-            target = pd.Timestamp(current_time).value
+            target = int(pd.Timestamp(current_time).value)
         except Exception:
             return None
-        row = row_map.get(int(target))
+        idx = int(np.searchsorted(times, target))
+        row = idx if idx < len(times) and times[idx] == target else None
         if row is None:
             tracker = getattr(self._strategy, "rejections", None)
             if tracker is not None:

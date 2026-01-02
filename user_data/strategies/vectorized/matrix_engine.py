@@ -110,24 +110,6 @@ class MatrixEngine:
             except Exception:
                 pass
 
-        last = df.iloc[-1]
-        last_ts = float(pd.to_datetime(last.get("date", pd.Timestamp.utcnow())).timestamp())
-        try:
-            whitelist = self._strategy.dp.current_whitelist()
-        except Exception:
-            whitelist = [pair]
-        try:
-            self._strategy.cycle_agent.maybe_finalize(
-                pair=pair,
-                bar_ts=last_ts,
-                whitelist=whitelist,
-                timeframe_sec=self._strategy._tf_sec,
-                eq_provider=self._strategy.eq_provider,
-            )
-        except Exception:
-            pass
-        self._bridge.maybe_gc_informative_cache(whitelist)
-
         aligned_info = {} if use_vector_prefilter else self._bridge.align_informative(df, pair)
 
         pst_snapshot = self._strategy.state.get_pair_state(pair)
@@ -461,58 +443,65 @@ class MatrixEngine:
         idx = self._pool_schema.index
         slots = min(self._strategy._candidate_pool_limit, arrays.shape[1])
         row = arrays[row_idx]
-        combined: list[dict[str, Any]] = []
-        for slot in range(slots):
-            sig_id = float(row[slot, idx["signal_id"]])
-            if not math.isfinite(sig_id) or sig_id <= 0:
-                continue
-            combined.append(
-                {
-                    "signal_id": int(sig_id),
-                    "raw_score": float(row[slot, idx["raw_score"]]),
-                    "rr_ratio": float(row[slot, idx["rr_ratio"]]),
-                    "expected_edge": float(row[slot, idx["expected_edge"]]),
-                    "sl_pct": float(row[slot, idx["sl_pct"]]),
-                    "tp_pct": float(row[slot, idx["tp_pct"]]),
-                    "plan_atr_pct": float(row[slot, idx["plan_atr_pct"]]),
-                }
-            )
+        field_len = len(self._pool_schema.fields)
+
+        existing = row[:slots]
+        existing_ids = existing[:, idx["signal_id"]].astype(float, copy=False)
+        existing_valid = np.isfinite(existing_ids) & (existing_ids > 0)
+        existing_rows = existing[existing_valid]
+        if existing_rows.size:
+            existing_rows = existing_rows.copy()
+
+        extra_rows = []
         for payload in extra:
             sig_id = self._payload_signal_id(payload, direction)
             if not sig_id:
                 continue
-            combined.append(
-                {
-                    "signal_id": int(sig_id),
-                    "raw_score": float(payload.get("raw_score", 0.0)),
-                    "rr_ratio": float(payload.get("rr_ratio", 0.0)),
-                    "expected_edge": float(payload.get("expected_edge", 0.0)),
-                    "sl_pct": float(payload.get("sl_pct", 0.0)),
-                    "tp_pct": float(payload.get("tp_pct", 0.0)),
-                    "plan_atr_pct": payload.get("plan_atr_pct"),
-                }
-            )
-        combined.sort(
-            key=lambda p: (p.get("expected_edge", 0.0), p.get("raw_score", 0.0)),
-            reverse=True,
-        )
-        row[:, :] = np.nan
-        for slot, item in enumerate(combined[:slots]):
-            row[slot, idx["signal_id"]] = float(item["signal_id"])
-            row[slot, idx["raw_score"]] = float(item["raw_score"])
-            row[slot, idx["rr_ratio"]] = float(item["rr_ratio"])
-            row[slot, idx["expected_edge"]] = float(item["expected_edge"])
-            row[slot, idx["sl_pct"]] = float(item["sl_pct"])
-            row[slot, idx["tp_pct"]] = float(item["tp_pct"])
-            atr_val = item.get("plan_atr_pct")
-            if atr_val is None:
-                row[slot, idx["plan_atr_pct"]] = np.nan
-            else:
+            entry = np.full(field_len, np.nan, dtype=float)
+            entry[idx["signal_id"]] = float(sig_id)
+            entry[idx["raw_score"]] = float(payload.get("raw_score", 0.0))
+            entry[idx["rr_ratio"]] = float(payload.get("rr_ratio", 0.0))
+            entry[idx["expected_edge"]] = float(payload.get("expected_edge", 0.0))
+            entry[idx["sl_pct"]] = float(payload.get("sl_pct", 0.0))
+            entry[idx["tp_pct"]] = float(payload.get("tp_pct", 0.0))
+            atr_val = payload.get("plan_atr_pct")
+            if atr_val is not None:
                 try:
                     atr_float = float(atr_val)
                 except Exception:
                     atr_float = float("nan")
-                row[slot, idx["plan_atr_pct"]] = atr_float if math.isfinite(atr_float) else np.nan
+                entry[idx["plan_atr_pct"]] = atr_float if math.isfinite(atr_float) else np.nan
+            extra_rows.append(entry)
+
+        if existing_rows.size == 0 and not extra_rows:
+            row[:, :] = np.nan
+            return
+
+        if extra_rows:
+            extra_arr = np.asarray(extra_rows, dtype=float)
+            if existing_rows.size == 0:
+                combined = extra_arr
+            else:
+                combined = np.vstack([existing_rows, extra_arr])
+        else:
+            combined = existing_rows
+
+        sig_ids = combined[:, idx["signal_id"]]
+        valid = np.isfinite(sig_ids) & (sig_ids > 0)
+        if not valid.any():
+            row[:, :] = np.nan
+            return
+
+        edges = combined[:, idx["expected_edge"]]
+        raws = combined[:, idx["raw_score"]]
+        edges = np.where(np.isfinite(edges), edges, -np.inf)
+        raws = np.where(np.isfinite(raws), raws, -np.inf)
+        valid_idx = np.where(valid)[0]
+        order = valid_idx[np.lexsort((raws[valid_idx], edges[valid_idx]))][::-1]
+        top = order[:slots]
+
+        row[:, :] = np.nan
+        row[: len(top)] = combined[top]
 
     def _ensure_pool_columns(self, df: pd.DataFrame) -> None:
         for name in (

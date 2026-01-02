@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from abc import ABC, abstractmethod
 from typing import Optional
 
 try:
@@ -18,27 +20,54 @@ except Exception:  # pragma: no cover - fallback when freqtrade is absent
         ...
 
 
-class StateStore:
-    """封装状态序列化与反序列化逻辑的持久化工具。"""
+class BaseStateStore(ABC):
+    """Abstract state store contract."""
+
+    @abstractmethod
+    def save(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_if_exists(self) -> None:
+        raise NotImplementedError
+
+
+class JsonStateStore(BaseStateStore):
+    """Serialize GlobalState + EquityProvider + ReservationAgent snapshots to disk."""
 
     def __init__(self, filepath: str, state, eq_provider, reservation_agent) -> None:
-        """初始化 StateStore。
-
-        Args:
-            filepath: 状态文件的绝对路径。
-            state: GlobalState 实例。
-            eq_provider: EquityProvider 实例。
-            reservation_agent: ReservationAgent 实例。
-        """
-
         self.filepath = filepath
         self.state = state
         self.eq = eq_provider
         self.reservation = reservation_agent
+        self._lock_path = f"{self.filepath}.lock"
+
+    def _acquire_lock(self, timeout: float = 0.5) -> Optional[int]:
+        start = time.monotonic()
+        while True:
+            try:
+                return os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            except FileExistsError:
+                if (time.monotonic() - start) >= timeout:
+                    return None
+                time.sleep(0.01)
+
+    def _release_lock(self, fd: Optional[int]) -> None:
+        if fd is None:
+            return
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        try:
+            os.remove(self._lock_path)
+        except Exception:
+            pass
 
     def save(self) -> None:
-        """将当前状态写入磁盘，采用临时文件替换确保原子性。"""
+        """Write state atomically with a best-effort lock."""
 
+        lock_fd = self._acquire_lock()
         try:
             snapshot = {
                 "global_state": self.state.to_snapshot(),
@@ -51,9 +80,11 @@ class StateStore:
             os.replace(tmp, self.filepath)
         except Exception as exc:
             print(f"[CRITICAL] State save failed: {exc}")
+        finally:
+            self._release_lock(lock_fd)
 
     def load_if_exists(self) -> None:
-        """若状态文件存在则恢复内存状态，否则静默返回。"""
+        """Restore state from disk if present."""
 
         if not os.path.isfile(self.filepath):
             return
@@ -74,3 +105,14 @@ class StateStore:
             raise OperationalException(
                 "State file corrupted or unreadable. Manual intervention required to prevent debt reset."
             ) from exc
+
+
+class NoopStateStore(BaseStateStore):
+    def save(self) -> None:  # pragma: no cover - trivial
+        return
+
+    def load_if_exists(self) -> None:  # pragma: no cover - trivial
+        return
+
+
+StateStore = JsonStateStore

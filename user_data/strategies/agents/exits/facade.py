@@ -4,11 +4,54 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
+import math
 
 from ...config.v30_config import V30Config
 from ..portfolio.tier import TierManager
 from .profiles import ProfilePlan, atr_pct_from_dp, atr_pct_from_rows, compute_plan_from_atr
-from .router import EXIT_ROUTER
+from .router import EXIT_ROUTER, ImmediateContext
+
+
+class ExitTags:
+    """Static string constants for exit reasons / tags."""
+
+    CLOSE_FILLED = "close_filled"
+    ORDER_CANCELLED = "order_cancelled"
+    ORDER_REJECTED = "order_rejected"
+    TP_HIT = "tp_hit"
+    ICU_TIMEOUT = "icu_timeout"
+    RISK_OFF = "risk_off"
+    BREAKEVEN = "breakeven_lock"
+    ATR_TRAIL = "atr_trail_follow"
+    HARD_STOP = "hard_stop"
+    HARD_TP = "hard_takeprofit"
+    FLIP_PREFIX = "flip_"
+    VECTOR_TAGS = {
+        TP_HIT,
+        ICU_TIMEOUT,
+        RISK_OFF,
+        BREAKEVEN,
+        ATR_TRAIL,
+        HARD_STOP,
+        HARD_TP,
+    }
+
+    @staticmethod
+    def flip(direction: str | None) -> str:
+        """Return flip tag for the provided direction (long/short)."""
+
+        token = (direction or "").strip().lower()
+        if token not in {"long", "short"}:
+            token = "unknown"
+        return f"{ExitTags.FLIP_PREFIX}{token}"
+
+    @classmethod
+    def is_vector_tag(cls, tag: str | None) -> bool:
+        """Return True if the tag belongs to vector exit instrumentation."""
+
+        if not tag:
+            return False
+        return tag in cls.VECTOR_TAGS or tag.startswith(cls.FLIP_PREFIX)
 
 
 class ExitFacade:
@@ -31,7 +74,14 @@ class ExitFacade:
 
     # ---------- ATR helpers ----------
     def atr_pct(self, pair: str, timeframe: Optional[str], current_time) -> Optional[float]:
-        """Return ATR% for the requested timeframe preferring DP data."""
+        """Backward-compatible ATR% lookup (delegates to authoritative source)."""
+
+        return self.get_authoritative_atr(pair, timeframe, current_time)
+
+    def get_authoritative_atr(
+        self, pair: str, timeframe: Optional[str], current_time
+    ) -> Optional[float]:
+        """Return the canonical ATR% for sizing/exit decisions."""
 
         tf = timeframe or getattr(getattr(self.cfg, "system", None), "timeframe", getattr(self.cfg, "timeframe", None))
         if not tf:
@@ -48,6 +98,14 @@ class ExitFacade:
                 value = strategy.get_informative_value(pair, tf, "atr_pct", None)
                 if value and value > 0:
                     return float(value)
+            except Exception:
+                pass
+        if strategy and getattr(strategy, "state", None):
+            try:
+                pst = strategy.state.get_pair_state(pair)
+                val = float(getattr(pst, "last_atr_pct", 0.0))
+                if val > 0 and math.isfinite(val):
+                    return val
             except Exception:
                 pass
         return dp_value
@@ -160,6 +218,66 @@ class ExitFacade:
                     pass
         return result
 
+    # ---------- Immediate exits ----------
+    def decide_exit(
+        self,
+        pair: str,
+        trade,
+        current_time,
+        current_rate: float,
+        current_profit_pct: Optional[float],
+        pair_state=None,
+    ) -> Optional[str]:
+        trade_id = str(getattr(trade, "trade_id", getattr(trade, "id", "NA")))
+        profit = float(current_profit_pct or 0.0) if current_profit_pct is not None else 0.0
+
+        if self.router is not None and ImmediateContext is not None:
+            try:
+                ctx = ImmediateContext(
+                    pair=pair,
+                    trade=trade,
+                    now=current_time,
+                    profit=profit,
+                    dp=self.dp,
+                    cfg=self.cfg,
+                    state=getattr(self.strategy, "state", None),
+                    strategy=self.strategy,
+                )
+                reason = self.router.close_now_reason(ctx)
+                if reason:
+                    return reason
+            except Exception:
+                pass
+
+        state = getattr(self.strategy, "state", None)
+        pst = pair_state or (state.get_pair_state(pair) if state else None)
+        meta = None
+        if pst and getattr(pst, "active_trades", None):
+            meta = pst.active_trades.get(trade_id)
+
+        if meta:
+            if (
+                getattr(meta, "tp_pct", None)
+                and current_profit_pct is not None
+                and current_profit_pct >= float(meta.tp_pct)
+            ):
+                return ExitTags.TP_HIT
+            if meta.icu_bars_left is not None and meta.icu_bars_left <= 0:
+                return ExitTags.ICU_TIMEOUT
+            if (
+                pst
+                and pst.last_dir
+                and pst.last_dir != meta.direction
+                and getattr(pst, "last_score", 0.0) > 0.0
+            ):
+                return ExitTags.flip(pst.last_dir)
+
+        if current_profit_pct is not None and current_profit_pct < 0 and state is not None:
+            if float(getattr(state, "debt_pool", 0.0)) > 0.0:
+                return ExitTags.RISK_OFF
+
+        return self._atr_entry_exit_reason(pair, trade, current_time, current_rate, pair_state=pst)
+
     # ---------- Internals ----------
     def _plan_from_profile(
         self,
@@ -182,6 +300,53 @@ class ExitFacade:
         if atr_pct is None or atr_pct <= 0:
             return None
         return compute_plan_from_atr(profile_name, profile, atr_pct)
+
+    def _atr_entry_exit_reason(
+        self,
+        pair: str,
+        trade,
+        current_time,
+        current_rate: float,
+        pair_state=None,
+    ) -> Optional[str]:
+        if trade is None:
+            return None
+        try:
+            _, _, plan = self.resolve_trade_plan(pair, trade, current_time, pair_state=pair_state)
+        except Exception:
+            plan = None
+        if not plan:
+            return None
+        sl_pct = float(getattr(plan, "sl_pct", 0.0) or 0.0)
+        tp_pct = float(getattr(plan, "tp_pct", 0.0) or 0.0)
+        if sl_pct <= 0 and tp_pct <= 0:
+            return None
+
+        entry = float(getattr(trade, "open_rate", 0.0) or 0.0)
+        if entry <= 0:
+            return None
+        price = float(current_rate or entry)
+        is_short = bool(getattr(trade, "is_short", False))
+
+        if not is_short:
+            if sl_pct > 0:
+                sl_price = entry * (1.0 - sl_pct)
+                if price <= sl_price:
+                    return "atr_entry_sl"
+            if tp_pct > 0:
+                tp_price = entry * (1.0 + tp_pct)
+                if price >= tp_price:
+                    return "atr_entry_tp"
+        else:
+            if sl_pct > 0:
+                sl_price = entry * (1.0 + sl_pct)
+                if price >= sl_price:
+                    return "atr_entry_sl"
+            if tp_pct > 0:
+                tp_price = entry * (1.0 - tp_pct)
+                if price <= tp_price:
+                    return "atr_entry_tp"
+        return None
 
     def _resolve_profile(
         self, pair: str, trade, pair_state=None
@@ -290,4 +455,4 @@ class ExitFacade:
             return None
 
 
-__all__ = ["ExitFacade"]
+__all__ = ["ExitFacade", "ExitTags"]
